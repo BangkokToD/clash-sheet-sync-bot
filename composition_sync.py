@@ -652,7 +652,7 @@ def _build_composition_format_requests(
         _repeat_cell_request(
             _grid_range_from_a1(sheet_id=sheet_id, range_a1=managed_range_a1),
             _base_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
         ),
     ]
 
@@ -689,12 +689,12 @@ def _build_table_format_requests(
         _repeat_cell_request(
             title_range,
             _title_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
         ),
         _repeat_cell_request(
             header_range,
             _header_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
         ),
         _update_borders_request(table_range),
     ]
@@ -710,7 +710,7 @@ def _build_table_format_requests(
             _repeat_cell_request(
                 data_range,
                 _data_cell_format(),
-                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+                "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
             ),
         )
         requests.extend(
@@ -823,7 +823,6 @@ def _base_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": BLACK_RGB},
                 "bold": False,
             },
-            "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
     }
@@ -843,7 +842,6 @@ def _title_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": WHITE_RGB},
                 "bold": True,
             },
-            "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
     }
@@ -863,7 +861,6 @@ def _header_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": WHITE_RGB},
                 "bold": True,
             },
-            "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
     }
@@ -883,7 +880,6 @@ def _data_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": BLACK_RGB},
                 "bold": False,
             },
-            "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
     }
