@@ -2,3 +2,7 @@
 credentials.json
 sync_settings.json
 *.log
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
