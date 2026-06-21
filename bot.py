@@ -17,6 +17,7 @@ import httpx
 
 from coc_client import ClashApiUnavailableError, ClashClient
 from composition_sync import CompositionDataError, run_composition_sync
+from cwl_sync import CwlDataError, run_cwl_sync
 from config import ConfigError, load_config
 from models import AppConfig, SyncSettings
 from settings_store import SettingsStore, SettingsStoreError
@@ -354,7 +355,7 @@ class BotApp:
             if data == CALLBACK_UPDATE_COMPOSITION:
                 await self._run_composition_sync(callback_query)
             else:
-                await self._run_not_implemented_sync(callback_query, data)
+                await self._run_cwl_sync(callback_query)
         finally:
             self._operation_lock.release()
 
@@ -484,6 +485,97 @@ class BotApp:
                 last_composition_sync_at=now,
                 last_composition_sync_status="error",
                 last_composition_sync_error=status_error,
+            )
+
+        try:
+            self._settings_store.save(settings)
+        except SettingsStoreError:
+            logger.error("settings write failed")
+            result_text = f"{result_text}\n\nСтатус синхронизации не записан."
+
+        await self._edit_or_send_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"{result_text}\n\nВыберите действие.",
+            reply_markup=_main_keyboard(),
+        )
+
+    async def _run_cwl_sync(self, callback_query: JsonObject) -> None:
+        """Запускает реальное обновление листа CWL.
+
+        Args:
+            callback_query: Объект `callback_query` из Telegram update.
+        """
+
+        message = callback_query.get("message")
+        if not isinstance(message, dict):
+            return
+
+        chat_id = _extract_chat_id(message)
+        message_id = message.get("message_id")
+        if chat_id is None or not isinstance(message_id, int):
+            return
+
+        now_dt = datetime.now(ZoneInfo(self._config.timezone)).replace(microsecond=0)
+        now = now_dt.isoformat()
+
+        try:
+            settings = self._settings_store.load()
+        except SettingsStoreError:
+            logger.error("settings read failed")
+            await self._edit_or_send_message(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="Не удалось прочитать статус синхронизации.\n\nВыберите действие.",
+                reply_markup=_main_keyboard(),
+            )
+            return
+
+        logger.info("cwl sync started")
+        status_error: str | None = None
+
+        try:
+            result = await run_cwl_sync(
+                config=self._config,
+                clash_client=self._clash_client,
+                sheets_client=self._sheets_client,
+            )
+        except ClashApiUnavailableError as exc:
+            logger.info("api unavailable: %s", exc)
+            logger.info("cwl sync failed: api unavailable")
+            result_text = "API недоступно."
+            status_error = result_text
+        except CwlDataError as exc:
+            logger.info("cwl sync failed: %s", exc)
+            result_text = f"Обновление CWL отменено.\n\nПричина: {exc}"
+            status_error = str(exc)
+        except (GoogleSheetsAuthError, GoogleSheetsReadError) as exc:
+            logger.error("google sheets read failed: %s", exc)
+            logger.info("cwl sync failed: google sheets read failed")
+            result_text = "Не удалось прочитать Google Sheets."
+            status_error = result_text
+        except GoogleSheetsWriteError as exc:
+            logger.error("google sheets write failed: %s", exc)
+            logger.info("cwl sync failed: google sheets write failed")
+            result_text = "Не удалось записать Google Sheets."
+            status_error = result_text
+        else:
+            logger.info("cwl sync finished")
+            result_text = result.to_telegram_message()
+
+        if status_error is None:
+            settings = replace(
+                settings,
+                last_cwl_sync_at=now,
+                last_cwl_sync_status="success",
+                last_cwl_sync_error=None,
+            )
+        else:
+            settings = replace(
+                settings,
+                last_cwl_sync_at=now,
+                last_cwl_sync_status="error",
+                last_cwl_sync_error=status_error,
             )
 
         try:

@@ -659,8 +659,6 @@ def _build_composition_format_requests(
     for table_spec in table_specs:
         requests.extend(_build_table_format_requests(sheet_id, table_spec))
 
-    requests.extend(_build_auto_resize_requests(sheet_id, table_specs))
-
     return requests
 
 
@@ -691,12 +689,12 @@ def _build_table_format_requests(
         _repeat_cell_request(
             title_range,
             _title_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
         ),
         _repeat_cell_request(
             header_range,
             _header_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
         ),
         _update_borders_request(table_range),
     ]
@@ -723,22 +721,6 @@ def _build_table_format_requests(
             ),
         )
 
-
-    for column_index, column_name in enumerate(table_spec.columns):
-        if column_name in {"№", "Ратуша"}:
-            requests.append(
-                _repeat_cell_request(
-                    _grid_range_for_table_column(
-                        sheet_id=sheet_id,
-                        table_spec=table_spec,
-                        column_index=column_index,
-                        row_offset=1,
-                        rows_count=table_spec.rows_count - 1,
-                    ),
-                    {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
-                    "userEnteredFormat.horizontalAlignment",
-                ),
-            )
 
     return requests
 
@@ -775,48 +757,6 @@ def _build_alternating_row_requests(
                 {"userEnteredFormat": {"backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}}},
                 "userEnteredFormat.backgroundColorStyle",
             ),
-        )
-
-    return requests
-
-
-def _build_auto_resize_requests(
-    sheet_id: int,
-    table_specs: Sequence[CompositionTableSpec],
-) -> list[dict[str, object]]:
-    """Строит requests для автоширины колонок.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        table_specs: Спецификации форматируемых блоков.
-
-    Returns:
-        Список `autoResizeDimensions` requests.
-    """
-
-    requests: list[dict[str, object]] = []
-    seen_ranges: set[tuple[int, int]] = set()
-
-    for table_spec in table_specs:
-        start_column_number, _ = _parse_start_cell(table_spec.start_cell)
-        start_index = start_column_number - 1
-        end_index = start_index + len(table_spec.columns)
-        key = (start_index, end_index)
-        if key in seen_ranges:
-            continue
-
-        seen_ranges.add(key)
-        requests.append(
-            {
-                "autoResizeDimensions": {
-                    "dimensions": {
-                        "sheetId": sheet_id,
-                        "dimension": "COLUMNS",
-                        "startIndex": start_index,
-                        "endIndex": end_index,
-                    },
-                },
-            },
         )
 
     return requests
@@ -883,7 +823,6 @@ def _base_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": BLACK_RGB},
                 "bold": False,
             },
-            "horizontalAlignment": "LEFT",
             "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
@@ -904,7 +843,6 @@ def _title_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": WHITE_RGB},
                 "bold": True,
             },
-            "horizontalAlignment": "LEFT",
             "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
@@ -925,7 +863,6 @@ def _header_cell_format() -> dict[str, object]:
                 "foregroundColorStyle": {"rgbColor": WHITE_RGB},
                 "bold": True,
             },
-            "horizontalAlignment": "LEFT",
             "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP",
         },
