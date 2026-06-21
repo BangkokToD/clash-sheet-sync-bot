@@ -11,7 +11,11 @@ from typing import Any, Final
 from coc_client import ClashClient
 from config import AppConfig
 from models import ClanConfig, normalize_tag
-from sheets_client import CellValue, SheetValues, SheetsClient
+from sheets_client import (
+    CellValue,
+    SheetValues,
+    SheetsClient,
+)
 
 ACTIVE_HEADERS: Final = (
     "№",
@@ -26,6 +30,16 @@ ACTIVE_HEADERS: Final = (
 EXITED_HEADERS: Final = (*ACTIVE_HEADERS, "Дата выхода")
 PLAYER_TAG_RE: Final = re.compile(r"#[0289PYLQGRJCUV]+", re.IGNORECASE)
 A1_CELL_RE: Final = re.compile(r"^\$?([A-Za-z]+)\$?([1-9][0-9]*)$")
+A1_RANGE_RE: Final = re.compile(
+    r"^\$?([A-Za-z]+)\$?([1-9][0-9]*):\$?([A-Za-z]+)\$?([1-9][0-9]*)$",
+)
+
+GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
+DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
+WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
+BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
+LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
+BORDER_RGB: Final = {"red": 0.70, "green": 0.76, "blue": 0.73}
 
 
 class CompositionSyncError(RuntimeError):
@@ -245,7 +259,7 @@ async def run_composition_sync(
     )
     old_composition = parse_old_composition(
         old_values,
-        known_clan_tags={clan.tag for clan in config.clans},
+        clans=config.clans,
     )
 
     active_rows_by_clan, exited_rows, changes = _build_new_composition(
@@ -255,8 +269,12 @@ async def run_composition_sync(
         detected_at=detected_at,
     )
 
-    active_matrix = _build_active_matrix(config.clans, active_rows_by_clan)
-    exited_matrix = _build_exited_matrix(exited_rows)
+    active_matrix, active_tables = _build_active_matrix_and_tables(
+        config, active_rows_by_clan,
+    )
+    exited_matrix, exited_table = _build_exited_matrix_and_table(config, exited_rows)
+    table_specs = [*active_tables, exited_table]
+    sheet_metadata = await sheets_client.get_sheet_metadata(config.composition_sheet_name)
 
     await sheets_client.rewrite_managed_range(
         sheet_name=config.composition_sheet_name,
@@ -282,6 +300,12 @@ async def run_composition_sync(
             ),
         ],
     )
+    await _format_composition_tables(
+        sheets_client=sheets_client,
+        sheet_id=sheet_metadata.sheet_id,
+        managed_range_a1=config.composition_managed_range,
+        table_specs=table_specs,
+    )
 
     return CompositionSyncResult(
         clan_counts=tuple(
@@ -296,13 +320,13 @@ async def run_composition_sync(
 def parse_old_composition(
     values: Sequence[Sequence[CellValue]],
     *,
-    known_clan_tags: set[str],
+    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
 ) -> ParsedComposition:
     """Парсит старый лист состава без привязки к номерам строк.
 
     Args:
         values: Значения из `COMPOSITION_MANAGED_RANGE`.
-        known_clan_tags: Теги семейных кланов из конфигурации.
+        clans: Три семейных клана из конфигурации.
 
     Returns:
         Старое состояние состава.
@@ -312,7 +336,8 @@ def parse_old_composition(
     """
 
     rows = [_normalize_row(row) for row in values]
-    headers = _find_table_headers(rows)
+    headers = _find_table_headers(rows, clans)
+    known_clan_tags = {clan.tag for clan in clans}
     players_by_tag: dict[str, OldCompositionPlayer] = {}
 
     for header in headers:
@@ -478,42 +503,88 @@ def _build_new_composition(
     )
 
 
-def _build_active_matrix(
-    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
+@dataclass(frozen=True, slots=True)
+class CompositionTableSpec:
+    """Описание форматируемого блока состава.
+
+    Attributes:
+        name: Видимое название блока.
+        start_cell: Левая верхняя ячейка таблицы.
+        rows_count: Количество строк блока вместе с названием и заголовками.
+        columns: Заголовки колонок таблицы.
+    """
+
+    name: str
+    start_cell: str
+    rows_count: int
+    columns: tuple[str, ...]
+
+
+def _build_active_matrix_and_tables(
+    config: AppConfig,
     rows_by_clan: dict[str, list[CompositionPlayerRow]],
-) -> list[list[CellValue]]:
-    """Строит матрицу активных таблиц состава.
+) -> tuple[list[list[CellValue]], list[CompositionTableSpec]]:
+    """Строит матрицу и спецификации активных таблиц состава.
 
     Args:
-        clans: Три семейных клана.
+        config: Конфигурация приложения.
         rows_by_clan: Активные строки по тегу клана.
 
     Returns:
-        Матрица значений для левой зоны листа.
+        Матрица значений и список спецификаций форматирования.
     """
 
     matrix: list[list[CellValue]] = []
-    for clan_index, clan in enumerate(clans):
+    table_specs: list[CompositionTableSpec] = []
+    row_offset = 0
+
+    for clan_index, clan in enumerate(config.clans):
         if clan_index > 0:
             matrix.append(_empty_row(len(ACTIVE_HEADERS)))
+            row_offset += 1
 
-        matrix.append(_title_row(f"{clan.name} | {clan.tag}", len(ACTIVE_HEADERS)))
-        matrix.append(list(ACTIVE_HEADERS))
+        table_start_cell = _offset_cell(
+            config.composition_active_start_cell,
+            row_offset=row_offset,
+            column_offset=0,
+        )
+        table_rows: list[list[CellValue]] = [
+            _title_row(clan.name, len(ACTIVE_HEADERS)),
+            list(ACTIVE_HEADERS),
+        ]
 
         for row_number, row in enumerate(rows_by_clan.get(clan.tag, []), start=1):
-            matrix.append(_active_player_to_row(row_number, row))
+            table_rows.append(_active_player_to_row(row_number, row))
 
-    return matrix
+        if len(table_rows) == 2:
+            table_rows.append(_empty_row(len(ACTIVE_HEADERS)))
+
+        matrix.extend(table_rows)
+        table_specs.append(
+            CompositionTableSpec(
+                name=clan.name,
+                start_cell=table_start_cell,
+                rows_count=len(table_rows),
+                columns=ACTIVE_HEADERS,
+            ),
+        )
+        row_offset += len(table_rows)
+
+    return matrix, table_specs
 
 
-def _build_exited_matrix(rows: Sequence[CompositionPlayerRow]) -> list[list[CellValue]]:
-    """Строит матрицу таблицы вышедших.
+def _build_exited_matrix_and_table(
+    config: AppConfig,
+    rows: Sequence[CompositionPlayerRow],
+) -> tuple[list[list[CellValue]], CompositionTableSpec]:
+    """Строит матрицу и спецификацию таблицы вышедших.
 
     Args:
+        config: Конфигурация приложения.
         rows: Строки вышедших игроков.
 
     Returns:
-        Матрица значений для правой зоны листа.
+        Матрица значений и спецификация форматирования.
     """
 
     matrix: list[list[CellValue]] = [
@@ -524,7 +595,361 @@ def _build_exited_matrix(rows: Sequence[CompositionPlayerRow]) -> list[list[Cell
     for row_number, row in enumerate(rows, start=1):
         matrix.append(_exited_player_to_row(row_number, row))
 
-    return matrix
+    if len(matrix) == 2:
+        matrix.append(_empty_row(len(EXITED_HEADERS)))
+
+    return matrix, CompositionTableSpec(
+        name="Вышедшие",
+        start_cell=config.composition_exited_start_cell,
+        rows_count=len(matrix),
+        columns=EXITED_HEADERS,
+    )
+
+
+async def _format_composition_tables(
+    *,
+    sheets_client: SheetsClient,
+    sheet_id: int,
+    managed_range_a1: str,
+    table_specs: Sequence[CompositionTableSpec],
+) -> None:
+    """Форматирует блоки состава обычными Google Sheets requests.
+
+    Args:
+        sheets_client: Клиент Google Sheets API.
+        sheet_id: Числовой ID листа Google Sheets.
+        managed_range_a1: Управляемая область листа состава.
+        table_specs: Спецификации форматируемых блоков.
+    """
+
+    requests = _build_composition_format_requests(
+        sheet_id=sheet_id,
+        managed_range_a1=managed_range_a1,
+        table_specs=table_specs,
+    )
+    await sheets_client.batch_update_spreadsheet(requests)
+
+
+def _build_composition_format_requests(
+    *,
+    sheet_id: int,
+    managed_range_a1: str,
+    table_specs: Sequence[CompositionTableSpec],
+) -> list[dict[str, object]]:
+    """Строит requests для оформления листа состава.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        managed_range_a1: Управляемая область листа состава.
+        table_specs: Спецификации форматируемых блоков.
+
+
+    Returns:
+        Список requests для `spreadsheets.batchUpdate`.
+    """
+
+    requests: list[dict[str, object]] = [
+        _repeat_cell_request(
+            _grid_range_from_a1(sheet_id=sheet_id, range_a1=managed_range_a1),
+            _base_cell_format(),
+            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+        ),
+    ]
+
+    for table_spec in table_specs:
+        requests.extend(_build_table_format_requests(sheet_id, table_spec))
+
+    requests.extend(_build_auto_resize_requests(sheet_id, table_specs))
+
+    return requests
+
+
+def _build_table_format_requests(
+    sheet_id: int,
+    table_spec: CompositionTableSpec,
+) -> list[dict[str, object]]:
+    """Строит requests оформления одного блока состава.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        table_spec: Спецификация форматируемого блока.
+
+    Returns:
+        Список requests оформления.
+    """
+
+    title_range = _grid_range_for_table_row(sheet_id, table_spec, row_offset=0)
+    header_range = _grid_range_for_table_row(sheet_id, table_spec, row_offset=1)
+    table_range = _grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=table_spec.start_cell,
+        rows_count=table_spec.rows_count,
+        columns_count=len(table_spec.columns),
+    )
+
+    requests: list[dict[str, object]] = [
+        _repeat_cell_request(
+            title_range,
+            _title_cell_format(),
+            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+        ),
+        _repeat_cell_request(
+            header_range,
+            _header_cell_format(),
+            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+        ),
+        _update_borders_request(table_range),
+    ]
+    data_rows_count = max(table_spec.rows_count - 2, 0)
+    if data_rows_count > 0:
+        data_range = _grid_range_from_start_cell(
+            sheet_id=sheet_id,
+            start_cell=_offset_cell(table_spec.start_cell, row_offset=2, column_offset=0),
+            rows_count=data_rows_count,
+            columns_count=len(table_spec.columns),
+        )
+        requests.append(
+            _repeat_cell_request(
+                data_range,
+                _data_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        requests.extend(
+            _build_alternating_row_requests(
+                sheet_id=sheet_id,
+                table_spec=table_spec,
+                data_rows_count=data_rows_count,
+            ),
+        )
+
+
+    for column_index, column_name in enumerate(table_spec.columns):
+        if column_name in {"№", "Ратуша"}:
+            requests.append(
+                _repeat_cell_request(
+                    _grid_range_for_table_column(
+                        sheet_id=sheet_id,
+                        table_spec=table_spec,
+                        column_index=column_index,
+                        row_offset=1,
+                        rows_count=table_spec.rows_count - 1,
+                    ),
+                    {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+                    "userEnteredFormat.horizontalAlignment",
+                ),
+            )
+
+    return requests
+
+
+def _build_alternating_row_requests(
+    *,
+    sheet_id: int,
+    table_spec: CompositionTableSpec,
+    data_rows_count: int,
+) -> list[dict[str, object]]:
+    """Строит requests для чередования строк таблицы.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        table_spec: Спецификация таблицы.
+        data_rows_count: Количество строк данных без названия и заголовка.
+
+    Returns:
+        Список `repeatCell` requests для нечётных строк данных.
+    """
+
+    requests: list[dict[str, object]] = []
+    for data_row_offset in range(data_rows_count):
+        if data_row_offset % 2 == 0:
+            continue
+
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_for_table_row(
+                    sheet_id=sheet_id,
+                    table_spec=table_spec,
+                    row_offset=2 + data_row_offset,
+                ),
+                {"userEnteredFormat": {"backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}}},
+                "userEnteredFormat.backgroundColorStyle",
+            ),
+        )
+
+    return requests
+
+
+def _build_auto_resize_requests(
+    sheet_id: int,
+    table_specs: Sequence[CompositionTableSpec],
+) -> list[dict[str, object]]:
+    """Строит requests для автоширины колонок.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        table_specs: Спецификации форматируемых блоков.
+
+    Returns:
+        Список `autoResizeDimensions` requests.
+    """
+
+    requests: list[dict[str, object]] = []
+    seen_ranges: set[tuple[int, int]] = set()
+
+    for table_spec in table_specs:
+        start_column_number, _ = _parse_start_cell(table_spec.start_cell)
+        start_index = start_column_number - 1
+        end_index = start_index + len(table_spec.columns)
+        key = (start_index, end_index)
+        if key in seen_ranges:
+            continue
+
+        seen_ranges.add(key)
+        requests.append(
+            {
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": sheet_id,
+                        "dimension": "COLUMNS",
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    },
+                },
+            },
+        )
+
+    return requests
+
+
+def _repeat_cell_request(
+    grid_range: dict[str, int],
+    cell: dict[str, object],
+    fields: str,
+) -> dict[str, object]:
+    """Создаёт `repeatCell` request.
+
+    Args:
+        grid_range: GridRange.
+        cell: Настройки ячейки.
+        fields: Field mask.
+
+    Returns:
+        JSON-совместимый request.
+    """
+
+    return {"repeatCell": {"range": grid_range, "cell": cell, "fields": fields}}
+
+
+def _update_borders_request(grid_range: dict[str, int]) -> dict[str, object]:
+    """Создаёт request для границ таблицы.
+
+    Args:
+        grid_range: GridRange таблицы.
+
+    Returns:
+        JSON-совместимый request `updateBorders`.
+    """
+
+    border = {
+        "style": "SOLID",
+        "width": 1,
+        "colorStyle": {"rgbColor": BORDER_RGB},
+    }
+    return {
+        "updateBorders": {
+            "range": grid_range,
+            "top": border,
+            "bottom": border,
+            "left": border,
+            "right": border,
+            "innerHorizontal": border,
+            "innerVertical": border,
+        },
+    }
+
+
+def _base_cell_format() -> dict[str, object]:
+    """Возвращает базовое оформление управляемой области.
+
+    Returns:
+        JSON-совместимый формат ячейки.
+    """
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "horizontalAlignment": "LEFT",
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _title_cell_format() -> dict[str, object]:
+    """Возвращает оформление строки названия таблицы.
+
+    Returns:
+        JSON-совместимый формат ячейки.
+    """
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": DARK_GREEN_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
+                "bold": True,
+            },
+            "horizontalAlignment": "LEFT",
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _header_cell_format() -> dict[str, object]:
+    """Возвращает оформление строки заголовков.
+
+    Returns:
+        JSON-совместимый формат ячейки.
+    """
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": GREEN_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
+                "bold": True,
+            },
+            "horizontalAlignment": "LEFT",
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _data_cell_format() -> dict[str, object]:
+    """Возвращает оформление строк данных.
+
+    Returns:
+        JSON-совместимый формат ячейки.
+    """
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
 
 
 def _active_player_to_row(row_number: int, row: CompositionPlayerRow) -> list[CellValue]:
@@ -574,11 +999,15 @@ def _exited_player_to_row(row_number: int, row: CompositionPlayerRow) -> list[Ce
     ]
 
 
-def _find_table_headers(rows: Sequence[list[str]]) -> list[TableHeader]:
+def _find_table_headers(
+    rows: Sequence[list[str]],
+    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
+) -> list[TableHeader]:
     """Ищет заголовки активных таблиц и таблицы вышедших.
 
     Args:
         rows: Нормализованные строки листа.
+        clans: Три семейных клана из конфигурации.
 
     Returns:
         Найденные таблицы состава.
@@ -610,7 +1039,7 @@ def _find_table_headers(rows: Sequence[list[str]]) -> list[TableHeader]:
                     ),
                 )
 
-    return sorted(headers, key=lambda header: (header.column_index, header.row_index))
+    return _assign_active_clan_tags(headers, rows, clans)
 
 
 def _matches_header(
@@ -637,6 +1066,53 @@ def _matches_header(
         for offset in range(len(expected_headers))
     )
     return actual_headers == tuple(expected_headers)
+
+
+def _assign_active_clan_tags(
+    headers: Sequence[TableHeader],
+    rows: Sequence[list[str]],
+    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
+) -> list[TableHeader]:
+    """Назначает активным таблицам теги кланов.
+
+    Старый формат листа содержал `Clan | #TAG` над таблицей. Новый формат
+    использует Google Sheets Table name, который не попадает в values API.
+    Поэтому для новых таблиц тег клана определяется по порядку активных таблиц.
+
+    Args:
+        headers: Найденные заголовки таблиц.
+        rows: Строки листа.
+        clans: Три семейных клана из конфигурации.
+
+    Returns:
+        Заголовки с заполненным `clan_tag` у активных таблиц.
+    """
+
+    sorted_headers = sorted(headers, key=lambda header: (header.column_index, header.row_index))
+    active_headers = [header for header in sorted_headers if not header.is_exited]
+    fallback_tags = {
+        id(header): clans[index].tag
+        for index, header in enumerate(active_headers)
+        if index < len(clans)
+    }
+
+    assigned_headers: list[TableHeader] = []
+    for header in sorted_headers:
+        if header.is_exited:
+            assigned_headers.append(header)
+            continue
+
+        detected_tag = _find_clan_tag_above(rows, header.row_index, header.column_index)
+        assigned_headers.append(
+            TableHeader(
+                row_index=header.row_index,
+                column_index=header.column_index,
+                is_exited=header.is_exited,
+                width=header.width,
+                clan_tag=detected_tag or fallback_tags.get(id(header)),
+            ),
+        )
+    return assigned_headers
 
 
 def _find_clan_tag_above(
@@ -918,6 +1394,166 @@ def _range_from_start_cell(start_cell: str, rows_count: int, columns_count: int)
     return f"{start_column.upper()}{start_row}:{end_column}{end_row}"
 
 
+def _grid_range_from_start_cell(
+    *,
+    sheet_id: int,
+    start_cell: str,
+    rows_count: int,
+    columns_count: int,
+) -> dict[str, int]:
+    """Строит GridRange по стартовой ячейке и размеру.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        start_cell: Стартовая ячейка, например `A1`.
+        rows_count: Количество строк.
+        columns_count: Количество колонок.
+
+    Returns:
+        JSON-совместимый GridRange.
+    """
+
+    start_column_number, start_row = _parse_start_cell(start_cell)
+    return {
+        "sheetId": sheet_id,
+        "startRowIndex": start_row - 1,
+        "endRowIndex": start_row - 1 + rows_count,
+        "startColumnIndex": start_column_number - 1,
+        "endColumnIndex": start_column_number - 1 + columns_count,
+    }
+
+
+def _grid_range_from_a1(*, sheet_id: int, range_a1: str) -> dict[str, int]:
+    """Строит GridRange из закрытого A1-диапазона.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        range_a1: Закрытый A1-диапазон, например `A1:R1000`.
+
+    Returns:
+        JSON-совместимый GridRange.
+
+    Raises:
+        CompositionDataError: Если диапазон некорректен.
+    """
+
+    match = A1_RANGE_RE.fullmatch(range_a1.strip())
+    if match is None:
+        raise CompositionDataError(f"Некорректный A1-диапазон: {range_a1}.")
+
+    start_column, start_row_raw, end_column, end_row_raw = match.groups()
+    start_column_number = _column_to_number(start_column)
+    end_column_number = _column_to_number(end_column)
+    start_row = int(start_row_raw)
+    end_row = int(end_row_raw)
+
+    if end_column_number < start_column_number or end_row < start_row:
+        raise CompositionDataError(f"A1-диапазон задан в обратном порядке: {range_a1}.")
+
+    return {
+        "sheetId": sheet_id,
+        "startRowIndex": start_row - 1,
+        "endRowIndex": end_row,
+        "startColumnIndex": start_column_number - 1,
+        "endColumnIndex": end_column_number,
+    }
+
+
+def _grid_range_for_table_row(
+    sheet_id: int,
+    table_spec: CompositionTableSpec,
+    *,
+    row_offset: int,
+) -> dict[str, int]:
+    """Строит GridRange для одной строки блока состава.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        table_spec: Спецификация блока.
+        row_offset: Смещение строки относительно начала блока.
+
+    Returns:
+        JSON-совместимый GridRange.
+    """
+
+    return _grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=_offset_cell(table_spec.start_cell, row_offset=row_offset, column_offset=0),
+        rows_count=1,
+        columns_count=len(table_spec.columns),
+    )
+
+
+def _grid_range_for_table_column(
+    *,
+    sheet_id: int,
+    table_spec: CompositionTableSpec,
+    column_index: int,
+    row_offset: int,
+    rows_count: int,
+) -> dict[str, int]:
+    """Строит GridRange для одной колонки блока состава.
+
+    Args:
+        sheet_id: Числовой ID листа Google Sheets.
+        table_spec: Спецификация блока.
+        column_index: Индекс колонки внутри блока.
+        row_offset: Смещение первой строки относительно начала блока.
+        rows_count: Количество строк.
+
+    Returns:
+        JSON-совместимый GridRange.
+    """
+
+    return _grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=_offset_cell(
+            table_spec.start_cell,
+            row_offset=row_offset,
+            column_offset=column_index,
+        ),
+        rows_count=rows_count,
+        columns_count=1,
+    )
+
+
+def _offset_cell(start_cell: str, *, row_offset: int, column_offset: int) -> str:
+    """Сдвигает A1-ячейку на заданное количество строк и колонок.
+
+    Args:
+        start_cell: Исходная ячейка.
+        row_offset: Сдвиг по строкам.
+        column_offset: Сдвиг по колонкам.
+
+    Returns:
+        Новая A1-ячейка.
+    """
+
+    start_column_number, start_row = _parse_start_cell(start_cell)
+    return f"{_number_to_column(start_column_number + column_offset)}{start_row + row_offset}"
+
+
+def _parse_start_cell(start_cell: str) -> tuple[int, int]:
+    """Парсит стартовую A1-ячейку.
+
+    Args:
+        start_cell: A1-ячейка, например `A1`.
+
+    Returns:
+        Номер колонки и номер строки, начиная с 1.
+
+    Raises:
+        CompositionDataError: Если стартовая ячейка некорректна.
+    """
+
+    match = A1_CELL_RE.fullmatch(start_cell.strip())
+    if match is None:
+        raise CompositionDataError(f"Некорректная стартовая ячейка: {start_cell}.")
+
+    start_column, start_row_raw = match.groups()
+    return _column_to_number(start_column), int(start_row_raw)
+
+
 def _normalize_row(row: Sequence[CellValue]) -> list[str]:
     """Преобразует строку Google Sheets в список строк.
 
@@ -1004,14 +1640,14 @@ def _empty_row(width: int) -> list[CellValue]:
 
 
 def _title_row(title: str, width: int) -> list[CellValue]:
-    """Создаёт строку заголовка таблицы.
+    """Создаёт строку названия таблицы.
 
     Args:
-        title: Текст заголовка.
-        width: Ширина таблицы.
+        title: Название таблицы.
+        width: Ширина строки.
 
     Returns:
-        Строка заголовка.
+        Строка названия.
     """
 
     return [title, *("" for _ in range(width - 1))]

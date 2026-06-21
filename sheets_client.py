@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 from google.auth import exceptions as google_auth_exceptions
@@ -40,6 +40,19 @@ class SheetValues:
     sheet_name: str
     range_a1: str
     values: Sequence[Sequence[CellValue]]
+
+
+@dataclass(frozen=True, slots=True)
+class SheetMetadata:
+    """Метаданные одного листа Google Sheets.
+
+    Attributes:
+        sheet_id: Числовой ID листа.
+        title: Название листа.
+    """
+
+    sheet_id: int
+    title: str
 
 
 class GoogleSheetsError(RuntimeError):
@@ -135,6 +148,41 @@ class SheetsClient:
         self._client = client
         self._base_url = base_url.rstrip("/")
 
+    async def get_sheet_metadata(self, sheet_name: str) -> SheetMetadata:
+        """Читает метаданные листа.
+
+        Args:
+            sheet_name: Название листа.
+
+        Returns:
+            Метаданные листа.
+
+        Raises:
+            GoogleSheetsReadError: Если лист не найден или ответ невалиден.
+        """
+
+        query = urlencode(
+            {
+                "fields": "sheets(properties(sheetId,title))",
+            },
+        )
+        data = await self._request_json(
+            method="GET",
+            path=f"/{self._sheet_id}?{query}",
+            error_cls=GoogleSheetsReadError,
+        )
+
+        sheets = data.get("sheets")
+        if not isinstance(sheets, list):
+            raise GoogleSheetsReadError("Google Sheets metadata не содержит sheets.")
+
+        for raw_sheet in sheets:
+            metadata = _parse_sheet_metadata(raw_sheet)
+            if metadata.title == sheet_name:
+                return metadata
+
+        raise GoogleSheetsReadError(f"Лист {sheet_name} не найден.")
+
     async def read_values(self, sheet_name: str, range_a1: str) -> list[list[CellValue]]:
         """Читает значения из A1-диапазона.
 
@@ -194,6 +242,32 @@ class SheetsClient:
             method="POST",
             path=f"/{self._sheet_id}/values:batchUpdate",
             json_payload=payload,
+            error_cls=GoogleSheetsWriteError,
+        )
+
+    async def batch_update_spreadsheet(
+        self,
+        requests: Sequence[JsonObject],
+    ) -> JsonObject:
+        """Выполняет `spreadsheets.batchUpdate`.
+
+        Args:
+            requests: Список batchUpdate requests.
+
+        Returns:
+            JSON-ответ Google Sheets API.
+
+        Raises:
+            GoogleSheetsWriteError: Если batchUpdate не выполнился.
+        """
+
+        if not requests:
+            return {}
+
+        return await self._request_json(
+            method="POST",
+            path=f"/{self._sheet_id}:batchUpdate",
+            json_payload={"requests": list(requests)},
             error_cls=GoogleSheetsWriteError,
         )
 
@@ -288,7 +362,10 @@ class SheetsClient:
             raise error_cls("Google Sheets API network error.") from exc
 
         if response.status_code >= 400:
-            raise error_cls(f"Google Sheets API HTTP {response.status_code}.")
+            error_message = _extract_google_error_message(response)
+            raise error_cls(
+                f"Google Sheets API HTTP {response.status_code}: {error_message}",
+            )
 
         try:
             data = response.json()
@@ -324,6 +401,81 @@ def build_sheet_range(sheet_name: str, range_a1: str) -> str:
 
     escaped_sheet_name = sheet_name.replace("'", "''")
     return f"'{escaped_sheet_name}'!{range_a1}"
+
+
+def _extract_google_error_message(response: httpx.Response) -> str:
+    """Извлекает безопасный текст ошибки Google API.
+
+    Args:
+        response: HTTP-ответ Google API.
+
+    Returns:
+        Короткий текст ошибки без URL и токенов.
+    """
+
+    try:
+        data = response.json()
+    except ValueError:
+        text = response.text.strip()
+        return _truncate_error_message(text or "нет тела ответа")
+
+    if not isinstance(data, dict):
+        return "некорректное тело ошибки"
+
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            return _truncate_error_message(message.strip())
+
+    return "нет сообщения ошибки"
+
+
+def _truncate_error_message(message: str, limit: int = 500) -> str:
+    """Обрезает длинное сообщение ошибки.
+
+    Args:
+        message: Исходное сообщение.
+        limit: Максимальная длина.
+
+    Returns:
+        Обрезанное сообщение.
+    """
+
+    return message if len(message) <= limit else f"{message[:limit]}..."
+
+
+def _parse_sheet_metadata(raw_sheet: object) -> SheetMetadata:
+    """Парсит метаданные одного листа Google Sheets.
+
+    Args:
+        raw_sheet: Объект листа из ответа API.
+
+    Returns:
+        Метаданные листа.
+
+    Raises:
+        GoogleSheetsReadError: Если структура ответа некорректна.
+    """
+
+    if not isinstance(raw_sheet, dict):
+        raise GoogleSheetsReadError("Элемент sheets должен быть объектом.")
+
+    properties = raw_sheet.get("properties")
+    if not isinstance(properties, dict):
+        raise GoogleSheetsReadError("Sheet metadata не содержит properties.")
+
+    sheet_id = properties.get("sheetId")
+    title = properties.get("title")
+    if not isinstance(sheet_id, int) or isinstance(sheet_id, bool):
+        raise GoogleSheetsReadError("Sheet metadata содержит некорректный sheetId.")
+    if not isinstance(title, str):
+        raise GoogleSheetsReadError("Sheet metadata содержит некорректный title.")
+
+    return SheetMetadata(
+        sheet_id=sheet_id,
+        title=title,
+    )
 
 
 def _normalize_read_values(raw_values: list[Any]) -> list[list[CellValue]]:
