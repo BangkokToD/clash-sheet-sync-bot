@@ -1,0 +1,4 @@
+.env
+credentials.json
+sync_settings.json
+*.log
