@@ -1,7 +1,7 @@
 """Точка входа Telegram-бота.
 
-Модуль реализует минимальный Telegram long polling без тяжёлых фреймворков.
-Реальная синхронизация состава и CWL подключается в следующих коммитах.
+Модуль реализует Telegram long polling без тяжёлых фреймворков.
+Синхронизация состава подключена через отдельный доменный модуль.
 """
 
 from __future__ import annotations
@@ -15,15 +15,28 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from coc_client import ClashApiUnavailableError, ClashClient
+from composition_sync import CompositionDataError, run_composition_sync
 from config import ConfigError, load_config
 from models import AppConfig, SyncSettings
 from settings_store import SettingsStore, SettingsStoreError
+from sheets_client import (
+    GoogleAccessTokenProvider,
+    GoogleSheetsAuthError,
+    GoogleSheetsReadError,
+    GoogleSheetsWriteError,
+    SheetsClient,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# httpx на INFO пишет полные URL, включая Telegram token и Google Sheet ID.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 CALLBACK_UPDATE_COMPOSITION: Final = "update_composition"
 CALLBACK_UPDATE_CWL: Final = "update_cwl"
@@ -35,6 +48,10 @@ JsonObject = dict[str, Any]
 
 class TelegramApiError(RuntimeError):
     """Ошибка Telegram Bot API без вывода секретов в лог."""
+
+
+class TelegramMessageNotModifiedError(TelegramApiError):
+    """Telegram отказался редактировать сообщение без изменений."""
 
 
 class TelegramClient:
@@ -155,16 +172,24 @@ class TelegramClient:
         except httpx.HTTPError as exc:
             raise TelegramApiError("Telegram API временно недоступен.") from exc
 
-        if response.status_code >= 400:
-            raise TelegramApiError(f"Telegram API HTTP {response.status_code}.")
-
         try:
             data = response.json()
         except ValueError as exc:
+            if response.status_code >= 400:
+                raise TelegramApiError(f"Telegram API HTTP {response.status_code}.") from exc
             raise TelegramApiError("Telegram API вернул битый JSON.") from exc
 
         if not isinstance(data, dict):
             raise TelegramApiError("Telegram API вернул некорректный JSON.")
+
+        if response.status_code >= 400:
+            description = data.get("description")
+            if not isinstance(description, str):
+                description = "неизвестная ошибка"
+            if response.status_code == 400 and "message is not modified" in description.lower():
+                raise TelegramMessageNotModifiedError("Telegram message is not modified.")
+            raise TelegramApiError(f"Telegram API HTTP {response.status_code}: {description}.")
+
         if data.get("ok") is not True:
             description = data.get("description")
             if not isinstance(description, str):
@@ -180,6 +205,8 @@ class BotApp:
         config: Конфигурация приложения.
         telegram: Клиент Telegram Bot API.
         settings_store: Хранилище статусов ручных запусков.
+        clash_client: Клиент Clash of Clans API.
+        sheets_client: Клиент Google Sheets API.
     """
 
     def __init__(
@@ -187,10 +214,14 @@ class BotApp:
         config: AppConfig,
         telegram: TelegramClient,
         settings_store: SettingsStore,
+        clash_client: ClashClient,
+        sheets_client: SheetsClient,
     ) -> None:
         self._config = config
         self._telegram = telegram
         self._settings_store = settings_store
+        self._clash_client = clash_client
+        self._sheets_client = sheets_client
         self._operation_lock = asyncio.Lock()
         self._update_tasks: set[asyncio.Task[None]] = set()
 
@@ -320,7 +351,10 @@ class BotApp:
         await self._operation_lock.acquire()
         try:
             await self._telegram.answer_callback_query(callback_query_id, "Принято.")
-            await self._run_not_implemented_sync(callback_query, data)
+            if data == CALLBACK_UPDATE_COMPOSITION:
+                await self._run_composition_sync(callback_query)
+            else:
+                await self._run_not_implemented_sync(callback_query, data)
         finally:
             self._operation_lock.release()
 
@@ -339,6 +373,131 @@ class BotApp:
             return
 
         await self._telegram.send_message(chat_id, _format_status(settings))
+
+    async def _edit_or_send_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: JsonObject | None = None,
+    ) -> None:
+        """Редактирует сообщение или отправляет новое при невозможности редактирования.
+
+        Telegram возвращает `message is not modified`, если новый текст и клавиатура
+        совпадают со старым сообщением. Для пользователя это выглядит как отсутствие
+        реакции на кнопку, поэтому в этом случае отправляем отдельное сообщение.
+
+        Args:
+            chat_id: ID чата Telegram.
+            message_id: ID сообщения для редактирования.
+            text: Новый текст сообщения.
+            reply_markup: Inline-клавиатура.
+        """
+
+        try:
+            await self._telegram.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+        except TelegramMessageNotModifiedError:
+            await self._telegram.send_message(chat_id, text, reply_markup)
+        except TelegramApiError as exc:
+            logger.warning("telegram edit failed, sending new message: %s", exc)
+            await self._telegram.send_message(chat_id, text, reply_markup)
+
+    async def _run_composition_sync(self, callback_query: JsonObject) -> None:
+        """Запускает реальное обновление листа состава.
+
+        Args:
+            callback_query: Объект `callback_query` из Telegram update.
+        """
+
+        message = callback_query.get("message")
+        if not isinstance(message, dict):
+            return
+
+        chat_id = _extract_chat_id(message)
+        message_id = message.get("message_id")
+        if chat_id is None or not isinstance(message_id, int):
+            return
+
+        now_dt = datetime.now(ZoneInfo(self._config.timezone)).replace(microsecond=0)
+        now = now_dt.isoformat()
+
+        try:
+            settings = self._settings_store.load()
+        except SettingsStoreError:
+            logger.error("settings read failed")
+            await self._edit_or_send_message(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="Не удалось прочитать статус синхронизации.\n\nВыберите действие.",
+                reply_markup=_main_keyboard(),
+            )
+            return
+
+        logger.info("composition sync started")
+        status_error: str | None = None
+
+        try:
+            result = await run_composition_sync(
+                config=self._config,
+                clash_client=self._clash_client,
+                sheets_client=self._sheets_client,
+                detected_at=now_dt,
+            )
+        except ClashApiUnavailableError as exc:
+            logger.info("api unavailable: %s", exc)
+            logger.info("composition sync failed: api unavailable")
+            result_text = "API недоступно."
+            status_error = result_text
+        except CompositionDataError as exc:
+            logger.info("composition sync failed: %s", exc)
+            result_text = f"Обновление состава отменено.\n\nПричина: {exc}"
+            status_error = str(exc)
+        except (GoogleSheetsAuthError, GoogleSheetsReadError) as exc:
+            logger.error("google sheets read failed: %s", exc)
+            logger.info("composition sync failed: google sheets read failed")
+            result_text = "Не удалось прочитать Google Sheets."
+            status_error = result_text
+        except GoogleSheetsWriteError as exc:
+            logger.error("google sheets write failed: %s", exc)
+            logger.info("composition sync failed: google sheets write failed")
+            result_text = "Не удалось записать Google Sheets."
+            status_error = result_text
+        else:
+            logger.info("composition sync finished")
+            result_text = result.to_telegram_message()
+
+        if status_error is None:
+            settings = replace(
+                settings,
+                last_composition_sync_at=now,
+                last_composition_sync_status="success",
+                last_composition_sync_error=None,
+            )
+        else:
+            settings = replace(
+                settings,
+                last_composition_sync_at=now,
+                last_composition_sync_status="error",
+                last_composition_sync_error=status_error,
+            )
+
+        try:
+            self._settings_store.save(settings)
+        except SettingsStoreError:
+            logger.error("settings write failed")
+            result_text = f"{result_text}\n\nСтатус синхронизации не записан."
+
+        await self._edit_or_send_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"{result_text}\n\nВыберите действие.",
+            reply_markup=_main_keyboard(),
+        )
 
     async def _run_not_implemented_sync(
         self,
@@ -366,7 +525,7 @@ class BotApp:
             settings = self._settings_store.load()
         except SettingsStoreError:
             logger.error("settings read failed")
-            await self._telegram.edit_message_text(
+            await self._edit_or_send_message(
                 chat_id=chat_id,
                 message_id=message_id,
                 text="Не удалось прочитать статус синхронизации.\n\nВыберите действие.",
@@ -414,7 +573,7 @@ class BotApp:
                 f"Время запуска: {now}"
             )
 
-        await self._telegram.edit_message_text(
+        await self._edit_or_send_message(
             chat_id=chat_id,
             message_id=message_id,
             text=f"{result_text}\n\nВыберите действие.",
@@ -579,7 +738,8 @@ async def async_main() -> int:
         config = load_config()
         settings_store = SettingsStore(config.sync_settings_file)
         settings_store.load()
-    except (ConfigError, SettingsStoreError) as exc:
+        token_provider = GoogleAccessTokenProvider(config.google_service_account_file)
+    except (ConfigError, SettingsStoreError, GoogleSheetsAuthError) as exc:
         logger.error("bot startup failed: %s", exc)
         return 1
 
@@ -588,9 +748,18 @@ async def async_main() -> int:
     timeout = httpx.Timeout(POLLING_TIMEOUT_SECONDS + 10, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as http_client:
         telegram = TelegramClient(config.telegram_bot_token, http_client)
-        app = BotApp(config, telegram, settings_store)
+        clash_client = ClashClient(config.coc_api_token, http_client)
+        sheets_client = SheetsClient(config.google_sheet_id, token_provider, http_client)
+        app = BotApp(
+            config=config,
+            telegram=telegram,
+            settings_store=settings_store,
+            clash_client=clash_client,
+            sheets_client=sheets_client,
+        )
         await app.run_polling()
     return 0
+
 
 def main() -> int:
     """Синхронная точка входа приложения.
