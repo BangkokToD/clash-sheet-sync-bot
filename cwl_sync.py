@@ -22,8 +22,8 @@ CWL_HEADERS: Final = (
     "Тег",
     "Ник",
     "Юзернейм",
-    "ТХ - номер",
-    "ТХ соперника - номер",
+    "ТХ",
+    "ТХ соперника",
     "Звезды",
     "Процент разрушений",
     "Идея1",
@@ -36,9 +36,15 @@ CWL_HEADERS: Final = (
     "Комментарий2",
     "Итоговая оценка",
 )
+CWL_HEADER_ALIASES: Final = {
+    "ТХ": {"ТХ", "ТХ - номер"},
+    "ТХ соперника": {"ТХ соперника", "ТХ соперника - номер"},
+    "Ожидания2": {"Ожидания2", "Ожидания3"},
+}
 CWL_USER_COLUMNS_START: Final = 8
 CWL_WAR_CONCURRENCY_LIMIT: Final = 5
 NO_ATTACK_MARKER: Final = "NO_ATTACK"
+ATTACK_MARKER_PREFIX: Final = "ATTACK"
 CWL_ELIGIBLE_WAR_STATES: Final = {"warEnded", "inWar"}
 
 A1_CELL_RE: Final = re.compile(r"^\$?([A-Za-z]+)\$?([1-9][0-9]*)$")
@@ -166,17 +172,14 @@ class CwlRow:
 
         defender_value = ""
         if self.defender_position is not None and self.defender_town_hall is not None:
-            defender_value = format_map_town_hall(
-                self.defender_position,
-                self.defender_town_hall,
-            )
+            defender_value = format_town_hall(self.defender_town_hall)
 
         return [
             self.round_number,
             self.attacker_tag,
             self.attacker_name,
             self.username,
-            format_map_town_hall(self.attacker_position, self.attacker_town_hall),
+            format_town_hall(self.attacker_town_hall),
             defender_value,
             self.stars,
             self.destruction_percentage,
@@ -765,7 +768,7 @@ def _build_war_rows(
                 clan_tag,
                 round_number,
                 member["tag"],
-                f"DEF_POS_{defender_position}",
+                f"{ATTACK_MARKER_PREFIX}_{attack_index}",
             )
 
             rows.append(
@@ -870,17 +873,26 @@ def parse_old_cwl_user_fields(
 
     headers = _find_old_cwl_headers(rows, clans)
     user_fields_by_key: dict[str, CwlUserFields] = {}
+    attack_occurrences: dict[tuple[str, int, str], int] = {}
 
     for header in headers:
         next_header_row = _find_next_cwl_header_row(headers, header)
         for row in rows[header.row_index + 1 : next_header_row]:
-            sync_key = _parse_old_cwl_row_key(row, header, season)
-            if sync_key is None:
+            sync_keys = _parse_old_cwl_row_keys(
+                row,
+                header,
+                season,
+                attack_occurrences=attack_occurrences,
+            )
+            if not sync_keys:
                 continue
-            if sync_key in user_fields_by_key:
-                logger.warning("duplicate old CWL sync key ignored: %s", sync_key)
-                continue
-            user_fields_by_key[sync_key] = _parse_old_cwl_user_fields(row, header)
+
+            user_fields = _parse_old_cwl_user_fields(row, header)
+            for sync_key in sync_keys:
+                if sync_key in user_fields_by_key:
+                    logger.warning("duplicate old CWL sync key ignored: %s", sync_key)
+                    continue
+                user_fields_by_key[sync_key] = user_fields
 
     return user_fields_by_key
 
@@ -950,14 +962,23 @@ def _matches_cwl_header(row: Sequence[str], column_index: int) -> bool:
 
     for offset, expected_header in enumerate(CWL_HEADERS):
         actual = _cell_at(row, column_index + offset).strip()
-        if expected_header == "Ожидания2":
-            if actual not in {"Ожидания2", "Ожидания3"}:
-                return False
-            continue
-        if actual != expected_header:
+        if actual not in _allowed_cwl_header_values(expected_header):
             return False
 
     return True
+
+
+def _allowed_cwl_header_values(expected_header: str) -> set[str]:
+    """Возвращает допустимые названия старого и нового заголовка CWL.
+
+    Args:
+        expected_header: Новое название заголовка.
+
+    Returns:
+        Множество допустимых названий.
+    """
+
+    return CWL_HEADER_ALIASES.get(expected_header, {expected_header})
 
 
 def _assign_cwl_header_clan_tags(
@@ -1016,53 +1037,81 @@ def _find_next_cwl_header_row(
     return min(next_rows, default=10**9)
 
 
-def _parse_old_cwl_row_key(
+def _parse_old_cwl_row_keys(
     row: Sequence[str],
     header: OldCwlTableHeader,
     season: str,
-) -> str | None:
-    """Вычисляет ключ старой CWL-строки.
+    *,
+    attack_occurrences: dict[tuple[str, int, str], int],
+) -> tuple[str, ...]:
+    """Вычисляет возможные ключи старой CWL-строки.
 
     Args:
         row: Строка старого листа.
         header: Заголовок таблицы.
         season: Сезон старого листа.
+        attack_occurrences: Счётчик атак по `(clan_tag, round, attacker_tag)`.
 
     Returns:
-        CWL sync key или `None`, если строка не является CWL-строкой.
+        Кортеж CWL sync key. Пустой кортеж означает, что строка не является CWL-строкой.
     """
 
     if header.clan_tag is None:
-        return None
+        return ()
 
     round_raw = _cell_at(row, header.column_index).strip()
     attacker_raw = _cell_at(row, header.column_index + 1).strip()
     if not round_raw.isdigit() or attacker_raw == "":
-        return None
+        return ()
 
     try:
         attacker_tag = normalize_tag(attacker_raw)
     except ValueError:
-        return None
+        return ()
 
+    round_number = int(round_raw)
     defender_raw = _cell_at(row, header.column_index + 5).strip()
     stars_raw = _cell_at(row, header.column_index + 6).strip()
     destruction_raw = _cell_at(row, header.column_index + 7).strip()
 
-    marker = NO_ATTACK_MARKER
-    if defender_raw != "" or stars_raw != "" or destruction_raw != "":
-        defender_position = _parse_defender_position(defender_raw)
-        if defender_position is None:
-            return None
-        marker = f"DEF_POS_{defender_position}"
+    if defender_raw == "" and stars_raw == "" and destruction_raw == "":
+        return (
+            make_cwl_key(
+                season,
+                header.clan_tag,
+                round_number,
+                attacker_tag,
+                NO_ATTACK_MARKER,
+            ),
+        )
 
-    return make_cwl_key(
-        season,
-        header.clan_tag,
-        int(round_raw),
-        attacker_tag,
-        marker,
-    )
+    occurrence_key = (header.clan_tag, round_number, attacker_tag)
+    attack_index = attack_occurrences.get(occurrence_key, 0) + 1
+    attack_occurrences[occurrence_key] = attack_index
+
+    keys = [
+        make_cwl_key(
+            season,
+            header.clan_tag,
+            round_number,
+            attacker_tag,
+            f"{ATTACK_MARKER_PREFIX}_{attack_index}",
+        ),
+    ]
+
+    defender_position = _parse_defender_position(defender_raw)
+    if defender_position is not None:
+        keys.append(
+            make_cwl_key(
+                season,
+                header.clan_tag,
+                round_number,
+                attacker_tag,
+                f"DEF_POS_{defender_position}",
+            ),
+        )
+
+    return tuple(keys)
 
 
 def _parse_old_cwl_user_fields(
@@ -1225,7 +1274,7 @@ def _build_cwl_format_requests(
         _repeat_cell_request(
             _grid_range_from_a1(sheet_id=sheet_id, range_a1=managed_range_a1),
             _base_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
         ),
     ]
 
@@ -1261,7 +1310,7 @@ def _build_cwl_block_format_requests(
         _repeat_cell_request(
             title_range,
             _title_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
         ),
         _update_borders_request(block_range),
     ]
@@ -1271,7 +1320,7 @@ def _build_cwl_block_format_requests(
             _repeat_cell_request(
                 _grid_range_for_block_row(sheet_id, table_spec, row_offset=1),
                 _message_cell_format(),
-                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+                "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
             ),
         )
         return requests
@@ -1280,7 +1329,7 @@ def _build_cwl_block_format_requests(
         _repeat_cell_request(
             _grid_range_for_block_row(sheet_id, table_spec, row_offset=1),
             _header_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
         ),
     )
 
@@ -1296,7 +1345,7 @@ def _build_cwl_block_format_requests(
             _repeat_cell_request(
                 data_range,
                 _data_cell_format(),
-                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+                "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
             ),
         )
         requests.extend(
@@ -1382,7 +1431,7 @@ def make_cwl_key(
         clan_tag: Тег семейного клана.
         round_number: Номер раунда.
         attacker_tag: Тег атакующего.
-        marker: `NO_ATTACK` или `DEF_POS_N`.
+        marker: `NO_ATTACK`, `ATTACK_N` или старый совместимый `DEF_POS_N`.
 
     Returns:
         Стабильный CWL-ключ.
@@ -1399,22 +1448,21 @@ def make_cwl_key(
     )
 
 
-def format_map_town_hall(map_position: int, town_hall: int) -> str:
-    """Форматирует номер карты и ратушу.
+def format_town_hall(town_hall: int) -> str:
+    """Форматирует ратушу без номера на карте.
 
     Args:
-        map_position: Номер на карте.
         town_hall: Уровень ратуши.
 
     Returns:
-        Значение вида `1 — TH18`.
+        Значение вида `TH18`.
     """
 
-    return f"{map_position} — TH{town_hall}"
+    return f"TH{town_hall}"
 
 
 def _parse_defender_position(value: str) -> int | None:
-    """Парсит позицию цели из строки `ТХ соперника - номер`.
+    """Парсит позицию цели из старого формата `1 — TH18`.
 
     Args:
         value: Значение старой ячейки.
