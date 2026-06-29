@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import quote
 
@@ -20,6 +21,23 @@ class ClashApiUnavailableError(RuntimeError):
 
 class ClashCwlNotInProgressError(RuntimeError):
     """CWL не проводится для запрошенного клана."""
+
+
+class ClashClanNotFoundError(RuntimeError):
+    """Клан не найден в Clash of Clans API."""
+
+
+@dataclass(frozen=True, slots=True)
+class ClanLookupResult:
+    """Результат проверки клана через CoC API.
+
+    Attributes:
+        tag: Нормализованный тег клана.
+        name: Название клана из CoC API.
+    """
+
+    tag: str
+    name: str
 
 
 class ClashClient:
@@ -46,6 +64,34 @@ class ClashClient:
             "Accept": "application/json",
             "Authorization": f"Bearer {api_token}",
         }
+
+
+    async def get_clan(self, clan_tag: str) -> ClanLookupResult:
+        """Получает краткую информацию о клане по тегу.
+
+        Args:
+            clan_tag: Тег клана вида `#ABC123`.
+
+        Returns:
+            Нормализованный тег и название клана.
+
+        Raises:
+            ClashClanNotFoundError: Если клан не найден.
+            ClashApiUnavailableError: Если API недоступно или ответ невалиден.
+        """
+
+        encoded_tag = encode_coc_tag(clan_tag)
+        data = await self._get_json(
+            f"/clans/{encoded_tag}",
+            clan_404_as_not_found=True,
+        )
+        raw_tag = _require_str(data, "tag", "clan")
+        name = _require_str(data, "name", "clan")
+        try:
+            normalized_tag = normalize_tag(raw_tag)
+        except ValueError as exc:
+            raise ClashApiUnavailableError("CoC clan response содержит некорректный tag.") from exc
+        return ClanLookupResult(tag=normalized_tag, name=name)
 
     async def get_clan_members(self, clan_tag: str) -> list[JsonObject]:
         """Получает список участников клана.
@@ -146,6 +192,7 @@ class ClashClient:
         path: str,
         *,
         league_group_404_as_not_in_progress: bool = False,
+        clan_404_as_not_found: bool = False,
     ) -> JsonObject:
         """Выполняет GET-запрос к Clash of Clans API.
 
@@ -153,6 +200,7 @@ class ClashClient:
             path: Путь API без базового URL.
             league_group_404_as_not_in_progress: Нужно ли трактовать HTTP 404
                 как отсутствие CWL, а не как недоступность API.
+            clan_404_as_not_found: Нужно ли трактовать HTTP 404 как отсутствие клана.
 
         Returns:
             JSON-объект ответа.
@@ -172,6 +220,8 @@ class ClashClient:
 
         if response.status_code == 404 and league_group_404_as_not_in_progress:
             raise ClashCwlNotInProgressError("CWL не проводится.")
+        if response.status_code == 404 and clan_404_as_not_found:
+            raise ClashClanNotFoundError("Клан не найден.")
 
         if response.status_code >= 400:
             raise ClashApiUnavailableError(f"CoC API HTTP {response.status_code}.")

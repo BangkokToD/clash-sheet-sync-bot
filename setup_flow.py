@@ -11,10 +11,18 @@ from typing import Final
 import aiosqlite
 import httpx
 
-from models import AppConfig, SetupToken
+from coc_client import (
+    ClashApiUnavailableError,
+    ClashClanNotFoundError,
+    ClashClient,
+)
+from column_profiles import new_user_column_key, normalize_column_title, table_title
+from models import AppConfig, SetupToken, TableType, normalize_tag
 from repositories import (
     AdminChatRepository,
     RuntimeConfigRepository,
+    ClanSettingsRepository,
+    ColumnProfileRepository,
     SheetBindingRepository,
     SetupTokenRepository,
     TelegramChatRepository,
@@ -41,8 +49,28 @@ CALLBACK_SETTINGS_PREFIX: Final = "settings:open:"
 CALLBACK_SETTINGS_SECTION_PREFIX: Final = "settings:section:"
 CALLBACK_BIND_SHEET_PREFIX: Final = "sheet:bind:"
 CALLBACK_CHECK_SHEET_PREFIX: Final = "sheet:check:"
+CALLBACK_CLAN_ADD_PREFIX: Final = "clans:add:"
+CALLBACK_CLAN_CONFIRM_PREFIX: Final = "clans:confirm:"
+CALLBACK_CLAN_REMOVE_PREFIX: Final = "clans:remove:"
+CALLBACK_CLAN_MOVE_UP_PREFIX: Final = "clans:up:"
+CALLBACK_CLAN_MOVE_DOWN_PREFIX: Final = "clans:down:"
+CALLBACK_COLUMN_ADD_PREFIX: Final = "columns:add:"
+CALLBACK_COLUMN_TOGGLE_PREFIX: Final = "columns:toggle:"
+CALLBACK_COLUMN_RENAME_PREFIX: Final = "columns:rename:"
+CALLBACK_COLUMN_DELETE_PREFIX: Final = "columns:delete:"
+CALLBACK_COLUMN_MOVE_UP_PREFIX: Final = "columns:up:"
+CALLBACK_COLUMN_MOVE_DOWN_PREFIX: Final = "columns:down:"
+CALLBACK_COLUMN_RESTORE_PREFIX: Final = "columns:restore:"
 AWAITING_SHEET_LINK_STATE_PREFIX: Final = "awaiting_sheet_link:"
 AWAITING_SHEET_ACCESS_STATE_PREFIX: Final = "awaiting_sheet_access:"
+AWAITING_CLAN_TAG_STATE_PREFIX: Final = "awaiting_clan_tag:"
+AWAITING_USER_COLUMN_TITLE_STATE_PREFIX: Final = "awaiting_user_column_title:"
+AWAITING_COLUMN_RENAME_STATE_PREFIX: Final = "awaiting_column_rename:"
+COLUMN_SECTION_TABLE_TYPES: Final[dict[str, TableType]] = {
+    "composition_columns": "composition_active",
+    "exited_columns": "composition_exited",
+    "cwl_columns": "cwl",
+}
 SETTINGS_SECTIONS: Final = {
     "table": "Таблица",
     "clans": "Кланы",
@@ -98,6 +126,8 @@ class SetupFlow:
         self._telegram_chats = TelegramChatRepository(connection)
         self._admin_chats = AdminChatRepository(connection)
         self._sheet_bindings = SheetBindingRepository(connection)
+        self._clans = ClanSettingsRepository(connection)
+        self._columns = ColumnProfileRepository(connection)
         self._runtime = RuntimeConfigRepository(connection)
 
     async def send_private_start(self, chat_id: int) -> None:
@@ -163,7 +193,7 @@ class SetupFlow:
 
         await self._telegram.send_message(chat_id=chat_id, text="Текущая настройка сброшена.")
     async def handle_private_text(self, *, chat_id: int, user_id: int, text: str) -> None:
-        """Обрабатывает текст в личке, если бот ждёт ссылку на таблицу.
+        """Обрабатывает текст в личке для текущего setup_state.
 
         Args:
             chat_id: ID личного чата.
@@ -171,18 +201,42 @@ class SetupFlow:
             text: Текст сообщения.
         """
 
+        if await self._handle_pending_sheet_link_text(chat_id=chat_id, user_id=user_id, text=text):
+            return
+        if await self._handle_pending_clan_tag_text(chat_id=chat_id, user_id=user_id, text=text):
+            return
+        if await self._handle_pending_user_column_title_text(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+        ):
+            return
+        await self._handle_pending_column_rename_text(chat_id=chat_id, user_id=user_id, text=text)
+
+    async def _handle_pending_sheet_link_text(self, *, chat_id: int, user_id: int, text: str) -> bool:
+        """Обрабатывает ссылку на таблицу, если она ожидается.
+
+        Args:
+            chat_id: ID личного чата.
+            user_id: Telegram user ID.
+            text: Текст сообщения.
+
+        Returns:
+            `True`, если сообщение относилось к этому состоянию.
+        """
+
         pending = await self._telegram_chats.find_pending_sheet_link_setup(
             user_id=user_id,
             state_prefix=AWAITING_SHEET_LINK_STATE_PREFIX,
         )
         if pending is None:
-            return
+            return False
 
         try:
             spreadsheet_id = extract_spreadsheet_id(text)
         except SheetAdminError as exc:
             await self._telegram.send_message(chat_id=chat_id, text=str(exc))
-            return
+            return True
 
         if await self._runtime.is_google_sheet_bound_elsewhere(
             spreadsheet_id,
@@ -195,7 +249,7 @@ class SetupFlow:
                     "Для переноса используйте сценарий переноса таблицы."
                 ),
             )
-            return
+            return True
 
         now = _format_dt(_utc_now())
         async with transaction(self._connection):
@@ -206,7 +260,158 @@ class SetupFlow:
             )
 
         await self._send_sheet_access_instruction(chat_id=chat_id, group_chat_id=pending.chat_id)
+        return True
 
+    async def _handle_pending_clan_tag_text(self, *, chat_id: int, user_id: int, text: str) -> bool:
+        """Обрабатывает тег клана, если бот ждёт добавление клана.
+
+        Args:
+            chat_id: ID личного чата.
+            user_id: Telegram user ID.
+            text: Текст сообщения.
+
+        Returns:
+            `True`, если сообщение относилось к этому состоянию.
+        """
+
+        pending = await self._telegram_chats.find_pending_sheet_link_setup(
+            user_id=user_id,
+            state_prefix=AWAITING_CLAN_TAG_STATE_PREFIX,
+        )
+        if pending is None:
+            return False
+
+        try:
+            clan_tag = normalize_tag(text)
+            clan = await self._lookup_clan(clan_tag)
+        except ValueError as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return True
+        except ClashClanNotFoundError:
+            await self._telegram.send_message(chat_id=chat_id, text="Клан не найден.")
+            return True
+        except ClashApiUnavailableError as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=f"CoC API недоступно: {exc}")
+            return True
+
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=f"Клан найден: {clan.name} | {clan.tag}\nДобавить?",
+            reply_markup=confirm_clan_keyboard(pending.chat_id, clan.tag),
+        )
+        return True
+
+    async def _handle_pending_user_column_title_text(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        text: str,
+    ) -> bool:
+        """Создаёт user-колонку из ожидаемого текстового названия.
+
+        Args:
+            chat_id: ID личного чата.
+            user_id: Telegram user ID.
+            text: Текст сообщения.
+
+        Returns:
+            `True`, если сообщение относилось к этому состоянию.
+        """
+
+        pending = await self._telegram_chats.find_pending_sheet_link_setup(
+            user_id=user_id,
+            state_prefix=AWAITING_USER_COLUMN_TITLE_STATE_PREFIX,
+        )
+        if pending is None:
+            return False
+
+        table_type = _table_type_from_state(
+            pending.setup_state,
+            prefix=AWAITING_USER_COLUMN_TITLE_STATE_PREFIX,
+            user_id=user_id,
+        )
+        if table_type is None:
+            return False
+
+        try:
+            title = normalize_column_title(text)
+        except ValueError as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return True
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._columns.ensure_default_profiles(chat_id=pending.chat_id, now=now)
+            await self._columns.create_user_column(
+                chat_id=pending.chat_id,
+                table_type=table_type,
+                column_key=new_user_column_key(),
+                title=title,
+                now=now,
+            )
+            await self._telegram_chats.set_setup_state(
+                chat_id=pending.chat_id,
+                setup_state=None,
+                now=now,
+            )
+
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=f"Колонка «{title}» создана в разделе «{table_title(table_type)}».",
+        )
+        return True
+
+    async def _handle_pending_column_rename_text(self, *, chat_id: int, user_id: int, text: str) -> bool:
+        """Переименовывает колонку из ожидаемого текстового названия.
+
+        Args:
+            chat_id: ID личного чата.
+            user_id: Telegram user ID.
+            text: Текст сообщения.
+
+        Returns:
+            `True`, если сообщение относилось к этому состоянию.
+        """
+
+        pending = await self._telegram_chats.find_pending_sheet_link_setup(
+            user_id=user_id,
+            state_prefix=AWAITING_COLUMN_RENAME_STATE_PREFIX,
+        )
+        if pending is None:
+            return False
+
+        parsed = _rename_state_payload(pending.setup_state, user_id)
+        if parsed is None:
+            return False
+        table_type, column_key = parsed
+
+        try:
+            title = normalize_column_title(text)
+        except ValueError as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return True
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            updated = await self._columns.rename_column(
+                chat_id=pending.chat_id,
+                table_type=table_type,
+                column_key=column_key,
+                title=title,
+                now=now,
+            )
+            await self._telegram_chats.set_setup_state(
+                chat_id=pending.chat_id,
+                setup_state=None,
+                now=now,
+            )
+
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text="Колонка переименована." if updated else "Колонку нельзя переименовать.",
+        )
+        return True
 
     async def create_setup_token(self, *, chat_id: int, user_id: int) -> None:
         """Создаёт setup-токен и отправляет команду `/connect` админу.
@@ -472,6 +677,42 @@ class SetupFlow:
                 user_id=user_id,
             )
             return
+        if callback_data.startswith(CALLBACK_CLAN_ADD_PREFIX):
+            await self._start_clan_add(callback_data, callback_query_id, chat_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_CLAN_CONFIRM_PREFIX):
+            await self._confirm_clan_add(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_CLAN_REMOVE_PREFIX):
+            await self._remove_clan(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_CLAN_MOVE_UP_PREFIX):
+            await self._move_clan(callback_data, callback_query_id, chat_id, message_id, user_id, "up")
+            return
+        if callback_data.startswith(CALLBACK_CLAN_MOVE_DOWN_PREFIX):
+            await self._move_clan(callback_data, callback_query_id, chat_id, message_id, user_id, "down")
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_ADD_PREFIX):
+            await self._start_user_column_add(callback_data, callback_query_id, chat_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_TOGGLE_PREFIX):
+            await self._toggle_column(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_RENAME_PREFIX):
+            await self._start_column_rename(callback_data, callback_query_id, chat_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_DELETE_PREFIX):
+            await self._delete_user_column(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_MOVE_UP_PREFIX):
+            await self._move_column(callback_data, callback_query_id, chat_id, message_id, user_id, "up")
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_MOVE_DOWN_PREFIX):
+            await self._move_column(callback_data, callback_query_id, chat_id, message_id, user_id, "down")
+            return
+        if callback_data.startswith(CALLBACK_COLUMN_RESTORE_PREFIX):
+            await self._restore_columns(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
 
         await self._telegram.answer_callback_query(
             callback_query_id,
@@ -632,6 +873,29 @@ class SetupFlow:
             return
 
         await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        if section_key == "table":
+            await self._show_table_section(
+                group_chat_id=group_chat_id,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return
+        if section_key == "clans":
+            await self._show_clans_section(
+                group_chat_id=group_chat_id,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return
+        if section_key in COLUMN_SECTION_TABLE_TYPES:
+            await self._show_columns_section(
+                group_chat_id=group_chat_id,
+                table_type=COLUMN_SECTION_TABLE_TYPES[section_key],
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return
+
         title = SETTINGS_SECTIONS.get(section_key, "Раздел")
         text = f"Раздел «{title}» будет реализован в следующем шаге разработки."
         await _edit_or_send_message(
@@ -827,6 +1091,7 @@ class SetupFlow:
                 timezone=self._config.default_timezone,
                 now=now,
             )
+            await self._columns.ensure_default_profiles(chat_id=group_chat_id, now=now)
             await self._telegram_chats.set_setup_state(
                 chat_id=group_chat_id,
                 setup_state=None,
@@ -926,6 +1191,414 @@ class SetupFlow:
             chat_id=group_chat_id,
             user_id=user_id,
         )
+
+    async def _lookup_clan(self, clan_tag: str):
+        """Проверяет клан через Clash of Clans API.
+
+        Args:
+            clan_tag: Нормализованный тег клана.
+
+        Returns:
+            Краткая информация о клане.
+        """
+
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            client = ClashClient(self._config.coc_api_token, http_client)
+            return await client.get_clan(clan_tag)
+
+    async def _show_clans_section(self, *, group_chat_id: int, chat_id: int, message_id: int) -> None:
+        """Показывает раздел управления кланами."""
+
+        clans = await self._clans.list_active_clans(group_chat_id)
+        if clans:
+            lines = ["Раздел «Кланы».", ""]
+            lines.extend(
+                f"{index}. {clan.clan_name} | {clan.clan_tag}"
+                for index, clan in enumerate(clans, start=1)
+            )
+        else:
+            lines = ["Раздел «Кланы».", "", "Активных кланов пока нет."]
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="\n".join(lines),
+            reply_markup=clans_section_keyboard(group_chat_id, list(clans)),
+        )
+
+    async def _start_clan_add(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        user_id: int,
+    ) -> None:
+        """Переводит группу в ожидание тега клана."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_CLAN_ADD_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        if await self._clans.count_active_clans(group_chat_id) >= self._config.max_clans_per_chat:
+            await self._telegram.answer_callback_query(
+                callback_query_id,
+                f"В этой группе уже добавлено максимальное количество кланов: {self._config.max_clans_per_chat}.",
+                show_alert=True,
+            )
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._telegram_chats.set_setup_state(
+                chat_id=group_chat_id,
+                setup_state=_clan_tag_state(user_id),
+                now=now,
+            )
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        await self._telegram.send_message(chat_id=chat_id, text="Отправьте тег клана, например #2RVJ0CUR9.")
+
+    async def _confirm_clan_add(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Добавляет подтверждённый клан в отслеживание."""
+
+        parsed = _parse_clan_callback(callback_data, CALLBACK_CLAN_CONFIRM_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректный клан.", show_alert=True)
+            return
+        group_chat_id, clan_tag = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        if not await self._clans.is_active_clan(chat_id=group_chat_id, clan_tag=clan_tag):
+            if await self._clans.count_active_clans(group_chat_id) >= self._config.max_clans_per_chat:
+                await self._telegram.answer_callback_query(
+                    callback_query_id,
+                    f"В этой группе уже добавлено максимальное количество кланов: {self._config.max_clans_per_chat}.",
+                    show_alert=True,
+                )
+                return
+        try:
+            clan = await self._lookup_clan(clan_tag)
+        except (ClashClanNotFoundError, ClashApiUnavailableError) as exc:
+            await self._telegram.answer_callback_query(callback_query_id, str(exc), show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._clans.upsert_or_reactivate_clan(
+                chat_id=group_chat_id,
+                clan_tag=clan.tag,
+                clan_name=clan.name,
+                now=now,
+            )
+            await self._telegram_chats.set_setup_state(chat_id=group_chat_id, setup_state=None, now=now)
+            await self._refresh_ready_status(group_chat_id=group_chat_id, now=now)
+        await self._telegram.answer_callback_query(callback_query_id, "Клан добавлен.")
+        await self._show_clans_section(group_chat_id=group_chat_id, chat_id=chat_id, message_id=message_id)
+
+    async def _remove_clan(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Мягко удаляет клан из отслеживания."""
+
+        parsed = _parse_clan_callback(callback_data, CALLBACK_CLAN_REMOVE_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректный клан.", show_alert=True)
+            return
+        group_chat_id, clan_tag = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._clans.soft_delete_clan(chat_id=group_chat_id, clan_tag=clan_tag, now=now)
+            await self._clans.mark_players_untracked(chat_id=group_chat_id, clan_tag=clan_tag, now=now)
+            await self._refresh_ready_status(group_chat_id=group_chat_id, now=now)
+        await self._telegram.answer_callback_query(callback_query_id, "Клан удалён из отслеживания.")
+        await self._show_clans_section(group_chat_id=group_chat_id, chat_id=chat_id, message_id=message_id)
+
+    async def _move_clan(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        direction: str,
+    ) -> None:
+        """Меняет порядок клана."""
+
+        prefix = CALLBACK_CLAN_MOVE_UP_PREFIX if direction == "up" else CALLBACK_CLAN_MOVE_DOWN_PREFIX
+        parsed = _parse_clan_callback(callback_data, prefix)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректный клан.", show_alert=True)
+            return
+        group_chat_id, clan_tag = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._clans.move_clan(
+                chat_id=group_chat_id,
+                clan_tag=clan_tag,
+                direction=direction,
+                now=now,
+            )
+        await self._telegram.answer_callback_query(callback_query_id, "Порядок обновлён.")
+        await self._show_clans_section(group_chat_id=group_chat_id, chat_id=chat_id, message_id=message_id)
+
+    async def _show_columns_section(
+        self,
+        *,
+        group_chat_id: int,
+        table_type: TableType,
+        chat_id: int,
+        message_id: int,
+    ) -> None:
+        """Показывает раздел управления колонками."""
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._columns.ensure_default_profiles(chat_id=group_chat_id, now=now)
+        columns = await self._columns.list_columns(chat_id=group_chat_id, table_type=table_type)
+        lines = [f"Раздел «{table_title(table_type)}».", ""]
+        for column in columns:
+            marker = "👁" if column.visible else "🙈"
+            lines.append(f"{marker} {column.title} — {column.kind} / {column.column_key}")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="\n".join(lines),
+            reply_markup=columns_section_keyboard(group_chat_id, table_type, list(columns)),
+        )
+
+    async def _start_user_column_add(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        user_id: int,
+    ) -> None:
+        """Запрашивает название новой user-колонки."""
+
+        parsed = _parse_column_section_callback(callback_data, CALLBACK_COLUMN_ADD_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректный раздел.", show_alert=True)
+            return
+        group_chat_id, table_type = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._telegram_chats.set_setup_state(
+                chat_id=group_chat_id,
+                setup_state=_user_column_title_state(user_id, table_type),
+                now=now,
+            )
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        await self._telegram.send_message(chat_id=chat_id, text="Отправьте название новой колонки.")
+
+    async def _start_column_rename(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        user_id: int,
+    ) -> None:
+        """Запрашивает новое название колонки."""
+
+        parsed = _parse_column_callback(callback_data, CALLBACK_COLUMN_RENAME_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
+            return
+        group_chat_id, table_type, column_key = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._telegram_chats.set_setup_state(
+                chat_id=group_chat_id,
+                setup_state=_column_rename_state(user_id, table_type, column_key),
+                now=now,
+            )
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        await self._telegram.send_message(chat_id=chat_id, text="Отправьте новое название колонки.")
+
+    async def _toggle_column(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Переключает видимость колонки."""
+
+        parsed = _parse_column_callback(callback_data, CALLBACK_COLUMN_TOGGLE_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
+            return
+        group_chat_id, table_type, column_key = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        columns = await self._columns.list_columns(chat_id=group_chat_id, table_type=table_type)
+        target = next((column for column in columns if column.column_key == column_key), None)
+        if target is None or target.kind == "service":
+            await self._telegram.answer_callback_query(callback_query_id, "Эту колонку нельзя скрыть.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._columns.set_visibility(
+                chat_id=group_chat_id,
+                table_type=table_type,
+                column_key=column_key,
+                visible=not target.visible,
+                now=now,
+            )
+        await self._telegram.answer_callback_query(callback_query_id, "Видимость обновлена.")
+        await self._show_columns_section(
+            group_chat_id=group_chat_id,
+            table_type=table_type,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+
+    async def _delete_user_column(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Мягко удаляет user-колонку."""
+
+        parsed = _parse_column_callback(callback_data, CALLBACK_COLUMN_DELETE_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
+            return
+        group_chat_id, table_type, column_key = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            deleted = await self._columns.soft_delete_user_column(
+                chat_id=group_chat_id,
+                table_type=table_type,
+                column_key=column_key,
+                now=now,
+            )
+        await self._telegram.answer_callback_query(
+            callback_query_id,
+            "Колонка удалена." if deleted else "Можно удалить только пользовательскую колонку.",
+            show_alert=not deleted,
+        )
+        await self._show_columns_section(
+            group_chat_id=group_chat_id,
+            table_type=table_type,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+
+    async def _move_column(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        direction: str,
+    ) -> None:
+        """Меняет порядок колонки."""
+
+        prefix = CALLBACK_COLUMN_MOVE_UP_PREFIX if direction == "up" else CALLBACK_COLUMN_MOVE_DOWN_PREFIX
+        parsed = _parse_column_callback(callback_data, prefix)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
+            return
+        group_chat_id, table_type, column_key = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступ.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._columns.move_column(
+                chat_id=group_chat_id,
+                table_type=table_type,
+                column_key=column_key,
+                direction=direction,
+                now=now,
+            )
+        await self._telegram.answer_callback_query(callback_query_id, "Порядок обновлён.")
+        await self._show_columns_section(
+            group_chat_id=group_chat_id,
+            table_type=table_type,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+
+    async def _restore_columns(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Восстанавливает обязательные колонки профиля."""
+
+        parsed = _parse_column_section_callback(callback_data, CALLBACK_COLUMN_RESTORE_PREFIX)
+        if parsed is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Некорректный раздел.", show_alert=True)
+            return
+        group_chat_id, table_type = parsed
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._columns.restore_defaults(chat_id=group_chat_id, table_type=table_type, now=now)
+        await self._telegram.answer_callback_query(callback_query_id, "Обязательные колонки восстановлены.")
+        await self._show_columns_section(
+            group_chat_id=group_chat_id,
+            table_type=table_type,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+
+    async def _refresh_ready_status(self, *, group_chat_id: int, now: str) -> None:
+        """Пересчитывает готовность группы после изменения кланов."""
+
+        binding = await self._runtime.get_active_sheet_binding(group_chat_id)
+        if binding is None:
+            await self._telegram_chats.set_status(chat_id=group_chat_id, status="waiting_for_sheet", now=now)
+            return
+        active_clans = await self._clans.count_active_clans(group_chat_id)
+        status = "ready" if active_clans > 0 else "waiting_for_clans"
+        await self._telegram_chats.set_status(chat_id=group_chat_id, status=status, now=now)
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -1074,6 +1747,271 @@ def check_sheet_access_keyboard(group_chat_id: int) -> JsonObject:
             ],
         ],
     }
+
+
+def clans_section_keyboard(group_chat_id: int, clans: list) -> JsonObject:
+    """Создаёт клавиатуру раздела кланов.
+
+    Args:
+        group_chat_id: ID Telegram-группы.
+        clans: Активные кланы.
+
+    Returns:
+        Telegram inline keyboard.
+    """
+
+    keyboard: list[list[dict[str, str]]] = [
+        [{"text": "Добавить клан", "callback_data": f"{CALLBACK_CLAN_ADD_PREFIX}{group_chat_id}"}],
+    ]
+    for clan in clans:
+        tag_payload = _tag_payload(clan.clan_tag)
+        keyboard.append(
+            [
+                {"text": f"↑ {clan.clan_name}", "callback_data": f"{CALLBACK_CLAN_MOVE_UP_PREFIX}{group_chat_id}:{tag_payload}"},
+                {"text": "↓", "callback_data": f"{CALLBACK_CLAN_MOVE_DOWN_PREFIX}{group_chat_id}:{tag_payload}"},
+                {"text": "Удалить", "callback_data": f"{CALLBACK_CLAN_REMOVE_PREFIX}{group_chat_id}:{tag_payload}"},
+            ],
+        )
+    keyboard.append([{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}])
+    return {"inline_keyboard": keyboard}
+
+
+def confirm_clan_keyboard(group_chat_id: int, clan_tag: str) -> JsonObject:
+    """Создаёт клавиатуру подтверждения добавления клана.
+
+    Args:
+        group_chat_id: ID Telegram-группы.
+        clan_tag: Нормализованный тег клана.
+
+    Returns:
+        Telegram inline keyboard.
+    """
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Добавить",
+                    "callback_data": f"{CALLBACK_CLAN_CONFIRM_PREFIX}{group_chat_id}:{_tag_payload(clan_tag)}",
+                },
+            ],
+            [{"text": "Кланы", "callback_data": f"{CALLBACK_SETTINGS_SECTION_PREFIX}{group_chat_id}:clans"}],
+        ],
+    }
+
+
+def columns_section_keyboard(group_chat_id: int, table_type: TableType, columns: list) -> JsonObject:
+    """Создаёт клавиатуру управления колонками.
+
+    Args:
+        group_chat_id: ID Telegram-группы.
+        table_type: Тип таблицы.
+        columns: Активные колонки профиля.
+
+    Returns:
+        Telegram inline keyboard.
+    """
+
+    keyboard: list[list[dict[str, str]]] = [
+        [
+            {
+                "text": "Добавить пользовательскую колонку",
+                "callback_data": f"{CALLBACK_COLUMN_ADD_PREFIX}{group_chat_id}:{table_type}",
+            },
+        ],
+        [
+            {
+                "text": "Восстановить обязательные",
+                "callback_data": f"{CALLBACK_COLUMN_RESTORE_PREFIX}{group_chat_id}:{table_type}",
+            },
+        ],
+    ]
+    for column in columns:
+        if column.kind == "service":
+            keyboard.append([{"text": f"🔒 {column.title}", "callback_data": "noop"}])
+            continue
+        keyboard.append(
+            [
+                {
+                    "text": "Скрыть" if column.visible else "Показать",
+                    "callback_data": f"{CALLBACK_COLUMN_TOGGLE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
+                },
+                {
+                    "text": "Имя",
+                    "callback_data": f"{CALLBACK_COLUMN_RENAME_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
+                },
+                {
+                    "text": "↑",
+                    "callback_data": f"{CALLBACK_COLUMN_MOVE_UP_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
+                },
+                {
+                    "text": "↓",
+                    "callback_data": f"{CALLBACK_COLUMN_MOVE_DOWN_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
+                },
+            ],
+        )
+        if column.kind == "user":
+            keyboard.append(
+                [
+                    {
+                        "text": f"Удалить: {column.title}",
+                        "callback_data": f"{CALLBACK_COLUMN_DELETE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
+                    },
+                ],
+            )
+    keyboard.append([{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}])
+    return {"inline_keyboard": keyboard}
+
+
+def _tag_payload(clan_tag: str) -> str:
+    """Преобразует тег клана в безопасный payload callback.
+
+    Args:
+        clan_tag: Нормализованный тег клана.
+
+    Returns:
+        Тег без ведущего `#`.
+    """
+
+    return clan_tag.removeprefix("#")
+
+
+def _tag_from_payload(value: str) -> str:
+    """Восстанавливает тег клана из callback payload.
+
+    Args:
+        value: Payload без ведущего `#`.
+
+    Returns:
+        Нормализованный тег клана.
+    """
+
+    return normalize_tag(f"#{value}")
+
+
+def _parse_clan_callback(callback_data: str, prefix: str) -> tuple[int, str] | None:
+    """Парсит callback клановой операции.
+
+    Args:
+        callback_data: Callback data.
+        prefix: Prefix операции.
+
+    Returns:
+        Пара `(chat_id, clan_tag)` или `None`.
+    """
+
+    payload = callback_data.removeprefix(prefix)
+    raw_chat_id, _, raw_tag = payload.partition(":")
+    try:
+        return int(raw_chat_id), _tag_from_payload(raw_tag)
+    except ValueError:
+        return None
+
+
+def _parse_column_section_callback(callback_data: str, prefix: str) -> tuple[int, TableType] | None:
+    """Парсит callback операции над разделом колонок.
+
+    Args:
+        callback_data: Callback data.
+        prefix: Prefix операции.
+
+    Returns:
+        Пара `(chat_id, table_type)` или `None`.
+    """
+
+    payload = callback_data.removeprefix(prefix)
+    raw_chat_id, _, raw_table_type = payload.partition(":")
+    try:
+        chat_id = int(raw_chat_id)
+    except ValueError:
+        return None
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
+        return None
+    return chat_id, raw_table_type  # type: ignore[return-value]
+
+
+def _parse_column_callback(callback_data: str, prefix: str) -> tuple[int, TableType, str] | None:
+    """Парсит callback операции над конкретной колонкой.
+
+    Args:
+        callback_data: Callback data.
+        prefix: Prefix операции.
+
+    Returns:
+        Тройка `(chat_id, table_type, column_key)` или `None`.
+    """
+
+    payload = callback_data.removeprefix(prefix)
+    raw_chat_id, _, rest = payload.partition(":")
+    raw_table_type, _, column_key = rest.partition(":")
+    try:
+        chat_id = int(raw_chat_id)
+    except ValueError:
+        return None
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"} or column_key == "":
+        return None
+    return chat_id, raw_table_type, column_key  # type: ignore[return-value]
+
+
+def _clan_tag_state(user_id: int) -> str:
+    """Создаёт setup_state ожидания тега клана."""
+
+    return f"{AWAITING_CLAN_TAG_STATE_PREFIX}{user_id}"
+
+
+def _user_column_title_state(user_id: int, table_type: TableType) -> str:
+    """Создаёт setup_state ожидания названия user-колонки."""
+
+    return f"{AWAITING_USER_COLUMN_TITLE_STATE_PREFIX}{user_id}:{table_type}"
+
+
+def _column_rename_state(user_id: int, table_type: TableType, column_key: str) -> str:
+    """Создаёт setup_state ожидания нового названия колонки."""
+
+    return f"{AWAITING_COLUMN_RENAME_STATE_PREFIX}{user_id}:{table_type}:{column_key}"
+
+
+def _table_type_from_state(setup_state: str, *, prefix: str, user_id: int) -> TableType | None:
+    """Извлекает table_type из setup_state.
+
+    Args:
+        setup_state: Текущее состояние группы.
+        prefix: Prefix состояния.
+        user_id: Telegram user ID.
+
+    Returns:
+        Тип таблицы или `None`.
+    """
+
+    expected_prefix = f"{prefix}{user_id}:"
+    if not setup_state.startswith(expected_prefix):
+        return None
+    raw_table_type = setup_state.removeprefix(expected_prefix)
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
+        return None
+    return raw_table_type  # type: ignore[return-value]
+
+
+def _rename_state_payload(setup_state: str, user_id: int) -> tuple[TableType, str] | None:
+    """Извлекает данные переименования из setup_state.
+
+    Args:
+        setup_state: Текущее состояние группы.
+        user_id: Telegram user ID.
+
+    Returns:
+        Пара `(table_type, column_key)` или `None`.
+    """
+
+    expected_prefix = f"{AWAITING_COLUMN_RENAME_STATE_PREFIX}{user_id}:"
+    if not setup_state.startswith(expected_prefix):
+        return None
+    payload = setup_state.removeprefix(expected_prefix)
+    raw_table_type, _, column_key = payload.partition(":")
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"} or column_key == "":
+        return None
+    return raw_table_type, column_key  # type: ignore[return-value]
+
 
 def _validate_setup_token(
     setup_token: SetupToken | None,
