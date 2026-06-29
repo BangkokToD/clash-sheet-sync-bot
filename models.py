@@ -14,6 +14,15 @@ TelegramChatStatus = Literal[
     "ready",
     "disabled",
 ]
+TelegramChatType = Literal["private", "group", "supergroup", "channel"]
+TelegramMemberStatus = Literal[
+    "creator",
+    "administrator",
+    "member",
+    "restricted",
+    "left",
+    "kicked",
+]
 TableType = Literal["composition_active", "composition_exited", "cwl"]
 ColumnKind = Literal["system", "user", "service"]
 ColumnValueType = Literal["string", "integer", "datetime"]
@@ -23,11 +32,11 @@ SyncResultStatus = Literal["success", "error"]
 
 
 @dataclass(frozen=True, slots=True)
-class TrackedClan:
-    """Активный отслеживаемый клан конкретного Telegram-чата.
+class AppConfig:
+    """Глобальная конфигурация приложения из переменных окружения.
 
     Runtime-настройки Telegram-групп, Google-таблиц, кланов и колонок не входят
-    в этот объект. Они хранятся в SQLite и собираются в `RuntimeChatConfig`.
+    в этот объект. Они хранятся в SQLite и собираются через repository-слой.
 
     Attributes:
         telegram_bot_token: Токен Telegram Bot API.
@@ -48,7 +57,7 @@ class TrackedClan:
 
     telegram_bot_token: str
     coc_api_token: str
-    spreadsheet_url: str
+    google_service_account_file: Path
     google_service_account_email: str | None
     db_path: Path
     default_timezone: str
@@ -79,8 +88,8 @@ class ClanConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class AppConfig:
-    """Полная конфигурация приложения из переменных окружения.
+class TrackedClan:
+    """Активный отслеживаемый клан конкретного Telegram-чата.
 
     Attributes:
         chat_id: ID Telegram-чата.
@@ -95,7 +104,7 @@ class AppConfig:
     sort_order: int
 
     def to_clan_config(self) -> ClanConfig:
-        """Преобразует запись runtime-клана в совместимую модель клана.
+        """Преобразует runtime-запись клана в совместимую модель.
 
         Returns:
             Короткая модель клана для доменных sync-модулей.
@@ -151,7 +160,7 @@ class SheetBinding:
 
     chat_id: int
     google_sheet_id: str
-    google_service_account_file: Path
+    spreadsheet_url: str
     composition_sheet_name: str
     composition_sheet_id: int | None
     active_cwl_sheet_name: str
@@ -235,6 +244,27 @@ class ChatSyncConfig:
             column_profiles=config.column_profiles,
             timezone=config.timezone,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SetupToken:
+    """Одноразовый токен подключения Telegram-группы.
+
+    Attributes:
+        token: Секретная часть команды `/connect`.
+        created_by_user_id: Telegram user ID администратора, создавшего токен.
+        expires_at: ISO-дата истечения токена.
+        used_chat_id: ID чата, где токен использован, или `None`.
+        used_at: ISO-дата использования или `None`.
+        created_at: ISO-дата создания.
+    """
+
+    token: str
+    created_by_user_id: int
+    expires_at: str
+    used_chat_id: int | None
+    used_at: str | None
+    created_at: str
 
 
 @dataclass(frozen=True, slots=True)

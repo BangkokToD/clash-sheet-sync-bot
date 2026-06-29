@@ -1,4 +1,4 @@
-"""Минимальный repository-слой для runtime SQLite-хранилища."""
+"""Repository-слой для runtime SQLite-хранилища."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from models import (
     ColumnProfile,
     ColumnValueType,
     RuntimeChatConfig,
+    SetupToken,
     SheetBinding,
     SyncRunStatus,
     TableType,
@@ -52,6 +53,25 @@ class RuntimeConfigRepository:
 
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
+
+    async def get_chat_status(self, chat_id: int) -> TelegramChatStatus | None:
+        """Читает статус Telegram-чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+
+        Returns:
+            Статус чата или `None`, если чат неизвестен.
+        """
+
+        row = await fetch_one(
+            self._connection,
+            "SELECT status FROM telegram_chats WHERE chat_id = ?",
+            (chat_id,),
+        )
+        if row is None:
+            return None
+        return as_chat_status(row["status"])
 
     async def get_runtime_chat_config(self, chat_id: int) -> RuntimeChatConfig | None:
         """Собирает runtime-конфиг чата.
@@ -218,6 +238,289 @@ class RuntimeConfigRepository:
             parameters = (google_sheet_id, current_chat_id)
         row = await fetch_one(self._connection, f"{sql} LIMIT 1", parameters)
         return row is not None
+
+
+class SetupTokenRepository:
+    """Repository одноразовых setup-токенов.
+
+    Args:
+        connection: Открытое SQLite-подключение.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def create_setup_token(
+        self,
+        *,
+        token: str,
+        created_by_user_id: int,
+        expires_at: str,
+        created_at: str,
+    ) -> None:
+        """Создаёт setup-токен.
+
+        Args:
+            token: Секретная часть команды `/connect`.
+            created_by_user_id: Telegram user ID создателя.
+            expires_at: ISO-дата истечения.
+            created_at: ISO-дата создания.
+        """
+
+        await self._connection.execute(
+            """
+            INSERT INTO setup_tokens(token, created_by_user_id, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (token, created_by_user_id, expires_at, created_at),
+        )
+
+    async def get_setup_token(self, token: str) -> SetupToken | None:
+        """Читает setup-токен по секретному значению.
+
+        Args:
+            token: Секретная часть команды `/connect`.
+
+        Returns:
+            Токен или `None`.
+        """
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT token, created_by_user_id, expires_at, used_chat_id, used_at, created_at
+            FROM setup_tokens
+            WHERE token = ?
+            """,
+            (token,),
+        )
+        if row is None:
+            return None
+        return SetupToken(
+            token=as_str(row["token"], "token"),
+            created_by_user_id=as_int(row["created_by_user_id"], "created_by_user_id"),
+            expires_at=as_str(row["expires_at"], "expires_at"),
+            used_chat_id=as_optional_int(row["used_chat_id"], "used_chat_id"),
+            used_at=as_optional_str(row["used_at"], "used_at"),
+            created_at=as_str(row["created_at"], "created_at"),
+        )
+
+    async def mark_setup_token_used(self, *, token: str, used_chat_id: int, used_at: str) -> bool:
+        """Помечает setup-токен использованным.
+
+        Args:
+            token: Секретная часть команды `/connect`.
+            used_chat_id: ID группы, где токен применён.
+            used_at: ISO-дата использования.
+
+        Returns:
+            `True`, если токен был помечен использованным именно этим вызовом.
+        """
+
+        cursor = await self._connection.execute(
+            """
+            UPDATE setup_tokens
+            SET used_chat_id = ?, used_at = ?
+            WHERE token = ? AND used_at IS NULL
+            """,
+            (used_chat_id, used_at, token),
+        )
+        return cursor.rowcount == 1
+
+
+class TelegramChatRepository:
+    """Repository Telegram-чатов и связей с администраторами.
+
+    Args:
+        connection: Открытое SQLite-подключение.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def upsert_connected_chat(
+        self,
+        *,
+        chat_id: int,
+        title: str,
+        chat_type: str,
+        created_by_user_id: int,
+        now: str,
+    ) -> None:
+        """Создаёт или обновляет подключённый Telegram-чат.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            title: Название группы.
+            chat_type: Тип Telegram-чата.
+            created_by_user_id: Telegram user ID администратора.
+            now: ISO-дата операции.
+        """
+
+        await self._connection.execute(
+            """
+            INSERT INTO telegram_chats(
+                chat_id,
+                title,
+                type,
+                status,
+                created_by_user_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, 'waiting_for_sheet', ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                title = excluded.title,
+                type = excluded.type,
+                status = CASE
+                    WHEN telegram_chats.status IN ('disabled', 'not_configured')
+                    THEN 'waiting_for_sheet'
+                    ELSE telegram_chats.status
+                END,
+                created_by_user_id = COALESCE(
+                    telegram_chats.created_by_user_id,
+                    excluded.created_by_user_id
+                ),
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, title, chat_type, created_by_user_id, now, now),
+        )
+
+    async def upsert_known_chat(
+        self,
+        *,
+        chat_id: int,
+        title: str,
+        chat_type: str,
+        now: str,
+    ) -> None:
+        """Создаёт или обновляет известный, но ещё не настроенный Telegram-чат.
+
+        Метод используется для `/settings` в группе до `/connect`, чтобы связь
+        `chat_admin_links` не нарушала внешний ключ на `telegram_chats`.
+        Статус уже существующего чата не меняется.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            title: Название группы.
+            chat_type: Тип Telegram-чата.
+            now: ISO-дата операции.
+        """
+
+        await self._connection.execute(
+            """
+            INSERT INTO telegram_chats(
+                chat_id,
+                title,
+                type,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, 'not_configured', ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                title = excluded.title,
+                type = excluded.type,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, title, chat_type, now, now),
+        )
+
+    async def upsert_admin_link(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        linked_at: str,
+        last_admin_check_at: str | None = None,
+    ) -> None:
+        """Создаёт или реактивирует связь пользователя с группой.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            user_id: Telegram user ID.
+            linked_at: ISO-дата создания связи.
+            last_admin_check_at: ISO-дата последней положительной проверки админа.
+        """
+
+        await self._connection.execute(
+            """
+            INSERT INTO chat_admin_links(chat_id, user_id, is_active, linked_at, last_admin_check_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                is_active = 1,
+                last_admin_check_at = COALESCE(
+                    excluded.last_admin_check_at,
+                    chat_admin_links.last_admin_check_at
+                )
+            """,
+            (chat_id, user_id, linked_at, last_admin_check_at),
+        )
+
+    async def update_admin_check_at(self, *, chat_id: int, user_id: int, checked_at: str) -> None:
+        """Обновляет дату положительной проверки Telegram-админа.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            user_id: Telegram user ID.
+            checked_at: ISO-дата проверки.
+        """
+
+        await self._connection.execute(
+            """
+            UPDATE chat_admin_links
+            SET last_admin_check_at = ?
+            WHERE chat_id = ? AND user_id = ? AND is_active = 1
+            """,
+            (checked_at, chat_id, user_id),
+        )
+
+    async def has_active_admin_link(self, *, chat_id: int, user_id: int) -> bool:
+        """Проверяет, есть ли активная связь пользователя с группой.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            user_id: Telegram user ID.
+
+        Returns:
+            `True`, если пользователь связан с группой через setup-flow.
+        """
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT 1
+            FROM chat_admin_links
+            WHERE chat_id = ? AND user_id = ? AND is_active = 1
+            LIMIT 1
+            """,
+            (chat_id, user_id),
+        )
+        return row is not None
+
+    async def get_admin_check_at(self, *, chat_id: int, user_id: int) -> str | None:
+        """Читает дату последней положительной проверки Telegram-админа.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            user_id: Telegram user ID.
+
+        Returns:
+            ISO-дата или `None`.
+        """
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT last_admin_check_at
+            FROM chat_admin_links
+            WHERE chat_id = ? AND user_id = ? AND is_active = 1
+            """,
+            (chat_id, user_id),
+        )
+        if row is None:
+            return None
+        return as_optional_str(row["last_admin_check_at"], "last_admin_check_at")
 
 
 class AdminChatRepository:
