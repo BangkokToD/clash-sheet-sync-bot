@@ -1,4 +1,4 @@
-"""Загрузка и валидация конфигурации приложения."""
+"""Загрузка и валидация глобальной конфигурации приложения."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
-from models import AppConfig, ClanConfig, normalize_tag
+from models import AppConfig
 
 
 class ConfigError(RuntimeError):
@@ -16,13 +16,16 @@ class ConfigError(RuntimeError):
 
 
 def load_config(env_file: str | Path = ".env") -> AppConfig:
-    """Загружает конфигурацию из `.env` и окружения.
+    """Загружает глобальную конфигурацию из `.env` и окружения.
+
+    Runtime-настройки конкретных Telegram-групп не читаются из `.env`.
+    Они должны храниться в SQLite и загружаться через repository-слой.
 
     Args:
         env_file: Путь к `.env`-файлу. Переменные окружения имеют приоритет.
 
     Returns:
-        Проверенная конфигурация приложения.
+        Проверенная глобальная конфигурация приложения.
 
     Raises:
         ConfigError: Если обязательная переменная отсутствует или некорректна.
@@ -34,26 +37,24 @@ def load_config(env_file: str | Path = ".env") -> AppConfig:
     else:
         load_dotenv(override=False)
 
-    timezone = _required_env("TIMEZONE")
-    _validate_timezone(timezone)
+    default_timezone = _optional_env("DEFAULT_TIMEZONE", "Europe/Kyiv")
+    _validate_timezone(default_timezone)
 
     return AppConfig(
         telegram_bot_token=_required_env("TELEGRAM_BOT_TOKEN"),
-        telegram_allowed_user_ids=_parse_allowed_user_ids(
-            os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""),
-        ),
         coc_api_token=_required_env("COC_API_TOKEN"),
-        google_sheet_id=_required_env("GOOGLE_SHEET_ID"),
         google_service_account_file=Path(_required_env("GOOGLE_SERVICE_ACCOUNT_FILE")),
-        composition_sheet_name=_required_env("COMPOSITION_SHEET_NAME"),
-        cwl_sheet_name=_required_env("CWL_SHEET_NAME"),
-        clans=(_load_clan(1), _load_clan(2), _load_clan(3)),
-        composition_active_start_cell=_required_env("COMPOSITION_ACTIVE_START_CELL"),
-        composition_exited_start_cell=_required_env("COMPOSITION_EXITED_START_CELL"),
-        composition_managed_range=_required_env("COMPOSITION_MANAGED_RANGE"),
-        cwl_start_cell=_required_env("CWL_START_CELL"),
-        cwl_managed_range=_required_env("CWL_MANAGED_RANGE"),
-        timezone=timezone,
+        google_service_account_email=_optional_nullable_env("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
+        db_path=Path(_optional_env("DB_PATH", "bot.db")),
+        default_timezone=default_timezone,
+        max_clans_per_chat=_positive_int_env("MAX_CLANS_PER_CHAT", 20),
+        sync_cooldown_seconds=_non_negative_int_env("SYNC_COOLDOWN_SECONDS", 60),
+        max_concurrent_syncs=_positive_int_env("MAX_CONCURRENT_SYNCS", 3),
+        cwl_war_concurrency_limit=_positive_int_env("CWL_WAR_CONCURRENCY_LIMIT", 5),
+        admin_cache_ttl_seconds=_non_negative_int_env("ADMIN_CACHE_TTL_SECONDS", 300),
+        setup_token_ttl_seconds=_positive_int_env("SETUP_TOKEN_TTL_SECONDS", 900),
+        transfer_token_ttl_seconds=_positive_int_env("TRANSFER_TOKEN_TTL_SECONDS", 900),
+        report_max_items=_positive_int_env("REPORT_MAX_ITEMS", 50),
     )
 
 
@@ -76,58 +77,101 @@ def _required_env(name: str) -> str:
     return value.strip()
 
 
-def _parse_allowed_user_ids(raw_value: str) -> frozenset[int]:
-    """Парсит список разрешённых Telegram user ID.
-
-    Пустое значение трактуется как пустой список разрешённых пользователей,
-    а не как публичный доступ для всех.
+def _optional_env(name: str, default: str) -> str:
+    """Читает необязательную строковую переменную окружения.
 
     Args:
-        raw_value: Значение `TELEGRAM_ALLOWED_USER_IDS` из окружения.
+        name: Имя переменной окружения.
+        default: Значение по умолчанию.
 
     Returns:
-        Набор разрешённых Telegram user ID.
-
-    Raises:
-        ConfigError: Если один из ID не является положительным числом.
+        Непустое значение переменной или `default`.
     """
 
-    user_ids: set[int] = set()
-    for item in raw_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            user_id = int(item)
-        except ValueError as exc:
-            raise ConfigError(
-                "TELEGRAM_ALLOWED_USER_IDS должен содержать числа через запятую.",
-            ) from exc
-        if user_id <= 0:
-            raise ConfigError("Telegram user ID должен быть положительным числом.")
-        user_ids.add(user_id)
-    return frozenset(user_ids)
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip()
 
 
-def _load_clan(index: int) -> ClanConfig:
-    """Загружает конфигурацию одного клана по номеру.
+def _optional_nullable_env(name: str) -> str | None:
+    """Читает необязательную переменную окружения как строку или `None`.
 
     Args:
-        index: Номер клана в `.env`.
+        name: Имя переменной окружения.
 
     Returns:
-        Конфигурация клана.
-
-    Raises:
-        ConfigError: Если тег клана некорректен.
+        Непустое значение переменной или `None`.
     """
 
-    raw_tag = _required_env(f"CLAN_{index}_TAG")
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Читает положительную целочисленную переменную окружения.
+
+    Args:
+        name: Имя переменной окружения.
+        default: Значение по умолчанию.
+
+    Returns:
+        Положительное целое число.
+
+    Raises:
+        ConfigError: Если значение не является положительным числом.
+    """
+
+    value = _int_env(name, default)
+    if value <= 0:
+        raise ConfigError(f"{name} должен быть положительным числом.")
+    return value
+
+
+def _non_negative_int_env(name: str, default: int) -> int:
+    """Читает неотрицательную целочисленную переменную окружения.
+
+    Args:
+        name: Имя переменной окружения.
+        default: Значение по умолчанию.
+
+    Returns:
+        Неотрицательное целое число.
+
+    Raises:
+        ConfigError: Если значение отрицательное или не является числом.
+    """
+
+    value = _int_env(name, default)
+    if value < 0:
+        raise ConfigError(f"{name} должен быть неотрицательным числом.")
+    return value
+
+
+def _int_env(name: str, default: int) -> int:
+    """Читает целочисленную переменную окружения.
+
+    Args:
+        name: Имя переменной окружения.
+        default: Значение по умолчанию.
+
+    Returns:
+        Целое число.
+
+    Raises:
+        ConfigError: Если значение не является числом.
+    """
+
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+
     try:
-        tag = normalize_tag(raw_tag)
+        return int(raw_value.strip())
     except ValueError as exc:
-        raise ConfigError(f"Некорректный CLAN_{index}_TAG: {exc}") from exc
-    return ClanConfig(tag=tag, name=_required_env(f"CLAN_{index}_NAME"))
+        raise ConfigError(f"{name} должен быть целым числом.") from exc
 
 
 def _validate_timezone(timezone: str) -> None:
@@ -143,4 +187,4 @@ def _validate_timezone(timezone: str) -> None:
     try:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
-        raise ConfigError(f"Некорректная TIMEZONE: {timezone}.") from exc
+        raise ConfigError(f"Некорректная DEFAULT_TIMEZONE: {timezone}.") from exc

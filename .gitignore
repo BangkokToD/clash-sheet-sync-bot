@@ -1,5 +1,8 @@
 .env
 credentials.json
+bot.db
+bot.db-shm
+bot.db-wal
 sync_settings.json
 *.log
 __pycache__/
