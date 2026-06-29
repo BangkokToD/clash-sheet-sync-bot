@@ -55,6 +55,21 @@ class SheetMetadata:
     title: str
 
 
+@dataclass(frozen=True, slots=True)
+class SpreadsheetMetadata:
+    """Метаданные Google Spreadsheet.
+
+    Attributes:
+        spreadsheet_id: ID Google Spreadsheet.
+        title: Название Spreadsheet.
+        sheets: Листы документа.
+    """
+
+    spreadsheet_id: str
+    title: str
+    sheets: tuple[SheetMetadata, ...]
+
+
 class GoogleSheetsError(RuntimeError):
     """Базовая ошибка Google Sheets клиента."""
 
@@ -93,6 +108,22 @@ class GoogleAccessTokenProvider:
             raise GoogleSheetsAuthError("Не удалось загрузить service account.") from exc
 
         self._lock = asyncio.Lock()
+
+    @property
+    def client_email(self) -> str:
+        """Возвращает client_email service account.
+
+        Returns:
+            Email service account из credentials.json.
+
+        Raises:
+            GoogleSheetsAuthError: Если credentials не содержат email.
+        """
+
+        email = getattr(self._credentials, "service_account_email", None)
+        if not isinstance(email, str) or email.strip() == "":
+            raise GoogleSheetsAuthError("Service account не содержит client_email.")
+        return email
 
     async def get_token(self) -> str:
         """Возвращает актуальный access token.
@@ -148,6 +179,40 @@ class SheetsClient:
         self._client = client
         self._base_url = base_url.rstrip("/")
 
+    async def get_spreadsheet_metadata(self) -> SpreadsheetMetadata:
+        """Читает metadata всего Google Spreadsheet.
+
+        Returns:
+            Метаданные Spreadsheet и всех листов.
+
+        Raises:
+            GoogleSheetsReadError: Если metadata недоступна или невалидна.
+        """
+
+        query = urlencode(
+            {
+                "fields": "spreadsheetId,properties(title),sheets(properties(sheetId,title,index,hidden))",
+            },
+        )
+        data = await self._request_json(
+            method="GET",
+            path=f"/{self._sheet_id}?{query}",
+            error_cls=GoogleSheetsReadError,
+        )
+        spreadsheet_id = _read_str(data, "spreadsheetId", "spreadsheet metadata")
+        properties = _read_dict(data, "properties", "spreadsheet metadata")
+        title = _read_str(properties, "title", "spreadsheet properties")
+        sheets = data.get("sheets")
+        if not isinstance(sheets, list):
+            raise GoogleSheetsReadError("Google Sheets metadata не содержит sheets.")
+
+        return SpreadsheetMetadata(
+            spreadsheet_id=spreadsheet_id,
+            title=title,
+            sheets=tuple(_parse_sheet_metadata(raw_sheet) for raw_sheet in sheets),
+        )
+
+
     async def get_sheet_metadata(self, sheet_name: str) -> SheetMetadata:
         """Читает метаданные листа.
 
@@ -161,25 +226,15 @@ class SheetsClient:
             GoogleSheetsReadError: Если лист не найден или ответ невалиден.
         """
 
-        query = urlencode(
-            {
-                "fields": "sheets(properties(sheetId,title))",
-            },
-        )
-        data = await self._request_json(
-            method="GET",
-            path=f"/{self._sheet_id}?{query}",
-            error_cls=GoogleSheetsReadError,
-        )
+        metadata = await self.get_spreadsheet_metadata()
+        for sheet in metadata.sheets:
+            if sheet.title == sheet_name:
+                return sheet
 
-        sheets = data.get("sheets")
-        if not isinstance(sheets, list):
-            raise GoogleSheetsReadError("Google Sheets metadata не содержит sheets.")
-
-        for raw_sheet in sheets:
-            metadata = _parse_sheet_metadata(raw_sheet)
-            if metadata.title == sheet_name:
-                return metadata
+        if metadata.title == sheet_name:
+            raise GoogleSheetsReadError(
+                "Название spreadsheet совпадает с названием листа, но лист не найден.",
+            )
 
         raise GoogleSheetsReadError(f"Лист {sheet_name} не найден.")
 
@@ -322,6 +377,209 @@ class SheetsClient:
             ],
         )
 
+    async def add_sheet(self, title: str) -> SheetMetadata:
+        """Создаёт лист в Spreadsheet.
+
+        Args:
+            title: Название нового листа.
+
+        Returns:
+            Метаданные созданного листа.
+        """
+
+        data = await self.batch_update_spreadsheet(
+            [
+                {
+                    "addSheet": {
+                        "properties": {
+                            "title": title,
+                        },
+                    },
+                },
+            ],
+        )
+        return _read_sheet_metadata_from_reply(data, "addSheet")
+
+    async def duplicate_sheet(self, source_sheet_id: int, new_title: str) -> SheetMetadata:
+        """Дублирует существующий лист.
+
+        Args:
+            source_sheet_id: ID исходного листа.
+            new_title: Название нового листа.
+
+        Returns:
+            Метаданные созданной копии.
+        """
+
+        data = await self.batch_update_spreadsheet(
+            [
+                {
+                    "duplicateSheet": {
+                        "sourceSheetId": source_sheet_id,
+                        "newSheetName": new_title,
+                    },
+                },
+            ],
+        )
+        return _read_sheet_metadata_from_reply(data, "duplicateSheet")
+
+    async def rename_sheet(self, sheet_id: int, title: str) -> None:
+        """Переименовывает лист.
+
+        Args:
+            sheet_id: Числовой ID листа.
+            title: Новое название.
+        """
+
+        await self.update_sheet_properties(
+            sheet_id=sheet_id,
+            properties={"title": title},
+            fields="title",
+        )
+
+    async def move_sheet(self, sheet_id: int, index: int) -> None:
+        """Меняет позицию листа в Spreadsheet.
+
+        Args:
+            sheet_id: Числовой ID листа.
+            index: Новый индекс листа.
+        """
+
+        await self.update_sheet_properties(
+            sheet_id=sheet_id,
+            properties={"index": index},
+            fields="index",
+        )
+
+    async def hide_sheet(self, sheet_id: int, *, hidden: bool = True) -> None:
+        """Скрывает или показывает лист.
+
+        Args:
+            sheet_id: Числовой ID листа.
+            hidden: Нужно ли скрыть лист.
+        """
+
+        await self.update_sheet_properties(
+            sheet_id=sheet_id,
+            properties={"hidden": hidden},
+            fields="hidden",
+        )
+
+    async def update_sheet_properties(
+        self,
+        *,
+        sheet_id: int,
+        properties: JsonObject,
+        fields: str,
+    ) -> None:
+        """Обновляет свойства листа.
+
+        Args:
+            sheet_id: Числовой ID листа.
+            properties: Свойства листа без `sheetId`.
+            fields: Field mask Google Sheets API.
+        """
+
+        payload_properties: JsonObject = {"sheetId": sheet_id, **properties}
+        await self.batch_update_spreadsheet(
+            [
+                {
+                    "updateSheetProperties": {
+                        "properties": payload_properties,
+                        "fields": fields,
+                    },
+                },
+            ],
+        )
+
+    async def hide_dimension(
+        self,
+        *,
+        sheet_id: int,
+        dimension: str,
+        start_index: int,
+        end_index: int,
+        hidden: bool = True,
+    ) -> None:
+        """Скрывает или показывает диапазон строк/колонок.
+
+        Args:
+            sheet_id: Числовой ID листа.
+            dimension: `ROWS` или `COLUMNS`.
+            start_index: Начальный zero-based индекс.
+            end_index: Конечный exclusive zero-based индекс.
+            hidden: Нужно ли скрыть измерение.
+
+        Raises:
+            GoogleSheetsWriteError: Если аргументы некорректны.
+        """
+
+        if dimension not in {"ROWS", "COLUMNS"}:
+            raise GoogleSheetsWriteError("dimension должен быть ROWS или COLUMNS.")
+        if start_index < 0 or end_index <= start_index:
+            raise GoogleSheetsWriteError("Диапазон dimension задан некорректно.")
+
+        await self.batch_update_spreadsheet(
+            [
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": dimension,
+                            "startIndex": start_index,
+                            "endIndex": end_index,
+                        },
+                        "properties": {"hiddenByUser": hidden},
+                        "fields": "hiddenByUser",
+                    },
+                },
+            ],
+        )
+
+    async def write_values(self, sheet_name: str, range_a1: str, values: Sequence[Sequence[CellValue]]) -> None:
+        """Записывает один диапазон значений с `RAW`.
+
+        Args:
+            sheet_name: Название листа.
+            range_a1: A1-диапазон без названия листа.
+            values: Матрица значений.
+        """
+
+        await self.batch_update_values(
+            [
+                SheetValues(
+                    sheet_name=sheet_name,
+                    range_a1=range_a1,
+                    values=values,
+                ),
+            ],
+        )
+
+    async def clear_blocks(self, blocks: Sequence[tuple[str, str, int, int]]) -> None:
+        """Очищает прошлые управляемые блоки записью пустых строк.
+
+        Args:
+            blocks: Кортежи `(sheet_name, start_cell, rows_count, columns_count)`.
+        """
+
+        updates: list[SheetValues] = []
+        for sheet_name, start_cell, rows_count, columns_count in blocks:
+            if rows_count <= 0 or columns_count <= 0:
+                continue
+            range_a1 = range_from_start_cell(
+                start_cell=start_cell,
+                rows_count=rows_count,
+                columns_count=columns_count,
+            )
+            updates.append(
+                SheetValues(
+                    sheet_name=sheet_name,
+                    range_a1=range_a1,
+                    values=[["" for _ in range(columns_count)] for _ in range(rows_count)],
+                ),
+            )
+        await self.batch_update_values(updates)
+
     async def _request_json(
         self,
         method: str,
@@ -403,6 +661,49 @@ def build_sheet_range(sheet_name: str, range_a1: str) -> str:
     return f"'{escaped_sheet_name}'!{range_a1}"
 
 
+def range_from_start_cell(*, start_cell: str, rows_count: int, columns_count: int) -> str:
+    """Строит закрытый A1-диапазон по стартовой ячейке и размеру.
+
+    Args:
+        start_cell: Стартовая ячейка, например `A1`.
+        rows_count: Количество строк.
+        columns_count: Количество колонок.
+
+    Returns:
+        A1-диапазон вида `A1:B2`.
+
+    Raises:
+        GoogleSheetsWriteError: Если аргументы некорректны.
+    """
+
+    if rows_count <= 0 or columns_count <= 0:
+        raise GoogleSheetsWriteError("Размер A1-диапазона должен быть положительным.")
+    start_column_number, start_row = parse_a1_cell(start_cell)
+    end_column = _number_to_column(start_column_number + columns_count - 1)
+    end_row = start_row + rows_count - 1
+    return f"{_number_to_column(start_column_number)}{start_row}:{end_column}{end_row}"
+
+
+def parse_a1_cell(cell: str) -> tuple[int, int]:
+    """Парсит A1-ячейку.
+
+    Args:
+        cell: A1-ячейка вида `A1`.
+
+    Returns:
+        Кортеж `(номер колонки с 1, номер строки с 1)`.
+
+    Raises:
+        GoogleSheetsWriteError: Если ячейка некорректна.
+    """
+
+    match = re.fullmatch(r"^\$?([A-Za-z]+)\$?([1-9][0-9]*)$", cell.strip())
+    if match is None:
+        raise GoogleSheetsWriteError(f"Некорректная A1-ячейка: {cell}.")
+    column, row_raw = match.groups()
+    return _column_to_number(column), int(row_raw)
+
+
 def _extract_google_error_message(response: httpx.Response) -> str:
     """Извлекает безопасный текст ошибки Google API.
 
@@ -445,6 +746,35 @@ def _truncate_error_message(message: str, limit: int = 500) -> str:
     return message if len(message) <= limit else f"{message[:limit]}..."
 
 
+def _read_sheet_metadata_from_reply(data: JsonObject, reply_key: str) -> SheetMetadata:
+    """Читает metadata созданного листа из batchUpdate replies.
+
+    Args:
+        data: JSON-ответ spreadsheets.batchUpdate.
+        reply_key: Ключ reply, например `addSheet`.
+
+    Returns:
+        Метаданные листа.
+
+    Raises:
+        GoogleSheetsWriteError: Если reply не содержит metadata.
+    """
+
+    replies = data.get("replies")
+    if not isinstance(replies, list) or not replies:
+        raise GoogleSheetsWriteError("Google Sheets batchUpdate не вернул replies.")
+    first_reply = replies[0]
+    if not isinstance(first_reply, dict):
+        raise GoogleSheetsWriteError("Google Sheets batchUpdate reply должен быть объектом.")
+    payload = first_reply.get(reply_key)
+    if not isinstance(payload, dict):
+        raise GoogleSheetsWriteError(f"Google Sheets reply не содержит {reply_key}.")
+    properties = payload.get("properties")
+    if not isinstance(properties, dict):
+        raise GoogleSheetsWriteError(f"Google Sheets {reply_key} не содержит properties.")
+    return _sheet_metadata_from_properties(properties, GoogleSheetsWriteError)
+
+
 def _parse_sheet_metadata(raw_sheet: object) -> SheetMetadata:
     """Парсит метаданные одного листа Google Sheets.
 
@@ -465,17 +795,52 @@ def _parse_sheet_metadata(raw_sheet: object) -> SheetMetadata:
     if not isinstance(properties, dict):
         raise GoogleSheetsReadError("Sheet metadata не содержит properties.")
 
+    return _sheet_metadata_from_properties(properties, GoogleSheetsReadError)
+
+
+def _sheet_metadata_from_properties(
+    properties: JsonObject,
+    error_cls: type[GoogleSheetsError],
+) -> SheetMetadata:
+    """Парсит свойства листа.
+
+    Args:
+        properties: JSON properties листа.
+        error_cls: Класс ошибки для невалидных данных.
+
+    Returns:
+        Метаданные листа.
+    """
+
     sheet_id = properties.get("sheetId")
     title = properties.get("title")
     if not isinstance(sheet_id, int) or isinstance(sheet_id, bool):
-        raise GoogleSheetsReadError("Sheet metadata содержит некорректный sheetId.")
+        raise error_cls("Sheet metadata содержит некорректный sheetId.")
     if not isinstance(title, str):
-        raise GoogleSheetsReadError("Sheet metadata содержит некорректный title.")
+        raise error_cls("Sheet metadata содержит некорректный title.")
 
     return SheetMetadata(
         sheet_id=sheet_id,
         title=title,
     )
+
+
+def _read_str(data: JsonObject, key: str, context: str) -> str:
+    """Читает обязательную строку из JSON-объекта."""
+
+    value = data.get(key)
+    if not isinstance(value, str):
+        raise GoogleSheetsReadError(f"{context}: поле {key} должно быть строкой.")
+    return value
+
+
+def _read_dict(data: JsonObject, key: str, context: str) -> JsonObject:
+    """Читает обязательный объект из JSON-объекта."""
+
+    value = data.get(key)
+    if not isinstance(value, dict):
+        raise GoogleSheetsReadError(f"{context}: поле {key} должно быть объектом.")
+    return value
 
 
 def _normalize_read_values(raw_values: list[Any]) -> list[list[CellValue]]:
@@ -621,6 +986,28 @@ def _column_to_number(column: str) -> int:
     for char in column.upper():
         number = number * 26 + ord(char) - ord("A") + 1
     return number
+
+
+def _number_to_column(number: int) -> str:
+    """Преобразует номер колонки в буквенное имя.
+
+    Args:
+        number: Номер колонки, начиная с 1.
+
+    Returns:
+        Буквенное имя колонки.
+
+    Raises:
+        GoogleSheetsWriteError: Если номер некорректен.
+    """
+
+    if number <= 0:
+        raise GoogleSheetsWriteError("Номер колонки должен быть положительным.")
+    chars: list[str] = []
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        chars.append(chr(ord("A") + remainder))
+    return "".join(reversed(chars))
 
 
 class _HttpxGoogleAuthResponse:

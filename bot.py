@@ -146,12 +146,18 @@ class BotApp:
         if chat is None or user_id is None:
             return
 
-        command = _extract_command(message.get("text"), self._bot_username)
-        if command is None:
-            return
-
         flow = self._setup_flow()
         is_private = chat.type == "private"
+        raw_text = message.get("text")
+        command = _extract_command(raw_text, self._bot_username)
+        if command is None:
+            if is_private and isinstance(raw_text, str):
+                await flow.handle_private_text(
+                    chat_id=chat.chat_id,
+                    user_id=user_id,
+                    text=raw_text,
+                )
+            return
 
         if command.name == "/start":
             if is_private:

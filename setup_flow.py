@@ -9,14 +9,17 @@ from html import escape
 from typing import Final
 
 import aiosqlite
+import httpx
 
 from models import AppConfig, SetupToken
 from repositories import (
     AdminChatRepository,
     RuntimeConfigRepository,
+    SheetBindingRepository,
     SetupTokenRepository,
     TelegramChatRepository,
 )
+from sheet_admin import SheetAdminError, SheetAdminService, extract_spreadsheet_id
 from storage import transaction
 from telegram_access import TelegramAccessService
 from telegram_client import (
@@ -25,12 +28,21 @@ from telegram_client import (
     TelegramClient,
     TelegramMessageNotModifiedError,
 )
+from sheets_client import (
+    GoogleAccessTokenProvider,
+    GoogleSheetsAuthError,
+    SheetsClient,
+)
 
 CALLBACK_CONNECT_GROUP: Final = "setup:create_token"
 CALLBACK_MY_GROUPS: Final = "setup:my_groups"
 CALLBACK_HELP: Final = "setup:help"
 CALLBACK_SETTINGS_PREFIX: Final = "settings:open:"
 CALLBACK_SETTINGS_SECTION_PREFIX: Final = "settings:section:"
+CALLBACK_BIND_SHEET_PREFIX: Final = "sheet:bind:"
+CALLBACK_CHECK_SHEET_PREFIX: Final = "sheet:check:"
+AWAITING_SHEET_LINK_STATE_PREFIX: Final = "awaiting_sheet_link:"
+AWAITING_SHEET_ACCESS_STATE_PREFIX: Final = "awaiting_sheet_access:"
 SETTINGS_SECTIONS: Final = {
     "table": "Таблица",
     "clans": "Кланы",
@@ -85,6 +97,7 @@ class SetupFlow:
         self._setup_tokens = SetupTokenRepository(connection)
         self._telegram_chats = TelegramChatRepository(connection)
         self._admin_chats = AdminChatRepository(connection)
+        self._sheet_bindings = SheetBindingRepository(connection)
         self._runtime = RuntimeConfigRepository(connection)
 
     async def send_private_start(self, chat_id: int) -> None:
@@ -149,6 +162,51 @@ class SetupFlow:
         """
 
         await self._telegram.send_message(chat_id=chat_id, text="Текущая настройка сброшена.")
+    async def handle_private_text(self, *, chat_id: int, user_id: int, text: str) -> None:
+        """Обрабатывает текст в личке, если бот ждёт ссылку на таблицу.
+
+        Args:
+            chat_id: ID личного чата.
+            user_id: Telegram user ID.
+            text: Текст сообщения.
+        """
+
+        pending = await self._telegram_chats.find_pending_sheet_link_setup(
+            user_id=user_id,
+            state_prefix=AWAITING_SHEET_LINK_STATE_PREFIX,
+        )
+        if pending is None:
+            return
+
+        try:
+            spreadsheet_id = extract_spreadsheet_id(text)
+        except SheetAdminError as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return
+
+        if await self._runtime.is_google_sheet_bound_elsewhere(
+            spreadsheet_id,
+            current_chat_id=pending.chat_id,
+        ):
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text=(
+                    "Эта таблица уже привязана к другой группе.\n"
+                    "Для переноса используйте сценарий переноса таблицы."
+                ),
+            )
+            return
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._telegram_chats.set_setup_state(
+                chat_id=pending.chat_id,
+                setup_state=_sheet_access_state(user_id, spreadsheet_id),
+                now=now,
+            )
+
+        await self._send_sheet_access_instruction(chat_id=chat_id, group_chat_id=pending.chat_id)
+
 
     async def create_setup_token(self, *, chat_id: int, user_id: int) -> None:
         """Создаёт setup-токен и отправляет команду `/connect` админу.
@@ -397,6 +455,23 @@ class SetupFlow:
                 user_id=user_id,
             )
             return
+        if callback_data.startswith(CALLBACK_BIND_SHEET_PREFIX):
+            await self._start_sheet_binding(
+                callback_data=callback_data,
+                callback_query_id=callback_query_id,
+                chat_id=chat_id,
+                user_id=user_id,
+            )
+            return
+        if callback_data.startswith(CALLBACK_CHECK_SHEET_PREFIX):
+            await self._check_sheet_access(
+                callback_data=callback_data,
+                callback_query_id=callback_query_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                user_id=user_id,
+            )
+            return
 
         await self._telegram.answer_callback_query(
             callback_query_id,
@@ -595,6 +670,262 @@ class SetupFlow:
                 show_alert=True,
             )
             return None
+    async def _show_table_section(
+        self,
+        *,
+        group_chat_id: int,
+        chat_id: int,
+        message_id: int,
+    ) -> None:
+        """Показывает раздел привязки Google-таблицы.
+
+        Args:
+            group_chat_id: ID настраиваемой Telegram-группы.
+            chat_id: ID личного чата.
+            message_id: ID сообщения для редактирования.
+        """
+
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Раздел «Таблица». Вы можете привязать новую Google-таблицу.",
+            reply_markup=sheet_section_keyboard(group_chat_id),
+        )
+
+    async def _start_sheet_binding(
+        self,
+        *,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        user_id: int,
+    ) -> None:
+        """Переводит группу в ожидание ссылки на Google-таблицу.
+
+        Args:
+            callback_data: Callback data с ID группы.
+            callback_query_id: ID callback query.
+            chat_id: ID личного чата.
+            user_id: Telegram user ID.
+        """
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_BIND_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(
+                callback_query_id,
+                "Нет доступа к настройкам этой группы.",
+                show_alert=True,
+            )
+            return
+
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._telegram_chats.set_setup_state(
+                chat_id=group_chat_id,
+                setup_state=_sheet_link_state(user_id),
+                now=now,
+            )
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text="Отправьте ссылку на Google-таблицу.",
+        )
+
+    async def _check_sheet_access(
+        self,
+        *,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Проверяет доступ к таблице и сохраняет binding.
+
+        Args:
+            callback_data: Callback data с ID группы.
+            callback_query_id: ID callback query.
+            chat_id: ID личного чата.
+            message_id: ID сообщения для редактирования.
+            user_id: Telegram user ID.
+        """
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_CHECK_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(
+                callback_query_id,
+                "Нет доступа к настройкам этой группы.",
+                show_alert=True,
+            )
+            return
+
+        setup_state = await self._telegram_chats.get_setup_state(group_chat_id)
+        spreadsheet_id = _spreadsheet_id_from_access_state(setup_state, user_id)
+        if spreadsheet_id is None:
+            await self._telegram.answer_callback_query(
+                callback_query_id,
+                "Ссылка на таблицу не найдена. Отправьте ссылку заново.",
+                show_alert=True,
+            )
+            return
+
+        if await self._runtime.is_google_sheet_bound_elsewhere(
+            spreadsheet_id,
+            current_chat_id=group_chat_id,
+        ):
+            await self._telegram.answer_callback_query(
+                callback_query_id,
+                "Эта таблица уже привязана к другой группе.",
+                show_alert=True,
+            )
+            return
+
+        await self._telegram.answer_callback_query(callback_query_id, "Проверяю доступ.")
+        try:
+            setup_result = await self._initialize_sheet(group_chat_id, spreadsheet_id)
+        except (GoogleSheetsAuthError, SheetAdminError) as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            if await self._runtime.is_google_sheet_bound_elsewhere(
+                spreadsheet_id,
+                current_chat_id=group_chat_id,
+            ):
+                await self._telegram.send_message(
+                    chat_id=chat_id,
+                    text="Эта таблица уже привязана к другой группе.",
+                )
+                return
+            await self._sheet_bindings.upsert_active_binding(
+                chat_id=group_chat_id,
+                google_sheet_id=setup_result.spreadsheet_id,
+                spreadsheet_url=setup_result.spreadsheet_url,
+                composition_sheet_name=setup_result.composition_sheet_name,
+                composition_sheet_id=setup_result.composition_sheet_id,
+                active_cwl_sheet_name=setup_result.active_cwl_sheet_name,
+                active_cwl_sheet_id=setup_result.active_cwl_sheet_id,
+                active_cwl_season=setup_result.active_cwl_season,
+                bot_state_sheet_name=setup_result.bot_state_sheet_name,
+                bot_state_sheet_id=setup_result.bot_state_sheet_id,
+                timezone=self._config.default_timezone,
+                now=now,
+            )
+            await self._telegram_chats.set_setup_state(
+                chat_id=group_chat_id,
+                setup_state=None,
+                now=now,
+            )
+            await self._telegram_chats.set_status(
+                chat_id=group_chat_id,
+                status="waiting_for_clans",
+                now=now,
+            )
+
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                "Таблица привязана.\n\n"
+                "Следующий шаг: откройте раздел «Кланы» и добавьте хотя бы один клан."
+            ),
+            reply_markup=settings_menu_keyboard(group_chat_id),
+        )
+
+    async def _initialize_sheet(self, group_chat_id: int, spreadsheet_id: str):
+        """Инициализирует Google Sheets для новой привязки.
+
+        Args:
+            group_chat_id: ID Telegram-группы.
+            spreadsheet_id: ID Google Spreadsheet.
+
+        Returns:
+            Результат подготовки листов.
+        """
+
+        token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            sheets_client = SheetsClient(spreadsheet_id, token_provider, http_client)
+            admin = SheetAdminService(
+                sheets_client=sheets_client,
+                spreadsheet_id=spreadsheet_id,
+                service_account_email=token_provider.client_email,
+                expected_service_account_email=self._config.google_service_account_email,
+            )
+            return await admin.initialize_new_binding(
+                chat_id=group_chat_id,
+                timezone=self._config.default_timezone,
+            )
+
+    async def _send_sheet_access_instruction(self, *, chat_id: int, group_chat_id: int) -> None:
+        """Показывает service account email и кнопку проверки доступа.
+
+        Args:
+            chat_id: ID личного чата.
+            group_chat_id: ID настраиваемой Telegram-группы.
+        """
+
+        try:
+            token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
+            service_account_email = token_provider.client_email
+        except GoogleSheetsAuthError as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return
+
+        if (
+            self._config.google_service_account_email is not None
+            and self._config.google_service_account_email != service_account_email
+        ):
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="GOOGLE_SERVICE_ACCOUNT_EMAIL не совпадает с client_email credentials.json.",
+            )
+            return
+
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=(
+                "Добавьте этот email в Google-таблицу с правами Редактор:\n\n"
+                f"<code>{escape(service_account_email)}</code>\n\n"
+                "После этого нажмите «Проверить доступ»."
+            ),
+            reply_markup=check_sheet_access_keyboard(group_chat_id),
+            parse_mode="HTML",
+        )
+
+    async def _has_group_settings_access(self, *, group_chat_id: int, user_id: int) -> bool:
+        """Проверяет доступ пользователя к настройкам группы.
+
+        Args:
+            group_chat_id: ID Telegram-группы.
+            user_id: Telegram user ID.
+
+        Returns:
+            `True`, если пользователь связан с группой через setup-flow.
+        """
+
+        return await self._telegram_chats.has_active_admin_link(
+            chat_id=group_chat_id,
+            user_id=user_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +1025,56 @@ def settings_menu_keyboard(group_chat_id: int) -> JsonObject:
     }
 
 
+
+def sheet_section_keyboard(group_chat_id: int) -> JsonObject:
+    """Создаёт клавиатуру раздела таблицы.
+
+    Args:
+        group_chat_id: ID Telegram-группы.
+
+    Returns:
+        Telegram inline keyboard.
+    """
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Привязать таблицу",
+                    "callback_data": f"{CALLBACK_BIND_SHEET_PREFIX}{group_chat_id}",
+                },
+            ],
+            [
+                {
+                    "text": "Назад",
+                    "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}",
+                },
+            ],
+        ],
+    }
+
+
+def check_sheet_access_keyboard(group_chat_id: int) -> JsonObject:
+    """Создаёт клавиатуру проверки доступа к таблице.
+
+    Args:
+        group_chat_id: ID Telegram-группы.
+
+    Returns:
+        Telegram inline keyboard.
+    """
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Проверить доступ",
+                    "callback_data": f"{CALLBACK_CHECK_SHEET_PREFIX}{group_chat_id}",
+                },
+            ],
+        ],
+    }
+
 def _validate_setup_token(
     setup_token: SetupToken | None,
     raw_token: str,
@@ -778,3 +1159,48 @@ def _format_dt(value: datetime) -> str:
     """
 
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _sheet_link_state(user_id: int) -> str:
+    """Создаёт setup_state ожидания ссылки на таблицу.
+
+    Args:
+        user_id: Telegram user ID администратора.
+
+    Returns:
+        Значение setup_state.
+    """
+
+    return f"{AWAITING_SHEET_LINK_STATE_PREFIX}{user_id}"
+
+
+def _sheet_access_state(user_id: int, spreadsheet_id: str) -> str:
+    """Создаёт setup_state ожидания проверки доступа.
+
+    Args:
+        user_id: Telegram user ID администратора.
+        spreadsheet_id: ID Google Spreadsheet.
+
+    Returns:
+        Значение setup_state.
+    """
+
+    return f"{AWAITING_SHEET_ACCESS_STATE_PREFIX}{user_id}:{spreadsheet_id}"
+
+
+def _spreadsheet_id_from_access_state(setup_state: str | None, user_id: int) -> str | None:
+    """Извлекает spreadsheet_id из setup_state проверки доступа.
+
+    Args:
+        setup_state: Текущее setup_state группы.
+        user_id: Telegram user ID администратора.
+
+    Returns:
+        ID Google Spreadsheet или `None`.
+    """
+
+    expected_prefix = f"{AWAITING_SHEET_ACCESS_STATE_PREFIX}{user_id}:"
+    if setup_state is None or not setup_state.startswith(expected_prefix):
+        return None
+    spreadsheet_id = setup_state.removeprefix(expected_prefix).strip()
+    return spreadsheet_id or None

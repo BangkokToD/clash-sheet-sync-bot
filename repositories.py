@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import aiosqlite
 
+from models import SheetBlock
 from models import (
     ColumnKind,
     ColumnProfile,
@@ -42,6 +43,21 @@ class KnownAdminChat:
     type: str
     status: TelegramChatStatus
     linked_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PendingSheetLinkSetup:
+    """Ожидаемый ввод ссылки на таблицу в личном чате.
+
+    Attributes:
+        chat_id: ID настраиваемой Telegram-группы.
+        title: Название Telegram-группы.
+        setup_state: Текущее состояние setup-flow.
+    """
+
+    chat_id: int
+    title: str
+    setup_state: str
 
 
 class RuntimeConfigRepository:
@@ -497,6 +513,99 @@ class TelegramChatRepository:
             (chat_id, user_id),
         )
         return row is not None
+    async def get_setup_state(self, chat_id: int) -> str | None:
+        """Читает setup_state Telegram-чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+
+        Returns:
+            Текущее setup_state или `None`.
+        """
+
+        row = await fetch_one(
+            self._connection,
+            "SELECT setup_state FROM telegram_chats WHERE chat_id = ?",
+            (chat_id,),
+        )
+        if row is None:
+            return None
+        return as_optional_str(row["setup_state"], "setup_state")
+
+    async def set_setup_state(self, *, chat_id: int, setup_state: str | None, now: str) -> None:
+        """Обновляет setup_state Telegram-чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            setup_state: Новое состояние setup-flow или `None`.
+            now: ISO-дата операции.
+        """
+
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET setup_state = ?, updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (setup_state, now, chat_id),
+        )
+
+    async def set_status(self, *, chat_id: int, status: TelegramChatStatus, now: str) -> None:
+        """Обновляет статус Telegram-чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            status: Новый статус настройки.
+            now: ISO-дата операции.
+        """
+
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET status = ?, updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (status, now, chat_id),
+        )
+
+    async def find_pending_sheet_link_setup(
+        self,
+        *,
+        user_id: int,
+        state_prefix: str,
+    ) -> PendingSheetLinkSetup | None:
+        """Ищет группу, ожидающую ссылку на таблицу от пользователя.
+
+        Args:
+            user_id: Telegram user ID администратора.
+            state_prefix: Prefix setup_state, который нужно найти.
+
+        Returns:
+            Ожидающий setup-flow или `None`.
+        """
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT c.chat_id, c.title, c.setup_state
+            FROM telegram_chats AS c
+            JOIN chat_admin_links AS l ON l.chat_id = c.chat_id
+            WHERE l.user_id = ?
+              AND l.is_active = 1
+              AND c.setup_state LIKE ?
+            ORDER BY c.updated_at DESC
+            LIMIT 1
+            """,
+            (user_id, f"{state_prefix}%"),
+        )
+        if row is None:
+            return None
+        return PendingSheetLinkSetup(
+            chat_id=as_int(row["chat_id"], "chat_id"),
+            title=as_str(row["title"], "title"),
+            setup_state=as_str(row["setup_state"], "setup_state"),
+        )
+
 
     async def get_admin_check_at(self, *, chat_id: int, user_id: int) -> str | None:
         """Читает дату последней положительной проверки Telegram-админа.
@@ -563,6 +672,186 @@ class AdminChatRepository:
                 linked_at=as_str(row["linked_at"], "linked_at"),
             )
             for row in rows
+        )
+
+
+class SheetBindingRepository:
+    """Repository привязок Telegram-чата к Google Sheets.
+
+    Args:
+        connection: Открытое SQLite-подключение.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def upsert_active_binding(
+        self,
+        *,
+        chat_id: int,
+        google_sheet_id: str,
+        spreadsheet_url: str,
+        composition_sheet_name: str,
+        composition_sheet_id: int,
+        active_cwl_sheet_name: str,
+        active_cwl_sheet_id: int,
+        active_cwl_season: str | None,
+        bot_state_sheet_name: str,
+        bot_state_sheet_id: int,
+        timezone: str,
+        now: str,
+    ) -> None:
+        """Создаёт или обновляет активную привязку таблицы.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            google_sheet_id: ID Google Spreadsheet.
+            spreadsheet_url: Нормализованная ссылка на Google Spreadsheet.
+            composition_sheet_name: Название листа состава.
+            composition_sheet_id: Числовой ID листа состава.
+            active_cwl_sheet_name: Название активного CWL-листа.
+            active_cwl_sheet_id: Числовой ID активного CWL-листа.
+            active_cwl_season: Текущий CWL-сезон или `None`.
+            bot_state_sheet_name: Название служебного листа.
+            bot_state_sheet_id: Числовой ID служебного листа.
+            timezone: IANA-таймзона чата.
+            now: ISO-дата операции.
+        """
+
+        await self._connection.execute(
+            """
+            INSERT INTO sheet_bindings(
+                chat_id,
+                google_sheet_id,
+                spreadsheet_url,
+                composition_sheet_name,
+                composition_sheet_id,
+                active_cwl_sheet_name,
+                active_cwl_sheet_id,
+                active_cwl_season,
+                bot_state_sheet_name,
+                bot_state_sheet_id,
+                timezone,
+                is_active,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                google_sheet_id = excluded.google_sheet_id,
+                spreadsheet_url = excluded.spreadsheet_url,
+                composition_sheet_name = excluded.composition_sheet_name,
+                composition_sheet_id = excluded.composition_sheet_id,
+                active_cwl_sheet_name = excluded.active_cwl_sheet_name,
+                active_cwl_sheet_id = excluded.active_cwl_sheet_id,
+                active_cwl_season = excluded.active_cwl_season,
+                bot_state_sheet_name = excluded.bot_state_sheet_name,
+                bot_state_sheet_id = excluded.bot_state_sheet_id,
+                timezone = excluded.timezone,
+                is_active = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                chat_id,
+                google_sheet_id,
+                spreadsheet_url,
+                composition_sheet_name,
+                composition_sheet_id,
+                active_cwl_sheet_name,
+                active_cwl_sheet_id,
+                active_cwl_season,
+                bot_state_sheet_name,
+                bot_state_sheet_id,
+                timezone,
+                now,
+                now,
+            ),
+        )
+
+
+class SheetBlockRepository:
+    """Repository последних управляемых прямоугольников Google Sheets.
+
+    Args:
+        connection: Открытое SQLite-подключение.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def list_blocks(self, chat_id: int, sheet_name: str | None = None) -> tuple[SheetBlock, ...]:
+        """Читает последние записанные блоки чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            sheet_name: Название листа или `None` для всех листов.
+
+        Returns:
+            Кортеж управляемых блоков.
+        """
+
+        sql = """
+            SELECT chat_id, sheet_name, sheet_id, block_key, start_cell, rows_count, columns_count
+            FROM sheet_blocks
+            WHERE chat_id = ?
+        """
+        parameters: tuple[object, ...] = (chat_id,)
+        if sheet_name is not None:
+            sql += " AND sheet_name = ?"
+            parameters = (chat_id, sheet_name)
+        sql += " ORDER BY sheet_name ASC, block_key ASC"
+        rows = await fetch_all(self._connection, sql, parameters)
+        return tuple(
+            SheetBlock(
+                chat_id=as_int(row["chat_id"], "chat_id"),
+                sheet_name=as_str(row["sheet_name"], "sheet_name"),
+                sheet_id=as_optional_int(row["sheet_id"], "sheet_id"),
+                block_key=as_str(row["block_key"], "block_key"),
+                start_cell=as_str(row["start_cell"], "start_cell"),
+                rows_count=as_int(row["rows_count"], "rows_count"),
+                columns_count=as_int(row["columns_count"], "columns_count"),
+            )
+            for row in rows
+        )
+
+    async def upsert_block(self, *, block: SheetBlock, updated_at: str) -> None:
+        """Создаёт или обновляет запись управляемого блока.
+
+        Args:
+            block: Описание последнего записанного прямоугольника.
+            updated_at: ISO-дата обновления.
+        """
+
+        await self._connection.execute(
+            """
+            INSERT INTO sheet_blocks(
+                chat_id,
+                sheet_name,
+                sheet_id,
+                block_key,
+                start_cell,
+                rows_count,
+                columns_count,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, sheet_name, block_key) DO UPDATE SET
+                sheet_id = excluded.sheet_id,
+                start_cell = excluded.start_cell,
+                rows_count = excluded.rows_count,
+                columns_count = excluded.columns_count,
+                updated_at = excluded.updated_at
+            """,
+            (
+                block.chat_id,
+                block.sheet_name,
+                block.sheet_id,
+                block.block_key,
+                block.start_cell,
+                block.rows_count,
+                block.columns_count,
+                updated_at,
+            ),
         )
 
 
