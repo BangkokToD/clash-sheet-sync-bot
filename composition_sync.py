@@ -1,45 +1,31 @@
-"""Синхронизация листа состава Clash of Clans."""
+"""Синхронизация листа состава в публичной runtime-архитектуре."""
 
 from __future__ import annotations
 
-import re
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from datetime import datetime
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Final
 
-from coc_client import ClashClient
-from config import AppConfig
-from models import ClanConfig, normalize_tag
-from sheets_client import (
-    CellValue,
-    SheetValues,
-    SheetsClient,
+from coc_client import ClashApiUnavailableError, ClashClient
+from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, table_title
+from models import ColumnProfile, RuntimeChatConfig, SheetBlock, TableType, TrackedClan, normalize_tag
+from repositories import (
+    CompositionPlayerState,
+    CompositionPlayerStateRepository,
+    SheetBlockRepository,
 )
+from sheets_client import CellValue, SheetValues, SheetsClient, range_from_start_cell
 
-ACTIVE_HEADERS: Final = (
-    "№",
-    "Тег",
-    "Ратуша",
-    "Никнейм",
-    "Юзернейм",
-    "Имя",
-    "Закрепление",
-    "Нарушения",
-)
-EXITED_HEADERS: Final = (*ACTIVE_HEADERS, "Дата выхода")
-PLAYER_TAG_RE: Final = re.compile(r"#[0289PYLQGRJCUV]+", re.IGNORECASE)
-A1_CELL_RE: Final = re.compile(r"^\$?([A-Za-z]+)\$?([1-9][0-9]*)$")
-A1_RANGE_RE: Final = re.compile(
-    r"^\$?([A-Za-z]+)\$?([1-9][0-9]*):\$?([A-Za-z]+)\$?([1-9][0-9]*)$",
-)
+COMPOSITION_PLAYER_KEY_PREFIX: Final = "composition_player:"
+ACTIVE_BLOCK_PREFIX: Final = "composition_active:"
+EXITED_BLOCK_KEY: Final = "composition_exited"
+COMPOSITION_ACTIVE_TABLE: Final[TableType] = "composition_active"
+COMPOSITION_EXITED_TABLE: Final[TableType] = "composition_exited"
+DEFAULT_ACTIVE_START_CELL: Final = "A1"
+TITLE_ROWS_COUNT: Final = 2
 
-GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
-DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
-WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
-BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
-LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
-BORDER_RGB: Final = {"red": 0.70, "green": 0.76, "blue": 0.73}
+JsonDict = dict[str, str]
 
 
 class CompositionSyncError(RuntimeError):
@@ -51,1465 +37,950 @@ class CompositionDataError(CompositionSyncError):
 
 
 @dataclass(frozen=True, slots=True)
-class UserFields:
-    """Пользовательские поля строки состава.
+class ImportedPlayerValues:
+    """Ручные и технические данные игрока, импортированные из текущего листа.
 
     Attributes:
-        username: Telegram username или другой идентификатор.
-        real_name: Реальное имя игрока.
-        assignment: Закрепление игрока.
-        violations: Нарушения игрока.
+        player_tag: Нормализованный тег игрока.
+        table_type: Тип таблицы, из которой прочитана строка.
+        clan_tag: Тег клана для active-блока или `None`.
+        town_hall: Ратуша из видимой system-колонки или `None`.
+        nickname: Ник из видимой system-колонки или `None`.
+        exited_at: Дата выхода из visible system-колонки или `None`.
+        user_values: Значения видимых user-колонок по `column_key`.
     """
 
-    username: str = ""
-    real_name: str = ""
-    assignment: str = ""
-    violations: str = ""
+    player_tag: str
+    table_type: TableType
+    clan_tag: str | None
+    town_hall: int | None
+    nickname: str | None
+    exited_at: str | None
+    user_values: JsonDict
 
 
 @dataclass(frozen=True, slots=True)
-class OldCompositionPlayer:
-    """Игрок, найденный на старом листе состава.
+class CompositionImportResult:
+    """Результат чтения текущего листа состава.
 
     Attributes:
-        tag: Нормализованный player tag.
-        town_hall: Старое значение ратуши.
-        nickname: Старый никнейм.
-        user_fields: Пользовательские поля.
-        is_exited: Находился ли игрок в таблице вышедших.
-        clan_tag: Тег старого активного клана, если удалось определить.
-        exited_at: Старая дата выхода.
+        players: Игроки по player tag.
+        warnings: Предупреждения импорта ручных полей.
     """
 
-    tag: str
-    town_hall: str
-    nickname: str
-    user_fields: UserFields
-    is_exited: bool
-    clan_tag: str | None = None
-    exited_at: str = ""
+    players: dict[str, ImportedPlayerValues]
+    warnings: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class CurrentClanMember:
-    """Текущий участник семейного клана из CoC API.
+    """Текущий участник активного отслеживаемого клана.
 
     Attributes:
-        tag: Нормализованный player tag.
-        name: Никнейм из CoC API.
-        town_hall_level: Уровень ратуши из CoC API.
-        clan: Конфигурация текущего клана.
-        api_order: Порядок игрока в ответе API.
+        player_tag: Нормализованный тег игрока.
+        nickname: Никнейм из CoC API.
+        town_hall: Уровень ратуши из CoC API.
+        clan_tag: Тег текущего клана.
+        clan_name: Название текущего клана.
     """
 
-    tag: str
-    name: str
-    town_hall_level: int
-    clan: ClanConfig
-    api_order: int
-
-
-@dataclass(frozen=True, slots=True)
-class CompositionPlayerRow:
-    """Строка игрока для нового листа состава.
-
-    Attributes:
-        tag: Нормализованный player tag.
-        town_hall: Значение ратуши.
-        nickname: Никнейм игрока.
-        user_fields: Пользовательские поля.
-        exited_at: Дата выхода для таблицы вышедших.
-        sort_key: Ключ сортировки внутри таблицы.
-    """
-
-    tag: str
-    town_hall: int | str
+    player_tag: str
     nickname: str
-    user_fields: UserFields
-    exited_at: str = ""
-    sort_key: tuple[Any, ...] = field(default_factory=tuple)
+    town_hall: int
+    clan_tag: str
+    clan_name: str
 
 
 @dataclass(frozen=True, slots=True)
-class CompositionChanges:
-    """Счётчики изменений состава.
+class PlannedPlayerState:
+    """Новое состояние игрока после сверки с CoC API.
 
     Attributes:
-        added: Количество новых игроков.
-        updated: Количество игроков с изменённой ратушей или ником.
-        moved: Количество переходов между семейными кланами.
-        exited: Количество новых выходов из семьи.
-        returned: Количество возвратов из таблицы вышедших.
+        player_tag: Нормализованный тег игрока.
+        status: `active`, `exited` или `untracked`.
+        clan_tag: Тег активного клана или `None`.
+        town_hall: Уровень ратуши или `None`.
+        nickname: Никнейм или `None`.
+        exited_at: ISO-дата выхода или `None`.
+        user_values: Пользовательские поля по `column_key`.
+        last_seen_at: ISO-дата последнего наблюдения в CoC API или `None`.
     """
 
-    added: int = 0
-    updated: int = 0
-    moved: int = 0
-    exited: int = 0
-    returned: int = 0
+    player_tag: str
+    status: str
+    clan_tag: str | None
+    town_hall: int | None
+    nickname: str | None
+    exited_at: str | None
+    user_values: JsonDict
+    last_seen_at: str | None
 
-    @property
-    def has_changes(self) -> bool:
-        """Проверяет наличие изменений.
 
-        Returns:
-            `True`, если хотя бы один счётчик больше нуля.
-        """
+@dataclass(frozen=True, slots=True)
+class CompositionDiffItem:
+    """Одно изменение состава.
 
-        return any((self.added, self.updated, self.moved, self.exited, self.returned))
+    Attributes:
+        kind: Тип изменения.
+        message: Человекочитаемое сообщение.
+    """
+
+    kind: str
+    message: str
 
 
 @dataclass(frozen=True, slots=True)
 class CompositionSyncResult:
-    """Результат успешной синхронизации состава.
+    """Результат синхронизации состава.
 
     Attributes:
-        clan_counts: Количество активных игроков по кланам.
-        exited_count: Количество игроков в таблице вышедших.
-        changes: Счётчики изменений.
+        active_counts: Количество активных игроков по кланам.
+        exited_count: Количество игроков в блоке вышедших.
+        diff_items: Изменения состава.
+        warnings: Предупреждения импорта ручных полей.
     """
 
-    clan_counts: tuple[tuple[str, int], ...]
+    active_counts: tuple[tuple[str, int], ...]
     exited_count: int
-    changes: CompositionChanges
+    diff_items: tuple[CompositionDiffItem, ...]
+    warnings: tuple[str, ...]
 
     def to_telegram_message(self) -> str:
-        """Формирует Telegram-отчёт об обновлении состава.
+        """Формирует Telegram-отчёт по составу.
 
         Returns:
-            Короткий отчёт для Telegram.
+            Короткий отчёт для будущего `/sync` orchestration.
         """
 
-        if not self.changes.has_changes:
-            return "Состав обновлён. Изменений нет."
-
         lines = ["Состав обновлён.", ""]
-        lines.extend(f"{name}: {count} игроков" for name, count in self.clan_counts)
-        lines.extend(
-            [
-                f"Вышедшие: {self.exited_count} игроков",
-                "",
-                f"Добавлено: {self.changes.added}",
-                f"Обновлено: {self.changes.updated}",
-                f"Перешло между кланами: {self.changes.moved}",
-                f"Вышло: {self.changes.exited}",
-                f"Вернулось: {self.changes.returned}",
-            ],
-        )
+        lines.extend(f"{clan_name}: {count}" for clan_name, count in self.active_counts)
+        lines.append(f"Вышедшие: {self.exited_count}")
+        if self.diff_items:
+            lines.extend(["", "Изменения:"])
+            lines.extend(item.message for item in self.diff_items)
+        if self.warnings:
+            lines.extend(["", "Предупреждения:"])
+            lines.extend(self.warnings)
         return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
-class ParsedComposition:
-    """Старое состояние листа состава.
+class BuiltBlock:
+    """Построенный блок листа состава.
 
     Attributes:
-        players_by_tag: Игроки, найденные на старом листе, по player tag.
+        block: Описание блока для `sheet_blocks`.
+        values: Матрица значений.
     """
 
-    players_by_tag: dict[str, OldCompositionPlayer]
-
-
-@dataclass(frozen=True, slots=True)
-class TableHeader:
-    """Найденный заголовок таблицы состава.
-
-    Attributes:
-        row_index: Индекс строки заголовка в матрице.
-        column_index: Индекс первой колонки таблицы.
-        is_exited: Таблица вышедших.
-        width: Ширина таблицы в колонках.
-        clan_tag: Тег активного клана для активной таблицы.
-    """
-
-    row_index: int
-    column_index: int
-    is_exited: bool
-    width: int
-    clan_tag: str | None = None
+    block: SheetBlock
+    values: list[list[CellValue]]
 
 
 async def run_composition_sync(
-    config: AppConfig,
+    *,
+    runtime_config: RuntimeChatConfig,
     clash_client: ClashClient,
     sheets_client: SheetsClient,
+    composition_repository: CompositionPlayerStateRepository,
+    sheet_block_repository: SheetBlockRepository,
     detected_at: datetime,
 ) -> CompositionSyncResult:
-    """Выполняет полную синхронизацию листа `Состав`.
+    """Выполняет синхронизацию листа `Состав`.
 
     Args:
-        config: Конфигурация приложения.
+        runtime_config: Runtime-настройки Telegram-чата.
         clash_client: Клиент Clash of Clans API.
         sheets_client: Клиент Google Sheets API.
-        detected_at: Дата и время обнаружения изменений.
+        composition_repository: Repository состояния игроков состава.
+        sheet_block_repository: Repository последних записанных блоков листа.
+        detected_at: Дата обнаружения изменений.
 
     Returns:
-        Результат успешной синхронизации.
+        Результат синхронизации состава.
 
     Raises:
-        CompositionDataError: Если данные старого листа или API некорректны.
-        ClashApiUnavailableError: Если Clash API недоступен.
-        GoogleSheetsError: Если Google Sheets недоступен.
+        CompositionDataError: Если runtime-конфиг или данные листа некорректны.
+        ClashApiUnavailableError: Если CoC API недоступно.
     """
 
-    current_members_by_clan = await _load_current_members(config, clash_client)
-    old_values = await sheets_client.read_values(
-        config.composition_sheet_name,
-        config.composition_managed_range,
-    )
-    old_composition = parse_old_composition(
-        old_values,
-        clans=config.clans,
-    )
+    if not runtime_config.active_clans:
+        raise CompositionDataError("Для синхронизации состава нужен хотя бы один активный клан.")
 
-    active_rows_by_clan, exited_rows, changes = _build_new_composition(
-        config=config,
-        old_composition=old_composition,
-        current_members_by_clan=current_members_by_clan,
+    sheet_name = runtime_config.sheet_binding.composition_sheet_name
+    previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
+    composition_blocks = tuple(
+        block
+        for block in previous_blocks
+        if block.block_key.startswith(ACTIVE_BLOCK_PREFIX) or block.block_key == EXITED_BLOCK_KEY
+    )
+    imported = await import_current_composition_sheet(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        blocks=composition_blocks,
+    )
+    existing_state = await composition_repository.list_players(runtime_config.chat_id)
+    current_members = await _load_current_members(runtime_config.active_clans, clash_client)
+    planned_states, diff_items = _plan_player_states(
+        runtime_config=runtime_config,
+        existing_state=existing_state,
+        imported=imported,
+        current_members=current_members,
         detected_at=detected_at,
     )
-
-    active_matrix, active_tables = _build_active_matrix_and_tables(
-        config, active_rows_by_clan,
+    built_blocks = build_composition_blocks(
+        runtime_config=runtime_config,
+        planned_states=planned_states,
     )
-    exited_matrix, exited_table = _build_exited_matrix_and_table(config, exited_rows)
-    table_specs = [*active_tables, exited_table]
-    sheet_metadata = await sheets_client.get_sheet_metadata(config.composition_sheet_name)
-
-    await sheets_client.rewrite_managed_range(
-        sheet_name=config.composition_sheet_name,
-        managed_range_a1=config.composition_managed_range,
-        updates=[
-            SheetValues(
-                sheet_name=config.composition_sheet_name,
-                range_a1=_range_from_start_cell(
-                    config.composition_active_start_cell,
-                    rows_count=len(active_matrix),
-                    columns_count=len(ACTIVE_HEADERS),
-                ),
-                values=active_matrix,
+    active_counts = tuple(
+        (
+            clan.clan_name,
+            sum(
+                1
+                for state in planned_states.values()
+                if state.status == "active" and state.clan_tag == clan.clan_tag
             ),
-            SheetValues(
-                sheet_name=config.composition_sheet_name,
-                range_a1=_range_from_start_cell(
-                    config.composition_exited_start_cell,
-                    rows_count=len(exited_matrix),
-                    columns_count=len(EXITED_HEADERS),
-                ),
-                values=exited_matrix,
-            ),
-        ],
+        )
+        for clan in runtime_config.active_clans
     )
-    await _format_composition_tables(
+    exited_count = sum(1 for state in planned_states.values() if state.status == "exited")
+
+    await _rewrite_composition_blocks(
         sheets_client=sheets_client,
-        sheet_id=sheet_metadata.sheet_id,
-        managed_range_a1=config.composition_managed_range,
-        table_specs=table_specs,
+        sheet_name=sheet_name,
+        previous_blocks=composition_blocks,
+        built_blocks=built_blocks,
     )
+    await _hide_bot_key_columns(runtime_config=runtime_config, sheets_client=sheets_client, built_blocks=built_blocks)
+
+    updated_at = _format_dt(detected_at)
+    for planned in planned_states.values():
+        await composition_repository.upsert_player_state(
+            chat_id=runtime_config.chat_id,
+            player_tag=planned.player_tag,
+            status=planned.status,
+            clan_tag=planned.clan_tag,
+            town_hall=planned.town_hall,
+            nickname=planned.nickname,
+            exited_at=planned.exited_at,
+            user_values=planned.user_values,
+            last_seen_at=planned.last_seen_at,
+            updated_at=updated_at,
+        )
+    for built_block in built_blocks:
+        await sheet_block_repository.upsert_block(block=built_block.block, updated_at=updated_at)
 
     return CompositionSyncResult(
-        clan_counts=tuple(
-            (clan.name, len(active_rows_by_clan.get(clan.tag, [])))
-            for clan in config.clans
-        ),
-        exited_count=len(exited_rows),
-        changes=changes,
+        active_counts=active_counts,
+        exited_count=exited_count,
+        diff_items=tuple(diff_items),
+        warnings=imported.warnings,
     )
 
 
-def parse_old_composition(
-    values: Sequence[Sequence[CellValue]],
+async def import_current_composition_sheet(
     *,
-    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
-) -> ParsedComposition:
-    """Парсит старый лист состава без привязки к номерам строк.
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    blocks: Sequence[SheetBlock],
+) -> CompositionImportResult:
+    """Импортирует ручные правки из текущих managed-блоков листа `Состав`.
 
     Args:
-        values: Значения из `COMPOSITION_MANAGED_RANGE`.
-        clans: Три семейных клана из конфигурации.
+        runtime_config: Runtime-настройки Telegram-чата.
+        sheets_client: Клиент Google Sheets API.
+        blocks: Последние записанные блоки состава из `sheet_blocks`.
 
     Returns:
-        Старое состояние состава.
-
-    Raises:
-        CompositionDataError: Если найден дубль или повреждённый тег.
+        Импортированные user-values и warnings.
     """
 
-    rows = [_normalize_row(row) for row in values]
-    headers = _find_table_headers(rows, clans)
-    known_clan_tags = {clan.tag for clan in clans}
-    players_by_tag: dict[str, OldCompositionPlayer] = {}
+    players: dict[str, ImportedPlayerValues] = {}
+    warnings: list[str] = []
+    sheet_name = runtime_config.sheet_binding.composition_sheet_name
 
-    for header in headers:
-        next_header_row = _find_next_header_row(headers, header)
-        for row in rows[header.row_index + 1 : next_header_row]:
-            player = _parse_player_row(row, header, known_clan_tags)
-            if player is None:
+    for block in blocks:
+        table_type = _table_type_from_block_key(block.block_key)
+        if table_type is None:
+            continue
+        block_range = range_from_start_cell(
+            start_cell=block.start_cell,
+            rows_count=block.rows_count,
+            columns_count=block.columns_count,
+        )
+        values = await sheets_client.read_values(sheet_name, block_range)
+        block_players, block_warnings = _parse_imported_block(
+            runtime_config=runtime_config,
+            block=block,
+            table_type=table_type,
+            values=values,
+        )
+        warnings.extend(block_warnings)
+        for player in block_players:
+            if player.player_tag in players:
+                warnings.append(f"Дубль строки игрока {player.player_tag} на листе `Состав`; использована первая строка.")
                 continue
-            if player.tag in players_by_tag:
-                raise CompositionDataError(
-                    f'найден дубль тега {player.tag} на листе "Состав".',
-                )
-            players_by_tag[player.tag] = player
+            players[player.player_tag] = player
 
-    return ParsedComposition(players_by_tag=players_by_tag)
+    return CompositionImportResult(players=players, warnings=tuple(warnings))
+
+
+def build_composition_blocks(
+    *,
+    runtime_config: RuntimeChatConfig,
+    planned_states: dict[str, PlannedPlayerState],
+) -> tuple[BuiltBlock, ...]:
+    """Строит блоки активных кланов и блока `Вышедшие`.
+
+    Args:
+        runtime_config: Runtime-настройки Telegram-чата.
+        planned_states: Запланированное состояние игроков.
+
+    Returns:
+        Блоки значений и metadata для `sheet_blocks`.
+    """
+
+    active_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_ACTIVE_TABLE)
+    exited_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_EXITED_TABLE)
+    active_width = len(active_columns)
+    exited_start_column = active_width + 2
+    built_blocks: list[BuiltBlock] = []
+    row_cursor = 1
+
+    for clan in runtime_config.active_clans:
+        states = _sorted_active_states(planned_states.values(), clan.clan_tag)
+        values = _build_block_values(
+            title=clan.clan_name,
+            columns=active_columns,
+            states=states,
+            table_type=COMPOSITION_ACTIVE_TABLE,
+        )
+        block = SheetBlock(
+            chat_id=runtime_config.chat_id,
+            sheet_name=runtime_config.sheet_binding.composition_sheet_name,
+            sheet_id=runtime_config.sheet_binding.composition_sheet_id,
+            block_key=f"{ACTIVE_BLOCK_PREFIX}{clan.clan_tag}",
+            start_cell=f"A{row_cursor}",
+            rows_count=len(values),
+            columns_count=active_width,
+        )
+        built_blocks.append(BuiltBlock(block=block, values=values))
+        row_cursor += len(values) + 1
+
+    exited_states = _sorted_exited_states(planned_states.values())
+    exited_values = _build_block_values(
+        title="Вышедшие",
+        columns=exited_columns,
+        states=exited_states,
+        table_type=COMPOSITION_EXITED_TABLE,
+    )
+    exited_block = SheetBlock(
+        chat_id=runtime_config.chat_id,
+        sheet_name=runtime_config.sheet_binding.composition_sheet_name,
+        sheet_id=runtime_config.sheet_binding.composition_sheet_id,
+        block_key=EXITED_BLOCK_KEY,
+        start_cell=f"{_number_to_column(exited_start_column)}1",
+        rows_count=len(exited_values),
+        columns_count=len(exited_columns),
+    )
+    built_blocks.append(BuiltBlock(block=exited_block, values=exited_values))
+    return tuple(built_blocks)
 
 
 async def _load_current_members(
-    config: AppConfig,
+    active_clans: Sequence[TrackedClan],
     clash_client: ClashClient,
-) -> dict[str, list[CurrentClanMember]]:
-    """Загружает текущий состав трёх кланов из CoC API.
+) -> dict[str, CurrentClanMember]:
+    """Загружает участников всех active tracked clans.
 
     Args:
-        config: Конфигурация приложения.
-        clash_client: Клиент Clash of Clans API.
+        active_clans: Активные кланы runtime-конфига.
+        clash_client: Клиент CoC API.
 
     Returns:
-        Участники по тегу клана.
-
-    Raises:
-        CompositionDataError: Если один player tag пришёл из двух кланов.
-        ClashApiUnavailableError: Если Clash API недоступен.
+        Участники по player tag.
     """
 
-    members_by_clan: dict[str, list[CurrentClanMember]] = {}
-    seen_tags: dict[str, str] = {}
-
-    for clan in config.clans:
-        raw_members = await clash_client.get_clan_members(clan.tag)
-        clan_members: list[CurrentClanMember] = []
-
-        for api_order, raw_member in enumerate(raw_members, start=1):
-            tag = _require_api_member_tag(raw_member)
-            name = _require_api_member_name(raw_member, tag)
-            town_hall_level = _require_api_member_town_hall(raw_member, tag)
-
-            previous_clan_tag = seen_tags.get(tag)
-            if previous_clan_tag is not None:
+    members: dict[str, CurrentClanMember] = {}
+    for clan in active_clans:
+        raw_members = await clash_client.get_clan_members(clan.clan_tag)
+        for raw_member in raw_members:
+            player_tag = _member_tag(raw_member)
+            if player_tag in members:
+                previous = members[player_tag]
                 raise CompositionDataError(
-                    f"player tag {tag} пришёл сразу в двух семейных кланах: "
-                    f"{previous_clan_tag} и {clan.tag}.",
+                    f"Игрок {player_tag} найден сразу в двух активных кланах: "
+                    f"{previous.clan_tag} и {clan.clan_tag}.",
                 )
-
-            seen_tags[tag] = clan.tag
-            clan_members.append(
-                CurrentClanMember(
-                    tag=tag,
-                    name=name,
-                    town_hall_level=town_hall_level,
-                    clan=clan,
-                    api_order=api_order,
-                ),
+            members[player_tag] = CurrentClanMember(
+                player_tag=player_tag,
+                nickname=_member_name(raw_member, player_tag),
+                town_hall=_member_town_hall(raw_member, player_tag),
+                clan_tag=clan.clan_tag,
+                clan_name=clan.clan_name,
             )
-
-        members_by_clan[clan.tag] = clan_members
-
-    return members_by_clan
+    return members
 
 
-def _build_new_composition(
+def _plan_player_states(
     *,
-    config: AppConfig,
-    old_composition: ParsedComposition,
-    current_members_by_clan: dict[str, list[CurrentClanMember]],
+    runtime_config: RuntimeChatConfig,
+    existing_state: Sequence[CompositionPlayerState],
+    imported: CompositionImportResult,
+    current_members: dict[str, CurrentClanMember],
     detected_at: datetime,
-) -> tuple[dict[str, list[CompositionPlayerRow]], list[CompositionPlayerRow], CompositionChanges]:
-    """Строит новое состояние состава в памяти.
+) -> tuple[dict[str, PlannedPlayerState], list[CompositionDiffItem]]:
+    """Планирует новое состояние игроков состава.
 
     Args:
-        config: Конфигурация приложения.
-        old_composition: Старое состояние листа.
-        current_members_by_clan: Текущие участники по кланам.
-        detected_at: Дата и время обнаружения выхода.
+        runtime_config: Runtime-настройки чата.
+        existing_state: Текущее состояние из SQLite.
+        imported: Ручные значения из текущего листа.
+        current_members: Текущие участники active tracked clans.
+        detected_at: Дата обнаружения изменений.
 
     Returns:
-        Активные строки по кланам, строки вышедших и счётчики изменений.
+        Новые состояния и diff.
     """
 
-    current_by_tag = {
-        member.tag: member
-        for members in current_members_by_clan.values()
-        for member in members
-    }
-    active_rows_by_clan: dict[str, list[CompositionPlayerRow]] = {
-        clan.tag: [] for clan in config.clans
-    }
-    exited_rows: list[CompositionPlayerRow] = []
+    detected_at_text = _format_dt(detected_at)
+    active_clan_tags = {clan.clan_tag for clan in runtime_config.active_clans}
+    state_by_tag = {state.player_tag: state for state in existing_state}
+    state_by_tag = _merge_imported_sheet_state(state_by_tag, imported)
+    planned: dict[str, PlannedPlayerState] = {}
+    diff_items: list[CompositionDiffItem] = []
 
-    added = updated = moved = exited = returned = 0
+    for player_tag, member in current_members.items():
+        previous = state_by_tag.get(player_tag)
+        user_values = _user_values_for(player_tag, previous, imported)
+        if previous is None or previous.status == "untracked":
+            diff_items.append(CompositionDiffItem("added", f"Новый игрок: {member.nickname} ({player_tag})."))
+        elif previous.status == "exited":
+            diff_items.append(CompositionDiffItem("returned", f"Вернулся: {member.nickname} ({player_tag})."))
+        else:
+            if previous.clan_tag is not None and previous.clan_tag != member.clan_tag:
+                diff_items.append(
+                    CompositionDiffItem(
+                        "moved",
+                        f"Перешёл: {member.nickname} ({player_tag}) {previous.clan_tag} → {member.clan_tag}.",
+                    ),
+                )
+            if _technical_changed(previous, member):
+                diff_items.append(CompositionDiffItem("updated", _technical_update_message(previous, member)))
 
-    for clan in config.clans:
-        for member in current_members_by_clan.get(clan.tag, []):
-            old_player = old_composition.players_by_tag.get(member.tag)
-            user_fields = old_player.user_fields if old_player is not None else UserFields()
+        planned[player_tag] = PlannedPlayerState(
+            player_tag=player_tag,
+            status="active",
+            clan_tag=member.clan_tag,
+            town_hall=member.town_hall,
+            nickname=member.nickname,
+            exited_at=None,
+            user_values=user_values,
+            last_seen_at=detected_at_text,
+        )
 
-            if old_player is None:
-                added += 1
-            elif old_player.is_exited:
-                returned += 1
+    for player_tag, previous in state_by_tag.items():
+        if player_tag in current_members:
+            continue
+        user_values = _user_values_for(player_tag, previous, imported)
+        if previous.status == "active":
+            if previous.clan_tag in active_clan_tags:
+                exited_at = detected_at_text
+                diff_items.append(CompositionDiffItem("exited", f"Вышел: {previous.nickname or player_tag} ({player_tag})."))
+                planned[player_tag] = PlannedPlayerState(
+                    player_tag=player_tag,
+                    status="exited",
+                    clan_tag=None,
+                    town_hall=previous.town_hall,
+                    nickname=previous.nickname,
+                    exited_at=exited_at,
+                    user_values=user_values,
+                    last_seen_at=previous.last_seen_at,
+                )
             else:
-                if old_player.clan_tag is not None and old_player.clan_tag != member.clan.tag:
-                    moved += 1
-                elif _has_technical_update(old_player, member):
-                    updated += 1
-
-            active_rows_by_clan[clan.tag].append(
-                CompositionPlayerRow(
-                    tag=member.tag,
-                    town_hall=member.town_hall_level,
-                    nickname=member.name,
-                    user_fields=user_fields,
-                    sort_key=(member.api_order, member.tag),
-                ),
+                planned[player_tag] = PlannedPlayerState(
+                    player_tag=player_tag,
+                    status="untracked",
+                    clan_tag=previous.clan_tag,
+                    town_hall=previous.town_hall,
+                    nickname=previous.nickname,
+                    exited_at=previous.exited_at,
+                    user_values=user_values,
+                    last_seen_at=previous.last_seen_at,
+                )
+            continue
+        if previous.status == "exited":
+            planned[player_tag] = PlannedPlayerState(
+                player_tag=player_tag,
+                status="exited",
+                clan_tag=None,
+                town_hall=previous.town_hall,
+                nickname=previous.nickname,
+                exited_at=previous.exited_at,
+                user_values=user_values,
+                last_seen_at=previous.last_seen_at,
+            )
+        elif previous.status == "untracked":
+            planned[player_tag] = PlannedPlayerState(
+                player_tag=player_tag,
+                status="untracked",
+                clan_tag=previous.clan_tag,
+                town_hall=previous.town_hall,
+                nickname=previous.nickname,
+                exited_at=previous.exited_at,
+                user_values=user_values,
+                last_seen_at=previous.last_seen_at,
             )
 
-    detected_at_text = detected_at.replace(microsecond=0).isoformat()
-    for old_player in old_composition.players_by_tag.values():
-        if old_player.tag in current_by_tag:
+    return planned, diff_items
+
+
+def _merge_imported_sheet_state(
+    state_by_tag: dict[str, CompositionPlayerState],
+    imported: CompositionImportResult,
+) -> dict[str, CompositionPlayerState]:
+    """Дополняет SQLite-state данными с листа, если state отсутствует.
+
+    Args:
+        state_by_tag: Состояния из SQLite.
+        imported: Данные с листа.
+
+    Returns:
+        Состояния с добавленными sheet-only игроками.
+    """
+
+    merged = dict(state_by_tag)
+    for player_tag, imported_player in imported.players.items():
+        if player_tag in merged:
             continue
+        merged[player_tag] = CompositionPlayerState(
+            player_tag=player_tag,
+            status="active" if imported_player.table_type == COMPOSITION_ACTIVE_TABLE else "exited",
+            clan_tag=imported_player.clan_tag,
+            town_hall=imported_player.town_hall,
+            nickname=imported_player.nickname,
+            exited_at=imported_player.exited_at,
+            user_values=imported_player.user_values,
+            last_seen_at=None,
+        )
+    return merged
 
-        if old_player.is_exited:
-            exited_at = old_player.exited_at
-        else:
-            exited += 1
-            exited_at = detected_at_text
 
-        exited_rows.append(
-            CompositionPlayerRow(
-                tag=old_player.tag,
-                town_hall=old_player.town_hall,
-                nickname=old_player.nickname,
-                user_fields=old_player.user_fields,
-                exited_at=exited_at,
-                sort_key=(old_player.tag,),
+def _parse_imported_block(
+    *,
+    runtime_config: RuntimeChatConfig,
+    block: SheetBlock,
+    table_type: TableType,
+    values: Sequence[Sequence[CellValue]],
+) -> tuple[list[ImportedPlayerValues], list[str]]:
+    """Парсит один сохранённый block range.
+
+    Args:
+        runtime_config: Runtime-конфиг чата.
+        block: Описание блока.
+        table_type: Тип таблицы блока.
+        values: Значения блока из Google Sheets.
+
+    Returns:
+        Игроки и warnings.
+    """
+
+    warnings: list[str] = []
+    rows = [_string_row(row) for row in values]
+    if len(rows) < TITLE_ROWS_COUNT:
+        return [], []
+    header = rows[1]
+    profiles = _profiles(runtime_config.column_profiles, table_type)
+    user_title_to_key = _user_title_to_key(profiles, warnings)
+    user_indexes = {
+        column_key: header_index
+        for header_index, title in enumerate(header)
+        if (column_key := user_title_to_key.get(title)) is not None
+    }
+    system_indexes = _system_indexes(profiles, header)
+    clan_tag = _clan_tag_from_block_key(block.block_key)
+    imported: list[ImportedPlayerValues] = []
+
+    for row_offset, row in enumerate(rows[TITLE_ROWS_COUNT:], start=TITLE_ROWS_COUNT + 1):
+        if _is_empty_row(row):
+            continue
+        bot_key = _cell_at(row, 0)
+        player_tag = _player_tag_from_bot_key(bot_key)
+        if player_tag is None:
+            fallback_tag = _fallback_tag_from_row(row, system_indexes)
+            if fallback_tag is None:
+                warnings.append(
+                    f"Строка {row_offset} блока {block.block_key}: повреждён __bot_key, fallback по Тегу невозможен.",
+                )
+                continue
+            warnings.append(f"Строка {row_offset} блока {block.block_key}: использован fallback по Тегу.")
+            player_tag = fallback_tag
+
+        imported.append(
+            ImportedPlayerValues(
+                player_tag=player_tag,
+                table_type=table_type,
+                clan_tag=clan_tag if table_type == COMPOSITION_ACTIVE_TABLE else None,
+                town_hall=_optional_int_cell(row, system_indexes.get("town_hall")),
+                nickname=_optional_str_cell(row, system_indexes.get("nickname")),
+                exited_at=_optional_str_cell(row, system_indexes.get("exited_at")),
+                user_values={
+                    column_key: _cell_at(row, index)
+                    for column_key, index in user_indexes.items()
+                },
             ),
         )
 
-    for rows in active_rows_by_clan.values():
-        rows.sort(key=lambda row: row.sort_key)
-    exited_rows.sort(key=lambda row: row.sort_key)
+    return imported, warnings
 
-    return (
-        active_rows_by_clan,
-        exited_rows,
-        CompositionChanges(
-            added=added,
-            updated=updated,
-            moved=moved,
-            exited=exited,
-            returned=returned,
-        ),
+
+def _physical_columns(column_profiles: Sequence[ColumnProfile], table_type: TableType) -> tuple[ColumnProfile, ...]:
+    """Возвращает физические колонки блока: service + visible non-service.
+
+    Args:
+        column_profiles: Все активные профили чата.
+        table_type: Тип таблицы.
+
+    Returns:
+        Колонки в порядке вывода.
+    """
+
+    profiles = sorted(
+        (profile for profile in column_profiles if profile.table_type == table_type and profile.is_active),
+        key=lambda profile: (profile.sort_order, profile.column_key),
+    )
+    service = [profile for profile in profiles if profile.column_key == BOT_KEY_COLUMN_KEY and profile.kind == "service"]
+    if not service:
+        raise CompositionDataError(f"Профиль {table_title(table_type)} не содержит service-колонку {BOT_KEY_TITLE}.")
+    visible = [profile for profile in profiles if profile.kind != "service" and profile.visible]
+    return tuple([service[0], *visible])
+
+
+def _profiles(column_profiles: Sequence[ColumnProfile], table_type: TableType) -> tuple[ColumnProfile, ...]:
+    """Возвращает активные профили одного table_type.
+
+    Args:
+        column_profiles: Все активные профили чата.
+        table_type: Тип таблицы.
+
+    Returns:
+        Активные профили указанного типа.
+    """
+
+    return tuple(
+        profile
+        for profile in column_profiles
+        if profile.table_type == table_type and profile.is_active
     )
 
 
-@dataclass(frozen=True, slots=True)
-class CompositionTableSpec:
-    """Описание форматируемого блока состава.
-
-    Attributes:
-        name: Видимое название блока.
-        start_cell: Левая верхняя ячейка таблицы.
-        rows_count: Количество строк блока вместе с названием и заголовками.
-        columns: Заголовки колонок таблицы.
-    """
-
-    name: str
-    start_cell: str
-    rows_count: int
-    columns: tuple[str, ...]
-
-
-def _build_active_matrix_and_tables(
-    config: AppConfig,
-    rows_by_clan: dict[str, list[CompositionPlayerRow]],
-) -> tuple[list[list[CellValue]], list[CompositionTableSpec]]:
-    """Строит матрицу и спецификации активных таблиц состава.
+def _system_indexes(profiles: Sequence[ColumnProfile], header: Sequence[str]) -> dict[str, int]:
+    """Ищет индексы visible system columns по текущим title.
 
     Args:
-        config: Конфигурация приложения.
-        rows_by_clan: Активные строки по тегу клана.
+        profiles: Профили колонок table_type.
+        header: Строка заголовков блока.
 
     Returns:
-        Матрица значений и список спецификаций форматирования.
+        Индексы system columns по column_key.
     """
 
-    matrix: list[list[CellValue]] = []
-    table_specs: list[CompositionTableSpec] = []
-    row_offset = 0
+    indexes: dict[str, int] = {}
+    title_to_indexes: dict[str, list[int]] = {}
+    for index, title in enumerate(header):
+        title_to_indexes.setdefault(title, []).append(index)
 
-    for clan_index, clan in enumerate(config.clans):
-        if clan_index > 0:
-            matrix.append(_empty_row(len(ACTIVE_HEADERS)))
-            row_offset += 1
+    for profile in profiles:
+        if profile.kind != "system" or not profile.visible:
+            continue
+        title_indexes = title_to_indexes.get(profile.title)
+        if title_indexes:
+            indexes[profile.column_key] = title_indexes[0]
 
-        table_start_cell = _offset_cell(
-            config.composition_active_start_cell,
-            row_offset=row_offset,
-            column_offset=0,
-        )
-        table_rows: list[list[CellValue]] = [
-            _title_row(clan.name, len(ACTIVE_HEADERS)),
-            list(ACTIVE_HEADERS),
-        ]
-
-        for row_number, row in enumerate(rows_by_clan.get(clan.tag, []), start=1):
-            table_rows.append(_active_player_to_row(row_number, row))
-
-        if len(table_rows) == 2:
-            table_rows.append(_empty_row(len(ACTIVE_HEADERS)))
-
-        matrix.extend(table_rows)
-        table_specs.append(
-            CompositionTableSpec(
-                name=clan.name,
-                start_cell=table_start_cell,
-                rows_count=len(table_rows),
-                columns=ACTIVE_HEADERS,
-            ),
-        )
-        row_offset += len(table_rows)
-
-    return matrix, table_specs
+    return indexes
 
 
-def _build_exited_matrix_and_table(
-    config: AppConfig,
-    rows: Sequence[CompositionPlayerRow],
-) -> tuple[list[list[CellValue]], CompositionTableSpec]:
-    """Строит матрицу и спецификацию таблицы вышедших.
+def _user_title_to_key(profiles: Sequence[ColumnProfile], warnings: list[str]) -> dict[str, str]:
+    """Строит соответствие title -> column_key для visible user columns.
 
     Args:
-        config: Конфигурация приложения.
-        rows: Строки вышедших игроков.
+        profiles: Профили колонок table_type.
+        warnings: Список warnings, дополняемый при неоднозначном импорте.
 
     Returns:
-        Матрица значений и спецификация форматирования.
+        Словарь соответствия заголовка user-колонки к column_key.
     """
 
-    matrix: list[list[CellValue]] = [
-        _title_row("Вышедшие", len(EXITED_HEADERS)),
-        list(EXITED_HEADERS),
+    result: dict[str, str] = {}
+    for profile in profiles:
+        if profile.kind != "user" or not profile.visible:
+            continue
+        previous = result.get(profile.title)
+        if previous is not None:
+            warnings.append(
+                f"Дублирующийся заголовок user-колонки `{profile.title}`; "
+                "импорт неоднозначен.",
+            )
+            continue
+        result[profile.title] = profile.column_key
+
+    return result
+
+
+def _build_block_values(
+    *,
+    title: str,
+    columns: Sequence[ColumnProfile],
+    states: Sequence[PlannedPlayerState],
+    table_type: TableType,
+) -> list[list[CellValue]]:
+    """Строит значения одного блока состава."""
+
+    values: list[list[CellValue]] = [
+        [title, *["" for _ in range(len(columns) - 1)]],
+        [column.title for column in columns],
     ]
+    for row_number, state in enumerate(states, start=1):
+        values.append(_state_to_row(row_number=row_number, state=state, columns=columns, table_type=table_type))
+    if len(values) == TITLE_ROWS_COUNT:
+        values.append(["" for _ in columns])
+    return values
 
-    for row_number, row in enumerate(rows, start=1):
-        matrix.append(_exited_player_to_row(row_number, row))
 
-    if len(matrix) == 2:
-        matrix.append(_empty_row(len(EXITED_HEADERS)))
+def _state_to_row(
+    *,
+    row_number: int,
+    state: PlannedPlayerState,
+    columns: Sequence[ColumnProfile],
+    table_type: TableType,
+) -> list[CellValue]:
+    """Преобразует состояние игрока в строку листа."""
 
-    return matrix, CompositionTableSpec(
-        name="Вышедшие",
-        start_cell=config.composition_exited_start_cell,
-        rows_count=len(matrix),
-        columns=EXITED_HEADERS,
+    row: list[CellValue] = []
+    for column in columns:
+        if column.kind == "service" and column.column_key == BOT_KEY_COLUMN_KEY:
+            row.append(_bot_key(state.player_tag))
+        elif column.kind == "user":
+            row.append(state.user_values.get(column.column_key, ""))
+        elif column.column_key == "number":
+            row.append(row_number)
+        elif column.column_key == "tag":
+            row.append(state.player_tag)
+        elif column.column_key == "town_hall":
+            row.append(state.town_hall or "")
+        elif column.column_key == "nickname":
+            row.append(state.nickname or "")
+        elif column.column_key == "exited_at" and table_type == COMPOSITION_EXITED_TABLE:
+            row.append(state.exited_at or "")
+        else:
+            row.append("")
+    return row
+
+
+def _sorted_active_states(states: Iterable[PlannedPlayerState], clan_tag: str) -> list[PlannedPlayerState]:
+    """Сортирует active rows внутри клана."""
+
+    return sorted(
+        (state for state in states if state.status == "active" and state.clan_tag == clan_tag),
+        key=lambda state: (-(state.town_hall or 0), (state.nickname or "").lower(), state.player_tag),
     )
 
 
-async def _format_composition_tables(
+def _sorted_exited_states(states: Iterable[PlannedPlayerState]) -> list[PlannedPlayerState]:
+    """Сортирует exited rows."""
+
+    sorted_by_name = sorted(
+        (state for state in states if state.status == "exited"),
+        key=lambda state: ((state.nickname or "").lower(), state.player_tag),
+    )
+    return sorted(sorted_by_name, key=lambda state: state.exited_at or "", reverse=True)
+
+
+async def _rewrite_composition_blocks(
     *,
     sheets_client: SheetsClient,
-    sheet_id: int,
-    managed_range_a1: str,
-    table_specs: Sequence[CompositionTableSpec],
+    sheet_name: str,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltBlock],
 ) -> None:
-    """Форматирует блоки состава обычными Google Sheets requests.
+    """Очищает прошлые managed blocks и пишет новые blocks одним values batch."""
 
-    Args:
-        sheets_client: Клиент Google Sheets API.
-        sheet_id: Числовой ID листа Google Sheets.
-        managed_range_a1: Управляемая область листа состава.
-        table_specs: Спецификации форматируемых блоков.
-    """
-
-    requests = _build_composition_format_requests(
-        sheet_id=sheet_id,
-        managed_range_a1=managed_range_a1,
-        table_specs=table_specs,
-    )
-    await sheets_client.batch_update_spreadsheet(requests)
-
-
-def _build_composition_format_requests(
-    *,
-    sheet_id: int,
-    managed_range_a1: str,
-    table_specs: Sequence[CompositionTableSpec],
-) -> list[dict[str, object]]:
-    """Строит requests для оформления листа состава.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        managed_range_a1: Управляемая область листа состава.
-        table_specs: Спецификации форматируемых блоков.
-
-
-    Returns:
-        Список requests для `spreadsheets.batchUpdate`.
-    """
-
-    requests: list[dict[str, object]] = [
-        _repeat_cell_request(
-            _grid_range_from_a1(sheet_id=sheet_id, range_a1=managed_range_a1),
-            _base_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
-        ),
-    ]
-
-    for table_spec in table_specs:
-        requests.extend(_build_table_format_requests(sheet_id, table_spec))
-
-    return requests
-
-
-def _build_table_format_requests(
-    sheet_id: int,
-    table_spec: CompositionTableSpec,
-) -> list[dict[str, object]]:
-    """Строит requests оформления одного блока состава.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        table_spec: Спецификация форматируемого блока.
-
-    Returns:
-        Список requests оформления.
-    """
-
-    title_range = _grid_range_for_table_row(sheet_id, table_spec, row_offset=0)
-    header_range = _grid_range_for_table_row(sheet_id, table_spec, row_offset=1)
-    table_range = _grid_range_from_start_cell(
-        sheet_id=sheet_id,
-        start_cell=table_spec.start_cell,
-        rows_count=table_spec.rows_count,
-        columns_count=len(table_spec.columns),
-    )
-
-    requests: list[dict[str, object]] = [
-        _repeat_cell_request(
-            title_range,
-            _title_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
-        ),
-        _repeat_cell_request(
-            header_range,
-            _header_cell_format(),
-            "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
-        ),
-        _update_borders_request(table_range),
-    ]
-    data_rows_count = max(table_spec.rows_count - 2, 0)
-    if data_rows_count > 0:
-        data_range = _grid_range_from_start_cell(
-            sheet_id=sheet_id,
-            start_cell=_offset_cell(table_spec.start_cell, row_offset=2, column_offset=0),
-            rows_count=data_rows_count,
-            columns_count=len(table_spec.columns),
-        )
-        requests.append(
-            _repeat_cell_request(
-                data_range,
-                _data_cell_format(),
-                "userEnteredFormat(backgroundColorStyle,textFormat,wrapStrategy)",
-            ),
-        )
-        requests.extend(
-            _build_alternating_row_requests(
-                sheet_id=sheet_id,
-                table_spec=table_spec,
-                data_rows_count=data_rows_count,
-            ),
-        )
-
-
-    return requests
-
-
-def _build_alternating_row_requests(
-    *,
-    sheet_id: int,
-    table_spec: CompositionTableSpec,
-    data_rows_count: int,
-) -> list[dict[str, object]]:
-    """Строит requests для чередования строк таблицы.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        table_spec: Спецификация таблицы.
-        data_rows_count: Количество строк данных без названия и заголовка.
-
-    Returns:
-        Список `repeatCell` requests для нечётных строк данных.
-    """
-
-    requests: list[dict[str, object]] = []
-    for data_row_offset in range(data_rows_count):
-        if data_row_offset % 2 == 0:
+    updates: list[SheetValues] = []
+    for block in previous_blocks:
+        if block.rows_count <= 0 or block.columns_count <= 0:
             continue
-
-        requests.append(
-            _repeat_cell_request(
-                _grid_range_for_table_row(
-                    sheet_id=sheet_id,
-                    table_spec=table_spec,
-                    row_offset=2 + data_row_offset,
+        updates.append(
+            SheetValues(
+                sheet_name=sheet_name,
+                range_a1=range_from_start_cell(
+                    start_cell=block.start_cell,
+                    rows_count=block.rows_count,
+                    columns_count=block.columns_count,
                 ),
-                {"userEnteredFormat": {"backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}}},
-                "userEnteredFormat.backgroundColorStyle",
+                values=[["" for _ in range(block.columns_count)] for _ in range(block.rows_count)],
             ),
         )
-
-    return requests
-
-
-def _repeat_cell_request(
-    grid_range: dict[str, int],
-    cell: dict[str, object],
-    fields: str,
-) -> dict[str, object]:
-    """Создаёт `repeatCell` request.
-
-    Args:
-        grid_range: GridRange.
-        cell: Настройки ячейки.
-        fields: Field mask.
-
-    Returns:
-        JSON-совместимый request.
-    """
-
-    return {"repeatCell": {"range": grid_range, "cell": cell, "fields": fields}}
-
-
-def _update_borders_request(grid_range: dict[str, int]) -> dict[str, object]:
-    """Создаёт request для границ таблицы.
-
-    Args:
-        grid_range: GridRange таблицы.
-
-    Returns:
-        JSON-совместимый request `updateBorders`.
-    """
-
-    border = {
-        "style": "SOLID",
-        "width": 1,
-        "colorStyle": {"rgbColor": BORDER_RGB},
-    }
-    return {
-        "updateBorders": {
-            "range": grid_range,
-            "top": border,
-            "bottom": border,
-            "left": border,
-            "right": border,
-            "innerHorizontal": border,
-            "innerVertical": border,
-        },
-    }
-
-
-def _base_cell_format() -> dict[str, object]:
-    """Возвращает базовое оформление управляемой области.
-
-    Returns:
-        JSON-совместимый формат ячейки.
-    """
-
-    return {
-        "userEnteredFormat": {
-            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
-            "textFormat": {
-                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
-                "bold": False,
-            },
-            "wrapStrategy": "WRAP",
-        },
-    }
-
-
-def _title_cell_format() -> dict[str, object]:
-    """Возвращает оформление строки названия таблицы.
-
-    Returns:
-        JSON-совместимый формат ячейки.
-    """
-
-    return {
-        "userEnteredFormat": {
-            "backgroundColorStyle": {"rgbColor": DARK_GREEN_RGB},
-            "textFormat": {
-                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
-                "bold": True,
-            },
-            "wrapStrategy": "WRAP",
-        },
-    }
-
-
-def _header_cell_format() -> dict[str, object]:
-    """Возвращает оформление строки заголовков.
-
-    Returns:
-        JSON-совместимый формат ячейки.
-    """
-
-    return {
-        "userEnteredFormat": {
-            "backgroundColorStyle": {"rgbColor": GREEN_RGB},
-            "textFormat": {
-                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
-                "bold": True,
-            },
-            "wrapStrategy": "WRAP",
-        },
-    }
-
-
-def _data_cell_format() -> dict[str, object]:
-    """Возвращает оформление строк данных.
-
-    Returns:
-        JSON-совместимый формат ячейки.
-    """
-
-    return {
-        "userEnteredFormat": {
-            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
-            "textFormat": {
-                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
-                "bold": False,
-            },
-            "wrapStrategy": "WRAP",
-        },
-    }
-
-
-def _active_player_to_row(row_number: int, row: CompositionPlayerRow) -> list[CellValue]:
-    """Преобразует активного игрока в строку листа.
-
-    Args:
-        row_number: Порядковый номер в таблице.
-        row: Данные игрока.
-
-    Returns:
-        Строка активной таблицы.
-    """
-
-    return [
-        row_number,
-        row.tag,
-        row.town_hall,
-        row.nickname,
-        row.user_fields.username,
-        row.user_fields.real_name,
-        row.user_fields.assignment,
-        row.user_fields.violations,
-    ]
-
-
-def _exited_player_to_row(row_number: int, row: CompositionPlayerRow) -> list[CellValue]:
-    """Преобразует вышедшего игрока в строку листа.
-
-    Args:
-        row_number: Порядковый номер в таблице.
-        row: Данные игрока.
-
-    Returns:
-        Строка таблицы вышедших.
-    """
-
-    return [
-        row_number,
-        row.tag,
-        row.town_hall,
-        row.nickname,
-        row.user_fields.username,
-        row.user_fields.real_name,
-        row.user_fields.assignment,
-        row.user_fields.violations,
-        row.exited_at,
-    ]
-
-
-def _find_table_headers(
-    rows: Sequence[list[str]],
-    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
-) -> list[TableHeader]:
-    """Ищет заголовки активных таблиц и таблицы вышедших.
-
-    Args:
-        rows: Нормализованные строки листа.
-        clans: Три семейных клана из конфигурации.
-
-    Returns:
-        Найденные таблицы состава.
-    """
-
-    headers: list[TableHeader] = []
-    for row_index, row in enumerate(rows):
-        max_start = len(row)
-        for column_index in range(max_start):
-            if _matches_header(row, column_index, EXITED_HEADERS):
-                headers.append(
-                    TableHeader(
-                        row_index=row_index,
-                        column_index=column_index,
-                        is_exited=True,
-                        width=len(EXITED_HEADERS),
-                    ),
-                )
-                continue
-
-            if _matches_header(row, column_index, ACTIVE_HEADERS):
-                headers.append(
-                    TableHeader(
-                        row_index=row_index,
-                        column_index=column_index,
-                        is_exited=False,
-                        width=len(ACTIVE_HEADERS),
-                        clan_tag=_find_clan_tag_above(rows, row_index, column_index),
-                    ),
-                )
-
-    return _assign_active_clan_tags(headers, rows, clans)
-
-
-def _matches_header(
-    row: Sequence[str],
-    column_index: int,
-    expected_headers: Sequence[str],
-) -> bool:
-    """Проверяет совпадение заголовков таблицы.
-
-    Args:
-        row: Строка листа.
-        column_index: Индекс первой колонки.
-        expected_headers: Ожидаемые заголовки.
-
-    Returns:
-        `True`, если заголовок найден.
-    """
-
-    if column_index + len(expected_headers) > len(row):
-        return False
-
-    actual_headers = tuple(
-        _normalize_header(row[column_index + offset])
-        for offset in range(len(expected_headers))
-    )
-    return actual_headers == tuple(expected_headers)
-
-
-def _assign_active_clan_tags(
-    headers: Sequence[TableHeader],
-    rows: Sequence[list[str]],
-    clans: tuple[ClanConfig, ClanConfig, ClanConfig],
-) -> list[TableHeader]:
-    """Назначает активным таблицам теги кланов.
-
-    Старый формат листа содержал `Clan | #TAG` над таблицей. Новый формат
-    использует Google Sheets Table name, который не попадает в values API.
-    Поэтому для новых таблиц тег клана определяется по порядку активных таблиц.
-
-    Args:
-        headers: Найденные заголовки таблиц.
-        rows: Строки листа.
-        clans: Три семейных клана из конфигурации.
-
-    Returns:
-        Заголовки с заполненным `clan_tag` у активных таблиц.
-    """
-
-    sorted_headers = sorted(headers, key=lambda header: (header.column_index, header.row_index))
-    active_headers = [header for header in sorted_headers if not header.is_exited]
-    fallback_tags = {
-        id(header): clans[index].tag
-        for index, header in enumerate(active_headers)
-        if index < len(clans)
-    }
-
-    assigned_headers: list[TableHeader] = []
-    for header in sorted_headers:
-        if header.is_exited:
-            assigned_headers.append(header)
-            continue
-
-        detected_tag = _find_clan_tag_above(rows, header.row_index, header.column_index)
-        assigned_headers.append(
-            TableHeader(
-                row_index=header.row_index,
-                column_index=header.column_index,
-                is_exited=header.is_exited,
-                width=header.width,
-                clan_tag=detected_tag or fallback_tags.get(id(header)),
+    for built_block in built_blocks:
+        updates.append(
+            SheetValues(
+                sheet_name=sheet_name,
+                range_a1=range_from_start_cell(
+                    start_cell=built_block.block.start_cell,
+                    rows_count=built_block.block.rows_count,
+                    columns_count=built_block.block.columns_count,
+                ),
+                values=built_block.values,
             ),
         )
-    return assigned_headers
+    await sheets_client.batch_update_values(updates)
 
+async def _hide_bot_key_columns(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    built_blocks: Sequence[BuiltBlock],
+) -> None:
+    """Скрывает физические колонки `__bot_key` для всех composition blocks."""
 
-def _find_clan_tag_above(
-    rows: Sequence[list[str]],
-    header_row_index: int,
-    column_index: int,
-) -> str | None:
-    """Ищет тег клана в строках над активной таблицей.
-
-    Args:
-        rows: Строки листа.
-        header_row_index: Индекс строки заголовка.
-        column_index: Индекс первой колонки таблицы.
-
-    Returns:
-        Нормализованный тег клана или `None`.
-    """
-
-    for row_index in range(header_row_index - 1, -1, -1):
-        row = rows[row_index]
-        segment = row[column_index : column_index + len(ACTIVE_HEADERS)]
-        if not any(cell.strip() for cell in segment):
+    sheet_id = runtime_config.sheet_binding.composition_sheet_id
+    if sheet_id is None:
+        metadata = await sheets_client.get_sheet_metadata(runtime_config.sheet_binding.composition_sheet_name)
+        sheet_id = metadata.sheet_id
+    hidden_columns: set[int] = set()
+    for built_block in built_blocks:
+        column_number, _ = _parse_a1_cell(built_block.block.start_cell)
+        column_index = column_number - 1
+        if column_index in hidden_columns:
             continue
+        hidden_columns.add(column_index)
+        await sheets_client.hide_dimension(
+            sheet_id=sheet_id,
+            dimension="COLUMNS",
+            start_index=column_index,
+            end_index=column_index + 1,
+            hidden=True,
+        )
 
-        for cell in segment:
-            match = PLAYER_TAG_RE.search(cell)
-            if match is None:
-                continue
-            try:
-                return normalize_tag(match.group(0))
-            except ValueError:
-                return None
-        return None
+def _table_type_from_block_key(block_key: str) -> TableType | None:
+    if block_key.startswith(ACTIVE_BLOCK_PREFIX):
+        return COMPOSITION_ACTIVE_TABLE
+    if block_key == EXITED_BLOCK_KEY:
+        return COMPOSITION_EXITED_TABLE
 
     return None
 
 
-def _find_next_header_row(headers: Sequence[TableHeader], current: TableHeader) -> int:
-    """Ищет начало следующей таблицы в той же колонке.
+def _clan_tag_from_block_key(block_key: str) -> str | None:
+    if not block_key.startswith(ACTIVE_BLOCK_PREFIX):
 
-    Args:
-        headers: Все найденные заголовки.
-        current: Текущая таблица.
-
-    Returns:
-        Индекс следующего заголовка или большое число для последней таблицы.
-    """
-
-    next_rows = [
-        header.row_index
-        for header in headers
-        if header.column_index == current.column_index
-        and header.row_index > current.row_index
-    ]
-    return min(next_rows, default=10**9)
-
-
-def _parse_player_row(
-    row: Sequence[str],
-    header: TableHeader,
-    known_clan_tags: set[str],
-) -> OldCompositionPlayer | None:
-    """Парсит одну строку старой таблицы состава.
-
-    Args:
-        row: Строка листа.
-        header: Метаданные таблицы.
-        known_clan_tags: Теги семейных кланов из конфигурации.
-
-    Returns:
-        Игрок или `None`, если строка не является игроком.
-
-    Raises:
-        CompositionDataError: Если в строке найден повреждённый тег.
-    """
-
-    tag_cell_raw = _cell_at(row, header.column_index + 1)
-    tag_cell = tag_cell_raw.strip()
-    if tag_cell == "":
         return None
-
-    if not tag_cell.startswith("#"):
-        if _looks_like_non_player_row(row, header):
-            return None
-        raise CompositionDataError(f'найден повреждённый тег "{tag_cell}" на листе "Состав".')
-
+    raw_tag = block_key.removeprefix(ACTIVE_BLOCK_PREFIX)
     try:
-        tag = normalize_tag(tag_cell)
-    except ValueError as exc:
-        raise CompositionDataError(
-            f'найден повреждённый тег "{tag_cell}" на листе "Состав".',
-        ) from exc
-
-    if _looks_like_table_title(row, header, tag, known_clan_tags):
+        return normalize_tag(raw_tag)
+    except ValueError:
         return None
 
-    return OldCompositionPlayer(
-        tag=tag,
-        town_hall=_cell_at(row, header.column_index + 2),
-        nickname=_cell_at(row, header.column_index + 3),
-        user_fields=UserFields(
-            username=_cell_at(row, header.column_index + 4),
-            real_name=_cell_at(row, header.column_index + 5),
-            assignment=_cell_at(row, header.column_index + 6),
-            violations=_cell_at(row, header.column_index + 7),
-        ),
-        is_exited=header.is_exited,
-        clan_tag=None if header.is_exited else header.clan_tag,
-        exited_at=_cell_at(row, header.column_index + 8) if header.is_exited else "",
-    )
+def _bot_key(player_tag: str) -> str:
+    return f"{COMPOSITION_PLAYER_KEY_PREFIX}{player_tag}"
 
 
-def _looks_like_non_player_row(row: Sequence[str], header: TableHeader) -> bool:
-    """Проверяет, похожа ли строка на служебную, а не на игрока.
-
-    Args:
-        row: Строка листа.
-        header: Метаданные таблицы.
-
-    Returns:
-        `True`, если строку можно безопасно пропустить.
-    """
-
-    number_cell = _cell_at(row, header.column_index)
-    if number_cell.strip().isdigit():
-        return False
-
-    technical_cells = [
-        _cell_at(row, header.column_index + 2),
-        _cell_at(row, header.column_index + 3),
-    ]
-    user_cells = [
-        _cell_at(row, header.column_index + index)
-        for index in range(4, header.width)
-    ]
-    return all(_is_blank(cell) for cell in [*technical_cells, *user_cells])
+def _player_tag_from_bot_key(value: str) -> str | None:
+    if not value.startswith(COMPOSITION_PLAYER_KEY_PREFIX):
+        return None
+    raw_tag = value.removeprefix(COMPOSITION_PLAYER_KEY_PREFIX)
+    try:
+        return normalize_tag(raw_tag)
+    except ValueError:
+        return None
 
 
-def _looks_like_table_title(
-    row: Sequence[str],
-    header: TableHeader,
-    tag: str,
-    known_clan_tags: set[str],
-) -> bool:
-    """Проверяет, является ли строка названием следующей таблицы.
+def _fallback_tag_from_row(row: Sequence[str], system_indexes: dict[str, int]) -> str | None:
+    tag_index = system_indexes.get("tag")
+    if tag_index is None:
+        return None
+    try:
+        return normalize_tag(_cell_at(row, tag_index))
+    except ValueError:
+        return None
 
-    Args:
-        row: Строка листа.
-        header: Метаданные таблицы.
-        tag: Нормализованный тег из колонки `Тег`.
-        known_clan_tags: Теги семейных кланов из конфигурации.
-
-    Returns:
-        `True`, если это не строка игрока.
-    """
-
-    if tag not in known_clan_tags:
-        return False
-
-    town_hall = _cell_at(row, header.column_index + 2)
-    nickname = _cell_at(row, header.column_index + 3)
-    user_cells = [
-        _cell_at(row, header.column_index + index)
-        for index in range(4, header.width)
-    ]
-    return _is_blank(town_hall) and _is_blank(nickname) and all(
-        _is_blank(cell) for cell in user_cells
-    )
+def _user_values_for(
+    player_tag: str,
+    previous: CompositionPlayerState | None,
+    imported: CompositionImportResult,
+) -> JsonDict:
+    if player_tag in imported.players:
+        return dict(imported.players[player_tag].user_values)
+    if previous is not None:
+        return dict(previous.user_values)
+    return {}
 
 
-def _has_technical_update(
-    old_player: OldCompositionPlayer,
-    current_member: CurrentClanMember,
-) -> bool:
-    """Проверяет изменение технических полей игрока.
-
-    Args:
-        old_player: Игрок из старого листа.
-        current_member: Игрок из CoC API.
-
-    Returns:
-        `True`, если изменились ратуша или ник.
-    """
-
-    return (
-        old_player.town_hall.strip() != str(current_member.town_hall_level)
-        or old_player.nickname != current_member.name
-    )
+def _technical_changed(previous: CompositionPlayerState, member: CurrentClanMember) -> bool:
+    return previous.town_hall != member.town_hall or previous.nickname != member.nickname
 
 
-def _require_api_member_tag(raw_member: dict[str, Any]) -> str:
-    """Читает player tag участника API.
+def _technical_update_message(previous: CompositionPlayerState, member: CurrentClanMember) -> str:
+    changes: list[str] = []
+    if previous.town_hall != member.town_hall:
+        changes.append(f"ТХ {previous.town_hall or '-'} → {member.town_hall}")
+    if previous.nickname != member.nickname:
+        changes.append(f"ник {previous.nickname or '-'} → {member.nickname}")
+    return f"Обновлён: {member.player_tag} ({', '.join(changes)})."
 
-    Args:
-        raw_member: Участник из `ClashClient`.
-
-    Returns:
-        Нормализованный player tag.
-
-    Raises:
-        CompositionDataError: Если тег некорректен.
-    """
+def _member_tag(raw_member: dict[str, Any]) -> str:
 
     value = raw_member.get("tag")
     if not isinstance(value, str):
         raise CompositionDataError("CoC API вернул участника без tag.")
-
     try:
         return normalize_tag(value)
     except ValueError as exc:
         raise CompositionDataError(f"CoC API вернул некорректный player tag: {value}.") from exc
 
 
-def _require_api_member_name(raw_member: dict[str, Any], tag: str) -> str:
-    """Читает никнейм участника API.
-
-    Args:
-        raw_member: Участник из `ClashClient`.
-        tag: Player tag для текста ошибки.
-
-    Returns:
-        Никнейм игрока.
-
-    Raises:
-        CompositionDataError: Если никнейм отсутствует.
-    """
-
+def _member_name(raw_member: dict[str, Any], player_tag: str) -> str:
     value = raw_member.get("name")
     if not isinstance(value, str):
-        raise CompositionDataError(f"CoC API вернул игрока {tag} без name.")
+        raise CompositionDataError(f"CoC API вернул игрока {player_tag} без name.")
     return value
 
 
-def _require_api_member_town_hall(raw_member: dict[str, Any], tag: str) -> int:
-    """Читает уровень ратуши участника API.
-
-    Args:
-        raw_member: Участник из `ClashClient`.
-        tag: Player tag для текста ошибки.
-
-    Returns:
-        Уровень ратуши.
-
-    Raises:
-        CompositionDataError: Если ратуша отсутствует.
-    """
-
+def _member_town_hall(raw_member: dict[str, Any], player_tag: str) -> int:
     value = raw_member.get("townHallLevel")
     if not isinstance(value, int) or isinstance(value, bool):
-        raise CompositionDataError(f"CoC API вернул игрока {tag} без townHallLevel.")
+        raise CompositionDataError(f"CoC API вернул игрока {player_tag} без townHallLevel.")
     return value
 
 
-def _range_from_start_cell(start_cell: str, rows_count: int, columns_count: int) -> str:
-    """Строит закрытый A1-диапазон по стартовой ячейке и размеру.
+def _cell_at(row: Sequence[str], index: int) -> str:
+    if index < 0 or index >= len(row):
+        return ""
+    return row[index]
 
-    Args:
-        start_cell: Стартовая ячейка, например `A1`.
-        rows_count: Количество строк.
-        columns_count: Количество колонок.
-
-    Returns:
-        A1-диапазон вида `A1:H10`.
-
-    Raises:
-        CompositionDataError: Если стартовая ячейка некорректна.
-    """
-
-    match = A1_CELL_RE.fullmatch(start_cell.strip())
-    if match is None:
-        raise CompositionDataError(f"Некорректная стартовая ячейка: {start_cell}.")
-
-    start_column, start_row_raw = match.groups()
-    start_column_number = _column_to_number(start_column)
-    start_row = int(start_row_raw)
-
-    end_column = _number_to_column(start_column_number + columns_count - 1)
-    end_row = start_row + rows_count - 1
-    return f"{start_column.upper()}{start_row}:{end_column}{end_row}"
+def _optional_str_cell(row: Sequence[str], index: int | None) -> str | None:
+    if index is None:
+        return None
+    value = _cell_at(row, index).strip()
+    return value or None
 
 
-def _grid_range_from_start_cell(
-    *,
-    sheet_id: int,
-    start_cell: str,
-    rows_count: int,
-    columns_count: int,
-) -> dict[str, int]:
-    """Строит GridRange по стартовой ячейке и размеру.
+def _optional_int_cell(row: Sequence[str], index: int | None) -> int | None:
+    if index is None:
+        return None
+    value = _cell_at(row, index).strip()
+    if value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        start_cell: Стартовая ячейка, например `A1`.
-        rows_count: Количество строк.
-        columns_count: Количество колонок.
-
-    Returns:
-        JSON-совместимый GridRange.
-    """
-
-    start_column_number, start_row = _parse_start_cell(start_cell)
-    return {
-        "sheetId": sheet_id,
-        "startRowIndex": start_row - 1,
-        "endRowIndex": start_row - 1 + rows_count,
-        "startColumnIndex": start_column_number - 1,
-        "endColumnIndex": start_column_number - 1 + columns_count,
-    }
-
-
-def _grid_range_from_a1(*, sheet_id: int, range_a1: str) -> dict[str, int]:
-    """Строит GridRange из закрытого A1-диапазона.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        range_a1: Закрытый A1-диапазон, например `A1:R1000`.
-
-    Returns:
-        JSON-совместимый GridRange.
-
-    Raises:
-        CompositionDataError: Если диапазон некорректен.
-    """
-
-    match = A1_RANGE_RE.fullmatch(range_a1.strip())
-    if match is None:
-        raise CompositionDataError(f"Некорректный A1-диапазон: {range_a1}.")
-
-    start_column, start_row_raw, end_column, end_row_raw = match.groups()
-    start_column_number = _column_to_number(start_column)
-    end_column_number = _column_to_number(end_column)
-    start_row = int(start_row_raw)
-    end_row = int(end_row_raw)
-
-    if end_column_number < start_column_number or end_row < start_row:
-        raise CompositionDataError(f"A1-диапазон задан в обратном порядке: {range_a1}.")
-
-    return {
-        "sheetId": sheet_id,
-        "startRowIndex": start_row - 1,
-        "endRowIndex": end_row,
-        "startColumnIndex": start_column_number - 1,
-        "endColumnIndex": end_column_number,
-    }
-
-
-def _grid_range_for_table_row(
-    sheet_id: int,
-    table_spec: CompositionTableSpec,
-    *,
-    row_offset: int,
-) -> dict[str, int]:
-    """Строит GridRange для одной строки блока состава.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        table_spec: Спецификация блока.
-        row_offset: Смещение строки относительно начала блока.
-
-    Returns:
-        JSON-совместимый GridRange.
-    """
-
-    return _grid_range_from_start_cell(
-        sheet_id=sheet_id,
-        start_cell=_offset_cell(table_spec.start_cell, row_offset=row_offset, column_offset=0),
-        rows_count=1,
-        columns_count=len(table_spec.columns),
-    )
-
-
-def _grid_range_for_table_column(
-    *,
-    sheet_id: int,
-    table_spec: CompositionTableSpec,
-    column_index: int,
-    row_offset: int,
-    rows_count: int,
-) -> dict[str, int]:
-    """Строит GridRange для одной колонки блока состава.
-
-    Args:
-        sheet_id: Числовой ID листа Google Sheets.
-        table_spec: Спецификация блока.
-        column_index: Индекс колонки внутри блока.
-        row_offset: Смещение первой строки относительно начала блока.
-        rows_count: Количество строк.
-
-    Returns:
-        JSON-совместимый GridRange.
-    """
-
-    return _grid_range_from_start_cell(
-        sheet_id=sheet_id,
-        start_cell=_offset_cell(
-            table_spec.start_cell,
-            row_offset=row_offset,
-            column_offset=column_index,
-        ),
-        rows_count=rows_count,
-        columns_count=1,
-    )
-
-
-def _offset_cell(start_cell: str, *, row_offset: int, column_offset: int) -> str:
-    """Сдвигает A1-ячейку на заданное количество строк и колонок.
-
-    Args:
-        start_cell: Исходная ячейка.
-        row_offset: Сдвиг по строкам.
-        column_offset: Сдвиг по колонкам.
-
-    Returns:
-        Новая A1-ячейка.
-    """
-
-    start_column_number, start_row = _parse_start_cell(start_cell)
-    return f"{_number_to_column(start_column_number + column_offset)}{start_row + row_offset}"
-
-
-def _parse_start_cell(start_cell: str) -> tuple[int, int]:
-    """Парсит стартовую A1-ячейку.
-
-    Args:
-        start_cell: A1-ячейка, например `A1`.
-
-    Returns:
-        Номер колонки и номер строки, начиная с 1.
-
-    Raises:
-        CompositionDataError: Если стартовая ячейка некорректна.
-    """
-
-    match = A1_CELL_RE.fullmatch(start_cell.strip())
-    if match is None:
-        raise CompositionDataError(f"Некорректная стартовая ячейка: {start_cell}.")
-
-    start_column, start_row_raw = match.groups()
-    return _column_to_number(start_column), int(start_row_raw)
-
-
-def _normalize_row(row: Sequence[CellValue]) -> list[str]:
-    """Преобразует строку Google Sheets в список строк.
-
-    Args:
-        row: Строка значений Google Sheets.
-
-    Returns:
-        Строковые значения без `None`.
-    """
+def _string_row(row: Sequence[CellValue]) -> list[str]:
 
     return [_cell_to_str(cell) for cell in row]
 
 
 def _cell_to_str(value: CellValue) -> str:
-    """Преобразует значение ячейки в строку без нормализации пользовательских данных.
-
-    Args:
-        value: Значение ячейки.
-
-    Returns:
-        Строковое представление значения.
-    """
-
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if isinstance(value, float) and value.is_integer():
@@ -1517,85 +988,26 @@ def _cell_to_str(value: CellValue) -> str:
     return str(value)
 
 
-def _cell_at(row: Sequence[str], index: int) -> str:
-    """Безопасно читает ячейку строки.
-
-    Args:
-        row: Строка листа.
-        index: Индекс ячейки.
-
-    Returns:
-        Значение ячейки или пустая строка.
-    """
-
-    if index < 0 or index >= len(row):
-        return ""
-    return row[index]
+def _is_empty_row(row: Sequence[str]) -> bool:
+    return all(cell.strip() == "" for cell in row)
 
 
-def _is_blank(value: str) -> bool:
-    """Проверяет структурную пустоту ячейки.
-
-    Args:
-        value: Значение ячейки.
-
-    Returns:
-        `True`, если в ячейке нет значимых символов.
-    """
-
-    return value.strip() == ""
-
-
-def _normalize_header(value: str) -> str:
-    """Нормализует заголовок таблицы для сравнения.
-
-    Args:
-        value: Исходный заголовок.
-
-    Returns:
-        Заголовок без пробелов по краям.
-    """
-
-    return value.strip()
-
-
-def _empty_row(width: int) -> list[CellValue]:
-    """Создаёт пустую строку заданной ширины.
-
-    Args:
-        width: Количество колонок.
-
-    Returns:
-        Строка из пустых значений.
-    """
-
-    return ["" for _ in range(width)]
-
-
-def _title_row(title: str, width: int) -> list[CellValue]:
-    """Создаёт строку названия таблицы.
-
-    Args:
-        title: Название таблицы.
-        width: Ширина строки.
-
-    Returns:
-        Строка названия.
-    """
-
-    return [title, *("" for _ in range(width - 1))]
+def _parse_a1_cell(cell: str) -> tuple[int, int]:
+    column = ""
+    row = ""
+    for char in cell.strip():
+        if char.isalpha():
+            column += char
+        elif char.isdigit():
+            row += char
+        else:
+            raise CompositionDataError(f"Некорректная A1-ячейка: {cell}.")
+    if column == "" or row == "":
+        raise CompositionDataError(f"Некорректная A1-ячейка: {cell}.")
+    return _column_to_number(column), int(row)
 
 
 def _column_to_number(column: str) -> int:
-    """Преобразует буквенное имя колонки в номер.
-
-    Args:
-        column: Имя колонки, например `A`.
-
-    Returns:
-        Номер колонки, начиная с 1.
-    """
-
     number = 0
     for char in column.upper():
         number = number * 26 + ord(char) - ord("A") + 1
@@ -1603,17 +1015,16 @@ def _column_to_number(column: str) -> int:
 
 
 def _number_to_column(number: int) -> str:
-    """Преобразует номер колонки в буквенное имя.
-
-    Args:
-        number: Номер колонки, начиная с 1.
-
-    Returns:
-        Буквенное имя колонки.
-    """
-
+    if number <= 0:
+        raise CompositionDataError("Номер колонки должен быть положительным.")
     chars: list[str] = []
     while number > 0:
         number, remainder = divmod(number - 1, 26)
         chars.append(chr(ord("A") + remainder))
     return "".join(reversed(chars))
+
+
+def _format_dt(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()

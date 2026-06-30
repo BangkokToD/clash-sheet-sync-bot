@@ -43,6 +43,7 @@ class TelegramAccessService:
         admin_cache_ttl_seconds: int,
     ) -> None:
         self._telegram = telegram
+        self._connection = connection
         self._repository = TelegramChatRepository(connection)
         self._admin_cache_ttl_seconds = admin_cache_ttl_seconds
 
@@ -83,6 +84,7 @@ class TelegramAccessService:
                 user_id=user_id,
                 checked_at=_utc_now_iso(),
             )
+            await self._connection.commit()
         return AdminCheckResult(is_admin=is_admin, from_cache=False)
 
     async def _has_fresh_positive_cache(self, chat_id: int, user_id: int) -> bool:

@@ -8,14 +8,16 @@ from typing import Any, cast
 import aiosqlite
 
 from column_profiles import all_default_columns, default_columns
-from models import SheetBlock
+import json
 from models import (
     ColumnKind,
     ColumnProfile,
     ColumnValueType,
+    CompositionPlayerStatus,
     RuntimeChatConfig,
     SetupToken,
     SheetBinding,
+    SheetBlock,
     SyncRunStatus,
     TableType,
     TelegramChatStatus,
@@ -59,6 +61,31 @@ class PendingSheetLinkSetup:
     chat_id: int
     title: str
     setup_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompositionPlayerState:
+    """Состояние игрока состава из SQLite.
+
+    Attributes:
+        player_tag: Нормализованный тег игрока.
+        status: Статус игрока: active, exited или untracked.
+        clan_tag: Тег активного клана или `None`.
+        town_hall: Уровень ратуши или `None`.
+        nickname: Никнейм игрока или `None`.
+        exited_at: ISO-дата выхода или `None`.
+        user_values: Пользовательские значения по `column_key`.
+        last_seen_at: ISO-дата последнего наблюдения в CoC API или `None`.
+    """
+
+    player_tag: str
+    status: CompositionPlayerStatus
+    clan_tag: str | None
+    town_hall: int | None
+    nickname: str | None
+    exited_at: str | None
+    user_values: dict[str, str]
+    last_seen_at: str | None
 
 
 class RuntimeConfigRepository:
@@ -197,6 +224,66 @@ class RuntimeConfigRepository:
             for row in rows
         )
 
+    async def list_column_profiles(self, chat_id: int) -> tuple[ColumnProfile, ...]:
+        """Читает активные профили колонок чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+
+        Returns:
+            Кортеж колонок всех профилей.
+        """
+
+        rows = await fetch_all(
+            self._connection,
+            """
+            SELECT
+                chat_id,
+                table_type,
+                column_key,
+                title,
+                visible,
+                is_active,
+                sort_order,
+                kind,
+                value_type
+            FROM column_profiles
+            WHERE chat_id = ? AND is_active = 1
+            ORDER BY table_type ASC, sort_order ASC, column_key ASC
+            """,
+            (chat_id,),
+        )
+        return tuple(_row_to_column_profile(row) for row in rows)
+
+    async def is_google_sheet_bound_elsewhere(
+        self,
+        google_sheet_id: str,
+        *,
+        current_chat_id: int | None = None,
+    ) -> bool:
+        """Проверяет, занята ли Google-таблица другим активным чатом.
+
+        Args:
+            google_sheet_id: ID Google Spreadsheet.
+            current_chat_id: ID текущего чата, который нужно исключить из проверки.
+
+        Returns:
+            `True`, если таблица уже активно привязана к другому чату.
+        """
+
+        sql = """
+            SELECT 1
+            FROM sheet_bindings
+            WHERE google_sheet_id = ? AND is_active = 1
+        """
+        parameters: tuple[object, ...] = (google_sheet_id,)
+        if current_chat_id is not None:
+            sql += " AND chat_id != ?"
+            parameters = (google_sheet_id, current_chat_id)
+        row = await fetch_one(self._connection, f"{sql} LIMIT 1", parameters)
+        return row is not None
+
+
 class ClanSettingsRepository:
     """Repository настроек отслеживаемых кланов."""
 
@@ -204,7 +291,14 @@ class ClanSettingsRepository:
         self._connection = connection
 
     async def count_active_clans(self, chat_id: int) -> int:
-        """Считает активные кланы чата."""
+        """Считает активные кланы чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+
+        Returns:
+            Количество активных кланов.
+        """
 
         row = await fetch_one(
             self._connection,
@@ -214,7 +308,14 @@ class ClanSettingsRepository:
         return 0 if row is None else as_int(row["cnt"], "cnt")
 
     async def list_active_clans(self, chat_id: int) -> tuple[TrackedClan, ...]:
-        """Читает активные кланы чата."""
+        """Читает активные кланы чата.
+
+        Args:
+            chat_id: ID Telegram-чата.
+
+        Returns:
+            Активные кланы.
+        """
 
         return await RuntimeConfigRepository(self._connection).list_active_clans(chat_id)
 
@@ -611,65 +712,6 @@ class ColumnProfileRepository:
         )
         return 10 if row is None else as_int(row["max_order"], "max_order") + 10
 
-    async def list_column_profiles(self, chat_id: int) -> tuple[ColumnProfile, ...]:
-        """Читает активные профили колонок чата.
-
-        Args:
-            chat_id: ID Telegram-чата.
-
-        Returns:
-            Кортеж колонок всех профилей.
-        """
-
-        rows = await fetch_all(
-            self._connection,
-            """
-            SELECT
-                chat_id,
-                table_type,
-                column_key,
-                title,
-                visible,
-                is_active,
-                sort_order,
-                kind,
-                value_type
-            FROM column_profiles
-            WHERE chat_id = ? AND is_active = 1
-            ORDER BY table_type ASC, sort_order ASC, column_key ASC
-            """,
-            (chat_id,),
-        )
-        return tuple(_row_to_column_profile(row) for row in rows)
-
-    async def is_google_sheet_bound_elsewhere(
-        self,
-        google_sheet_id: str,
-        *,
-        current_chat_id: int | None = None,
-    ) -> bool:
-        """Проверяет, занята ли Google-таблица другим активным чатом.
-
-        Args:
-            google_sheet_id: ID Google Spreadsheet.
-            current_chat_id: ID текущего чата, который нужно исключить из проверки.
-
-        Returns:
-            `True`, если таблица уже активно привязана к другому чату.
-        """
-
-        sql = """
-            SELECT 1
-            FROM sheet_bindings
-            WHERE google_sheet_id = ? AND is_active = 1
-        """
-        parameters: tuple[object, ...] = (google_sheet_id,)
-        if current_chat_id is not None:
-            sql += " AND chat_id != ?"
-            parameters = (google_sheet_id, current_chat_id)
-        row = await fetch_one(self._connection, f"{sql} LIMIT 1", parameters)
-        return row is not None
-
 
 class SetupTokenRepository:
     """Repository одноразовых setup-токенов.
@@ -689,14 +731,7 @@ class SetupTokenRepository:
         expires_at: str,
         created_at: str,
     ) -> None:
-        """Создаёт setup-токен.
-
-        Args:
-            token: Секретная часть команды `/connect`.
-            created_by_user_id: Telegram user ID создателя.
-            expires_at: ISO-дата истечения.
-            created_at: ISO-дата создания.
-        """
+        """Создаёт setup-токен."""
 
         await self._connection.execute(
             """
@@ -707,14 +742,7 @@ class SetupTokenRepository:
         )
 
     async def get_setup_token(self, token: str) -> SetupToken | None:
-        """Читает setup-токен по секретному значению.
-
-        Args:
-            token: Секретная часть команды `/connect`.
-
-        Returns:
-            Токен или `None`.
-        """
+        """Читает setup-токен по секретному значению."""
 
         row = await fetch_one(
             self._connection,
@@ -737,16 +765,7 @@ class SetupTokenRepository:
         )
 
     async def mark_setup_token_used(self, *, token: str, used_chat_id: int, used_at: str) -> bool:
-        """Помечает setup-токен использованным.
-
-        Args:
-            token: Секретная часть команды `/connect`.
-            used_chat_id: ID группы, где токен применён.
-            used_at: ISO-дата использования.
-
-        Returns:
-            `True`, если токен был помечен использованным именно этим вызовом.
-        """
+        """Помечает setup-токен использованным."""
 
         cursor = await self._connection.execute(
             """
@@ -778,15 +797,7 @@ class TelegramChatRepository:
         created_by_user_id: int,
         now: str,
     ) -> None:
-        """Создаёт или обновляет подключённый Telegram-чат.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            title: Название группы.
-            chat_type: Тип Telegram-чата.
-            created_by_user_id: Telegram user ID администратора.
-            now: ISO-дата операции.
-        """
+        """Создаёт или обновляет подключённый Telegram-чат."""
 
         await self._connection.execute(
             """
@@ -825,18 +836,7 @@ class TelegramChatRepository:
         chat_type: str,
         now: str,
     ) -> None:
-        """Создаёт или обновляет известный, но ещё не настроенный Telegram-чат.
-
-        Метод используется для `/settings` в группе до `/connect`, чтобы связь
-        `chat_admin_links` не нарушала внешний ключ на `telegram_chats`.
-        Статус уже существующего чата не меняется.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            title: Название группы.
-            chat_type: Тип Telegram-чата.
-            now: ISO-дата операции.
-        """
+        """Создаёт или обновляет известный, но ещё не настроенный Telegram-чат."""
 
         await self._connection.execute(
             """
@@ -865,14 +865,7 @@ class TelegramChatRepository:
         linked_at: str,
         last_admin_check_at: str | None = None,
     ) -> None:
-        """Создаёт или реактивирует связь пользователя с группой.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            user_id: Telegram user ID.
-            linked_at: ISO-дата создания связи.
-            last_admin_check_at: ISO-дата последней положительной проверки админа.
-        """
+        """Создаёт или реактивирует связь пользователя с группой."""
 
         await self._connection.execute(
             """
@@ -889,13 +882,7 @@ class TelegramChatRepository:
         )
 
     async def update_admin_check_at(self, *, chat_id: int, user_id: int, checked_at: str) -> None:
-        """Обновляет дату положительной проверки Telegram-админа.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            user_id: Telegram user ID.
-            checked_at: ISO-дата проверки.
-        """
+        """Обновляет дату положительной проверки Telegram-админа."""
 
         await self._connection.execute(
             """
@@ -907,15 +894,7 @@ class TelegramChatRepository:
         )
 
     async def has_active_admin_link(self, *, chat_id: int, user_id: int) -> bool:
-        """Проверяет, есть ли активная связь пользователя с группой.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            user_id: Telegram user ID.
-
-        Returns:
-            `True`, если пользователь связан с группой через setup-flow.
-        """
+        """Проверяет, есть ли активная связь пользователя с группой."""
 
         row = await fetch_one(
             self._connection,
@@ -928,16 +907,9 @@ class TelegramChatRepository:
             (chat_id, user_id),
         )
         return row is not None
+
     async def get_setup_state(self, chat_id: int) -> str | None:
-        """Читает setup_state Telegram-чата.
-
-        Args:
-            chat_id: ID Telegram-чата.
-
-        Returns:
-            Текущее setup_state или `None`.
-        """
-
+        """Читает setup_state Telegram-чата."""
         row = await fetch_one(
             self._connection,
             "SELECT setup_state FROM telegram_chats WHERE chat_id = ?",
@@ -948,13 +920,7 @@ class TelegramChatRepository:
         return as_optional_str(row["setup_state"], "setup_state")
 
     async def set_setup_state(self, *, chat_id: int, setup_state: str | None, now: str) -> None:
-        """Обновляет setup_state Telegram-чата.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            setup_state: Новое состояние setup-flow или `None`.
-            now: ISO-дата операции.
-        """
+        """Обновляет setup_state Telegram-чата."""
 
         await self._connection.execute(
             """
@@ -966,13 +932,7 @@ class TelegramChatRepository:
         )
 
     async def set_status(self, *, chat_id: int, status: TelegramChatStatus, now: str) -> None:
-        """Обновляет статус Telegram-чата.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            status: Новый статус настройки.
-            now: ISO-дата операции.
-        """
+        """Обновляет статус Telegram-чата."""
 
         await self._connection.execute(
             """
@@ -989,15 +949,7 @@ class TelegramChatRepository:
         user_id: int,
         state_prefix: str,
     ) -> PendingSheetLinkSetup | None:
-        """Ищет группу, ожидающую ссылку на таблицу от пользователя.
-
-        Args:
-            user_id: Telegram user ID администратора.
-            state_prefix: Prefix setup_state, который нужно найти.
-
-        Returns:
-            Ожидающий setup-flow или `None`.
-        """
+        """Ищет группу, ожидающую ссылку на таблицу от пользователя."""
 
         row = await fetch_one(
             self._connection,
@@ -1021,17 +973,8 @@ class TelegramChatRepository:
             setup_state=as_str(row["setup_state"], "setup_state"),
         )
 
-
     async def get_admin_check_at(self, *, chat_id: int, user_id: int) -> str | None:
-        """Читает дату последней положительной проверки Telegram-админа.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            user_id: Telegram user ID.
-
-        Returns:
-            ISO-дата или `None`.
-        """
+        """Читает дату последней положительной проверки Telegram-админа."""
 
         row = await fetch_one(
             self._connection,
@@ -1058,14 +1001,7 @@ class AdminChatRepository:
         self._connection = connection
 
     async def list_known_chats(self, user_id: int) -> tuple[KnownAdminChat, ...]:
-        """Возвращает группы, известные пользователю через setup-flow.
-
-        Args:
-            user_id: Telegram user ID.
-
-        Returns:
-            Кортеж известных групп.
-        """
+        """Возвращает группы, известные пользователю через setup-flow."""
 
         rows = await fetch_all(
             self._connection,
@@ -1116,22 +1052,7 @@ class SheetBindingRepository:
         timezone: str,
         now: str,
     ) -> None:
-        """Создаёт или обновляет активную привязку таблицы.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            google_sheet_id: ID Google Spreadsheet.
-            spreadsheet_url: Нормализованная ссылка на Google Spreadsheet.
-            composition_sheet_name: Название листа состава.
-            composition_sheet_id: Числовой ID листа состава.
-            active_cwl_sheet_name: Название активного CWL-листа.
-            active_cwl_sheet_id: Числовой ID активного CWL-листа.
-            active_cwl_season: Текущий CWL-сезон или `None`.
-            bot_state_sheet_name: Название служебного листа.
-            bot_state_sheet_id: Числовой ID служебного листа.
-            timezone: IANA-таймзона чата.
-            now: ISO-дата операции.
-        """
+        """Создаёт или обновляет активную привязку таблицы."""
 
         await self._connection.execute(
             """
@@ -1195,15 +1116,7 @@ class SheetBlockRepository:
         self._connection = connection
 
     async def list_blocks(self, chat_id: int, sheet_name: str | None = None) -> tuple[SheetBlock, ...]:
-        """Читает последние записанные блоки чата.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            sheet_name: Название листа или `None` для всех листов.
-
-        Returns:
-            Кортеж управляемых блоков.
-        """
+        """Читает последние записанные блоки чата."""
 
         sql = """
             SELECT chat_id, sheet_name, sheet_id, block_key, start_cell, rows_count, columns_count
@@ -1230,12 +1143,7 @@ class SheetBlockRepository:
         )
 
     async def upsert_block(self, *, block: SheetBlock, updated_at: str) -> None:
-        """Создаёт или обновляет запись управляемого блока.
-
-        Args:
-            block: Описание последнего записанного прямоугольника.
-            updated_at: ISO-дата обновления.
-        """
+        """Создаёт или обновляет запись управляемого блока."""
 
         await self._connection.execute(
             """
@@ -1270,6 +1178,94 @@ class SheetBlockRepository:
         )
 
 
+class CompositionPlayerStateRepository:
+    """Repository состояния игроков состава.
+
+    Args:
+        connection: Открытое SQLite-подключение.
+    """
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def list_players(self, chat_id: int) -> tuple[CompositionPlayerState, ...]:
+        """Читает все состояния игроков состава чата."""
+
+        rows = await fetch_all(
+            self._connection,
+            """
+            SELECT
+                player_tag,
+                clan_tag,
+                status,
+                town_hall,
+                nickname,
+                exited_at,
+                user_values_json,
+                last_seen_at
+            FROM composition_player_state
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        )
+        return tuple(_row_to_composition_player_state(row) for row in rows)
+
+    async def upsert_player_state(
+        self,
+        *,
+        chat_id: int,
+        player_tag: str,
+        status: str,
+        clan_tag: str | None,
+        town_hall: int | None,
+        nickname: str | None,
+        exited_at: str | None,
+        user_values: dict[str, str],
+        last_seen_at: str | None,
+        updated_at: str,
+    ) -> None:
+        """Создаёт или обновляет состояние игрока состава."""
+
+        await self._connection.execute(
+            """
+            INSERT INTO composition_player_state(
+                chat_id,
+                player_tag,
+                clan_tag,
+                status,
+                town_hall,
+                nickname,
+                exited_at,
+                user_values_json,
+                last_seen_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, player_tag) DO UPDATE SET
+                clan_tag = excluded.clan_tag,
+                status = excluded.status,
+                town_hall = excluded.town_hall,
+                nickname = excluded.nickname,
+                exited_at = excluded.exited_at,
+                user_values_json = excluded.user_values_json,
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                chat_id,
+                player_tag,
+                clan_tag,
+                status,
+                town_hall,
+                nickname,
+                exited_at,
+                json.dumps(user_values, ensure_ascii=False, sort_keys=True),
+                last_seen_at,
+                updated_at,
+            ),
+        )
+
+
 class SyncRunRepository:
     """Repository для истории запусков `/sync`.
 
@@ -1288,17 +1284,7 @@ class SyncRunRepository:
         status: SyncRunStatus,
         started_at: str,
     ) -> int:
-        """Создаёт запись запуска sync.
-
-        Args:
-            chat_id: ID Telegram-чата.
-            started_by_user_id: Telegram user ID инициатора.
-            status: Начальный статус запуска.
-            started_at: ISO-дата принятия команды.
-
-        Returns:
-            ID созданной записи.
-        """
+        """Создаёт запись запуска sync."""
 
         cursor = await self._connection.execute(
             """
@@ -1317,16 +1303,7 @@ async def fetch_one(
     sql: str,
     parameters: tuple[object, ...] = (),
 ) -> aiosqlite.Row | None:
-    """Выполняет SELECT и возвращает одну строку.
-
-    Args:
-        connection: SQLite-подключение.
-        sql: SQL-запрос.
-        parameters: Параметры запроса.
-
-    Returns:
-        Строка результата или `None`.
-    """
+    """Выполняет SELECT и возвращает одну строку."""
 
     cursor = await connection.execute(sql, parameters)
     return await cursor.fetchone()
@@ -1337,16 +1314,7 @@ async def fetch_all(
     sql: str,
     parameters: tuple[object, ...] = (),
 ) -> tuple[aiosqlite.Row, ...]:
-    """Выполняет SELECT и возвращает все строки.
-
-    Args:
-        connection: SQLite-подключение.
-        sql: SQL-запрос.
-        parameters: Параметры запроса.
-
-    Returns:
-        Кортеж строк результата.
-    """
+    """Выполняет SELECT и возвращает все строки."""
 
     cursor = await connection.execute(sql, parameters)
     rows = await cursor.fetchall()
@@ -1354,14 +1322,7 @@ async def fetch_all(
 
 
 def _row_to_column_profile(row: aiosqlite.Row) -> ColumnProfile:
-    """Преобразует SQLite-строку в `ColumnProfile`.
-
-    Args:
-        row: SQLite-строка.
-
-    Returns:
-        Доменная модель колонки.
-    """
+    """Преобразует SQLite-строку в `ColumnProfile`."""
 
     return ColumnProfile(
         chat_id=as_int(row["chat_id"], "chat_id"),
@@ -1376,16 +1337,23 @@ def _row_to_column_profile(row: aiosqlite.Row) -> ColumnProfile:
     )
 
 
+def _row_to_composition_player_state(row: aiosqlite.Row) -> CompositionPlayerState:
+    """Преобразует SQLite-строку в `CompositionPlayerState`."""
+
+    return CompositionPlayerState(
+        player_tag=as_str(row["player_tag"], "player_tag"),
+        status=as_composition_player_status(row["status"]),
+        clan_tag=as_optional_str(row["clan_tag"], "clan_tag"),
+        town_hall=as_optional_int(row["town_hall"], "town_hall"),
+        nickname=as_optional_str(row["nickname"], "nickname"),
+        exited_at=as_optional_str(row["exited_at"], "exited_at"),
+        user_values=as_user_values(row["user_values_json"]),
+        last_seen_at=as_optional_str(row["last_seen_at"], "last_seen_at"),
+    )
+
+
 def as_str(value: Any, field_name: str) -> str:
-    """Проверяет строковое значение из SQLite.
-
-    Args:
-        value: Значение SQLite.
-        field_name: Имя поля для текста ошибки.
-
-    Returns:
-        Строка.
-    """
+    """Проверяет строковое значение из SQLite."""
 
     if not isinstance(value, str):
         raise RepositoryError(f"Поле {field_name} должно быть строкой.")
@@ -1393,15 +1361,7 @@ def as_str(value: Any, field_name: str) -> str:
 
 
 def as_optional_str(value: Any, field_name: str) -> str | None:
-    """Проверяет nullable-строку из SQLite.
-
-    Args:
-        value: Значение SQLite.
-        field_name: Имя поля для текста ошибки.
-
-    Returns:
-        Строка или `None`.
-    """
+    """Проверяет nullable-строку из SQLite."""
 
     if value is None:
         return None
@@ -1409,15 +1369,7 @@ def as_optional_str(value: Any, field_name: str) -> str | None:
 
 
 def as_int(value: Any, field_name: str) -> int:
-    """Проверяет целое значение из SQLite.
-
-    Args:
-        value: Значение SQLite.
-        field_name: Имя поля для текста ошибки.
-
-    Returns:
-        Целое число.
-    """
+    """Проверяет целое значение из SQLite."""
 
     if not isinstance(value, int) or isinstance(value, bool):
         raise RepositoryError(f"Поле {field_name} должно быть числом.")
@@ -1425,15 +1377,7 @@ def as_int(value: Any, field_name: str) -> int:
 
 
 def as_optional_int(value: Any, field_name: str) -> int | None:
-    """Проверяет nullable-число из SQLite.
-
-    Args:
-        value: Значение SQLite.
-        field_name: Имя поля для текста ошибки.
-
-    Returns:
-        Целое число или `None`.
-    """
+    """Проверяет nullable-число из SQLite."""
 
     if value is None:
         return None
@@ -1441,15 +1385,7 @@ def as_optional_int(value: Any, field_name: str) -> int | None:
 
 
 def as_bool_int(value: Any, field_name: str) -> bool:
-    """Проверяет SQLite boolean, сохранённый как 0/1.
-
-    Args:
-        value: Значение SQLite.
-        field_name: Имя поля для текста ошибки.
-
-    Returns:
-        Булево значение.
-    """
+    """Проверяет SQLite boolean, сохранённый как 0/1."""
 
     if value == 0:
         return False
@@ -1459,14 +1395,7 @@ def as_bool_int(value: Any, field_name: str) -> bool:
 
 
 def as_chat_status(value: Any) -> TelegramChatStatus:
-    """Проверяет статус Telegram-чата.
-
-    Args:
-        value: Значение SQLite.
-
-    Returns:
-        Типизированный статус чата.
-    """
+    """Проверяет статус Telegram-чата."""
 
     raw = as_str(value, "status")
     allowed = {
@@ -1483,14 +1412,7 @@ def as_chat_status(value: Any) -> TelegramChatStatus:
 
 
 def as_table_type(value: Any) -> TableType:
-    """Проверяет тип таблицы профиля колонок.
-
-    Args:
-        value: Значение SQLite.
-
-    Returns:
-        Типизированный table_type.
-    """
+    """Проверяет тип таблицы профиля колонок."""
 
     raw = as_str(value, "table_type")
     if raw not in {"composition_active", "composition_exited", "cwl"}:
@@ -1499,14 +1421,7 @@ def as_table_type(value: Any) -> TableType:
 
 
 def as_column_kind(value: Any) -> ColumnKind:
-    """Проверяет kind профиля колонки.
-
-    Args:
-        value: Значение SQLite.
-
-    Returns:
-        Типизированный kind.
-    """
+    """Проверяет kind профиля колонки."""
 
     raw = as_str(value, "kind")
     if raw not in {"system", "user", "service"}:
@@ -1515,16 +1430,38 @@ def as_column_kind(value: Any) -> ColumnKind:
 
 
 def as_column_value_type(value: Any) -> ColumnValueType:
-    """Проверяет value_type профиля колонки.
+    """Проверяет value_type профиля колонки."""
 
-    Args:
-        value: Значение SQLite.
-
-    Returns:
-        Типизированный value_type.
-    """
 
     raw = as_str(value, "value_type")
     if raw not in {"string", "integer", "datetime"}:
         raise RepositoryError(f"Некорректный column value_type: {raw}.")
     return cast(ColumnValueType, raw)
+
+
+def as_composition_player_status(value: Any) -> CompositionPlayerStatus:
+    """Проверяет статус игрока состава."""
+
+    raw = as_str(value, "status")
+    if raw not in {"active", "exited", "untracked"}:
+        raise RepositoryError(f"Некорректный status игрока состава: {raw}.")
+    return cast(CompositionPlayerStatus, raw)
+
+
+def as_user_values(value: Any) -> dict[str, str]:
+    """Парсит JSON пользовательских значений."""
+
+    if value is None:
+        return {}
+    raw_json = as_str(value, "user_values_json")
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise RepositoryError("user_values_json содержит битый JSON.") from exc
+    if not isinstance(data, dict):
+        raise RepositoryError("user_values_json должен быть JSON-объектом.")
+    result: dict[str, str] = {}
+    for key, raw_value in data.items():
+        if isinstance(key, str) and isinstance(raw_value, str):
+            result[key] = raw_value
+    return result
