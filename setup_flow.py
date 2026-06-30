@@ -43,6 +43,7 @@ from sheets_client import (
 )
 
 CALLBACK_CONNECT_GROUP: Final = "setup:create_token"
+CALLBACK_PRIVATE_START: Final = "setup:start"
 CALLBACK_MY_GROUPS: Final = "setup:my_groups"
 CALLBACK_HELP: Final = "setup:help"
 CALLBACK_SETTINGS_PREFIX: Final = "settings:open:"
@@ -67,18 +68,14 @@ AWAITING_CLAN_TAG_STATE_PREFIX: Final = "awaiting_clan_tag:"
 AWAITING_USER_COLUMN_TITLE_STATE_PREFIX: Final = "awaiting_user_column_title:"
 AWAITING_COLUMN_RENAME_STATE_PREFIX: Final = "awaiting_column_rename:"
 COLUMN_SECTION_TABLE_TYPES: Final[dict[str, TableType]] = {
-    "composition_columns": "composition_active",
-    "exited_columns": "composition_exited",
+    "composition_columns": "composition",
     "cwl_columns": "cwl",
 }
 SETTINGS_SECTIONS: Final = {
     "table": "Таблица",
     "clans": "Кланы",
     "composition_columns": "Колонки состава",
-    "exited_columns": "Колонки вышедших",
     "cwl_columns": "Колонки CWL",
-    "transfer": "Перенос таблицы",
-    "delete": "Удалить настройки группы",
 }
 
 
@@ -356,9 +353,11 @@ class SetupFlow:
                 now=now,
             )
 
-        await self._telegram.send_message(
+        await self._send_columns_section_message(
+            group_chat_id=pending.chat_id,
             chat_id=chat_id,
-            text=f"Колонка «{title}» создана в разделе «{table_title(table_type)}».",
+            table_type=table_type,
+            prefix=f"Колонка «{title}» создана.\n\n",
         )
         return True
 
@@ -407,10 +406,18 @@ class SetupFlow:
                 now=now,
             )
 
-        await self._telegram.send_message(
-            chat_id=chat_id,
-            text="Колонка переименована." if updated else "Колонку нельзя переименовать.",
-        )
+        if updated:
+            await self._send_columns_section_message(
+                group_chat_id=pending.chat_id,
+                chat_id=chat_id,
+                table_type=table_type,
+                prefix="Колонка переименована.\n\n",
+            )
+        else:
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Колонку нельзя переименовать.",
+            )
         return True
 
     async def create_setup_token(self, *, chat_id: int, user_id: int) -> None:
@@ -634,6 +641,16 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Принято.")
             await self.create_setup_token(chat_id=chat_id, user_id=user_id)
             return
+        if callback_data == CALLBACK_PRIVATE_START:
+            await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+            await _edit_or_send_message(
+                telegram=self._telegram,
+                chat_id=chat_id,
+                message_id=message_id,
+                text="Выберите действие.",
+                reply_markup=main_private_keyboard(),
+            )
+            return
         if callback_data == CALLBACK_MY_GROUPS:
             await self._telegram.answer_callback_query(callback_query_id, "Принято.")
             await self.send_private_settings(chat_id=chat_id, user_id=user_id)
@@ -641,6 +658,9 @@ class SetupFlow:
         if callback_data == CALLBACK_HELP:
             await self._telegram.answer_callback_query(callback_query_id, "Принято.")
             await self.send_help(chat_id=chat_id, is_private=True)
+            return
+        if callback_data == "noop":
+            await self._telegram.answer_callback_query(callback_query_id)
             return
         if callback_data.startswith(CALLBACK_SETTINGS_PREFIX):
             await self._show_group_settings_menu(
@@ -949,12 +969,39 @@ class SetupFlow:
             message_id: ID сообщения для редактирования.
         """
 
+        binding = await self._runtime.get_active_sheet_binding(group_chat_id)
+        try:
+            token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
+            service_account_email = token_provider.client_email
+        except GoogleSheetsAuthError:
+            service_account_email = "credentials.json недоступен"
+
+        if binding is None:
+            text = (
+                "Раздел «Таблица».\n\n"
+                "Таблица ещё не привязана. Нажмите кнопку ниже и отправьте ссылку "
+                "на существующую Google-таблицу.\n\n"
+                f"Service account: {service_account_email}"
+            )
+            action_text = "Привязать таблицу"
+        else:
+            text = (
+                "Раздел «Таблица».\n\n"
+                f"Текущая таблица:\n{binding.spreadsheet_url}\n\n"
+                f"Spreadsheet ID: {binding.google_sheet_id}\n"
+                f"Лист состава: {binding.composition_sheet_name}\n"
+                f"Лист CWL: {binding.active_cwl_sheet_name}\n"
+                f"Service account: {service_account_email}\n\n"
+                "Чтобы заменить таблицу, нажмите кнопку ниже и отправьте новую ссылку."
+            )
+            action_text = "Заменить таблицу"
+
         await _edit_or_send_message(
             telegram=self._telegram,
             chat_id=chat_id,
             message_id=message_id,
-            text="Раздел «Таблица». Вы можете привязать новую Google-таблицу.",
-            reply_markup=sheet_section_keyboard(group_chat_id),
+            text=text,
+            reply_markup=sheet_section_keyboard(group_chat_id, action_text),
         )
 
     async def _start_sheet_binding(
@@ -1374,21 +1421,67 @@ class SetupFlow:
     ) -> None:
         """Показывает раздел управления колонками."""
 
-        now = _format_dt(_utc_now())
-        async with transaction(self._connection):
-            await self._columns.ensure_default_profiles(chat_id=group_chat_id, now=now)
-        columns = await self._columns.list_columns(chat_id=group_chat_id, table_type=table_type)
-        lines = [f"Раздел «{table_title(table_type)}».", ""]
-        for column in columns:
-            marker = "👁" if column.visible else "🙈"
-            lines.append(f"{marker} {column.title} — {column.kind} / {column.column_key}")
+        text, reply_markup = await self._build_columns_section_payload(
+            group_chat_id=group_chat_id,
+            table_type=table_type,
+        )
         await _edit_or_send_message(
             telegram=self._telegram,
             chat_id=chat_id,
             message_id=message_id,
-            text="\n".join(lines),
-            reply_markup=columns_section_keyboard(group_chat_id, table_type, list(columns)),
+            text=text,
+            reply_markup=reply_markup,
         )
+
+    async def _build_columns_section_payload(
+        self,
+        *,
+        group_chat_id: int,
+        table_type: TableType,
+        prefix: str = "",
+    ) -> tuple[str, JsonObject]:
+        """Собирает текст и клавиатуру раздела управления колонками."""
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._columns.ensure_default_profiles(chat_id=group_chat_id, now=now)
+        columns = await self._columns.list_columns(chat_id=group_chat_id, table_type=table_type)
+        editable_columns = [column for column in columns if column.kind != "service"]
+        lines = []
+        if prefix:
+            lines.append(prefix.rstrip())
+            lines.append("")
+        lines.extend([f"Раздел «{table_title(table_type)}».", ""])
+        lines.append("Служебная колонка __bot_key скрывается автоматически.")
+        lines.append("")
+        if editable_columns:
+            for column in editable_columns:
+                marker = "👁" if column.visible else "🙈"
+                lines.append(f"{marker} {column.title}")
+        else:
+            lines.append("Настраиваемых колонок пока нет.")
+        return "\n".join(lines), columns_section_keyboard(group_chat_id, table_type, list(columns))
+
+    async def _send_columns_section_message(
+        self,
+        *,
+        group_chat_id: int,
+        chat_id: int,
+        table_type: TableType,
+        prefix: str = "",
+    ) -> None:
+        """Отправляет новый экран управления колонками.
+
+        Используется после text-input действий, когда нельзя редактировать
+        старое inline-сообщение: у обычного сообщения нет `message_id` меню.
+        """
+
+        text, reply_markup = await self._build_columns_section_payload(
+            group_chat_id=group_chat_id,
+            table_type=table_type,
+            prefix=prefix,
+        )
+        await self._telegram.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
 
     async def _start_user_column_add(
         self,
@@ -1649,7 +1742,8 @@ def known_groups_keyboard(groups: list[KnownGroupButton]) -> JsonObject:
                 },
             ]
             for group in groups
-        ],
+        ]
+        + [[{"text": "Назад", "callback_data": CALLBACK_PRIVATE_START}]],
     }
 
 
@@ -1677,6 +1771,7 @@ def settings_menu_keyboard(group_chat_id: int) -> JsonObject:
 
     Args:
         group_chat_id: ID Telegram-группы.
+        action_text: Текст кнопки привязки или замены таблицы.
 
     Returns:
         Telegram inline keyboard.
@@ -1694,12 +1789,13 @@ def settings_menu_keyboard(group_chat_id: int) -> JsonObject:
                 },
             ]
             for key, title in SETTINGS_SECTIONS.items()
-        ],
+        ]
+        + [[{"text": "Назад", "callback_data": CALLBACK_MY_GROUPS}]],
     }
 
 
 
-def sheet_section_keyboard(group_chat_id: int) -> JsonObject:
+def sheet_section_keyboard(group_chat_id: int, action_text: str) -> JsonObject:
     """Создаёт клавиатуру раздела таблицы.
 
     Args:
@@ -1713,7 +1809,7 @@ def sheet_section_keyboard(group_chat_id: int) -> JsonObject:
         "inline_keyboard": [
             [
                 {
-                    "text": "Привязать таблицу",
+                    "text": action_text,
                     "callback_data": f"{CALLBACK_BIND_SHEET_PREFIX}{group_chat_id}",
                 },
             ],
@@ -1745,6 +1841,12 @@ def check_sheet_access_keyboard(group_chat_id: int) -> JsonObject:
                     "callback_data": f"{CALLBACK_CHECK_SHEET_PREFIX}{group_chat_id}",
                 },
             ],
+            [
+                {
+                    "text": "Назад",
+                    "callback_data": f"{CALLBACK_SETTINGS_SECTION_PREFIX}{group_chat_id}:table",
+                },
+            ],
         ],
     }
 
@@ -1767,9 +1869,19 @@ def clans_section_keyboard(group_chat_id: int, clans: list) -> JsonObject:
         tag_payload = _tag_payload(clan.clan_tag)
         keyboard.append(
             [
-                {"text": f"↑ {clan.clan_name}", "callback_data": f"{CALLBACK_CLAN_MOVE_UP_PREFIX}{group_chat_id}:{tag_payload}"},
-                {"text": "↓", "callback_data": f"{CALLBACK_CLAN_MOVE_DOWN_PREFIX}{group_chat_id}:{tag_payload}"},
-                {"text": "Удалить", "callback_data": f"{CALLBACK_CLAN_REMOVE_PREFIX}{group_chat_id}:{tag_payload}"},
+                {"text": clan.clan_name, "callback_data": "noop"},
+                {
+                    "text": "↑",
+                    "callback_data": f"{CALLBACK_CLAN_MOVE_UP_PREFIX}{group_chat_id}:{tag_payload}",
+                },
+                {
+                    "text": "↓",
+                    "callback_data": f"{CALLBACK_CLAN_MOVE_DOWN_PREFIX}{group_chat_id}:{tag_payload}",
+                },
+                {
+                    "text": "Удалить",
+                    "callback_data": f"{CALLBACK_CLAN_REMOVE_PREFIX}{group_chat_id}:{tag_payload}",
+                },
             ],
         )
     keyboard.append([{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}])
@@ -1828,18 +1940,16 @@ def columns_section_keyboard(group_chat_id: int, table_type: TableType, columns:
     ]
     for column in columns:
         if column.kind == "service":
-            keyboard.append([{"text": f"🔒 {column.title}", "callback_data": "noop"}])
             continue
+        action_text = "Удалить" if column.kind == "user" else ("Скрыть" if column.visible else "Показать")
+        action_callback = (
+            f"{CALLBACK_COLUMN_DELETE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+            if column.kind == "user"
+            else f"{CALLBACK_COLUMN_TOGGLE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+        )
         keyboard.append(
             [
-                {
-                    "text": "Скрыть" if column.visible else "Показать",
-                    "callback_data": f"{CALLBACK_COLUMN_TOGGLE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
-                },
-                {
-                    "text": "Имя",
-                    "callback_data": f"{CALLBACK_COLUMN_RENAME_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
-                },
+                {"text": column.title, "callback_data": "noop"},
                 {
                     "text": "↑",
                     "callback_data": f"{CALLBACK_COLUMN_MOVE_UP_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
@@ -1848,17 +1958,9 @@ def columns_section_keyboard(group_chat_id: int, table_type: TableType, columns:
                     "text": "↓",
                     "callback_data": f"{CALLBACK_COLUMN_MOVE_DOWN_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
                 },
+                {"text": action_text, "callback_data": action_callback},
             ],
         )
-        if column.kind == "user":
-            keyboard.append(
-                [
-                    {
-                        "text": f"Удалить: {column.title}",
-                        "callback_data": f"{CALLBACK_COLUMN_DELETE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
-                    },
-                ],
-            )
     keyboard.append([{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}])
     return {"inline_keyboard": keyboard}
 
@@ -1925,7 +2027,7 @@ def _parse_column_section_callback(callback_data: str, prefix: str) -> tuple[int
         chat_id = int(raw_chat_id)
     except ValueError:
         return None
-    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
+    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"}:
         return None
     return chat_id, raw_table_type  # type: ignore[return-value]
 
@@ -1948,7 +2050,7 @@ def _parse_column_callback(callback_data: str, prefix: str) -> tuple[int, TableT
         chat_id = int(raw_chat_id)
     except ValueError:
         return None
-    if raw_table_type not in {"composition_active", "composition_exited", "cwl"} or column_key == "":
+    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"} or column_key == "":
         return None
     return chat_id, raw_table_type, column_key  # type: ignore[return-value]
 
@@ -1987,7 +2089,7 @@ def _table_type_from_state(setup_state: str, *, prefix: str, user_id: int) -> Ta
     if not setup_state.startswith(expected_prefix):
         return None
     raw_table_type = setup_state.removeprefix(expected_prefix)
-    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
+    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"}:
         return None
     return raw_table_type  # type: ignore[return-value]
 
@@ -2008,7 +2110,7 @@ def _rename_state_payload(setup_state: str, user_id: int) -> tuple[TableType, st
         return None
     payload = setup_state.removeprefix(expected_prefix)
     raw_table_type, _, column_key = payload.partition(":")
-    if raw_table_type not in {"composition_active", "composition_exited", "cwl"} or column_key == "":
+    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"} or column_key == "":
         return None
     return raw_table_type, column_key  # type: ignore[return-value]
 

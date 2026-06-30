@@ -16,8 +16,9 @@ MAX_COLUMN_TITLE_LENGTH: Final = 80
 USER_COLUMN_KEY_RE: Final = re.compile(r"[^a-zA-Z0-9_]+")
 
 TABLE_TITLES: Final[dict[TableType, str]] = {
+    "composition": "Колонки состава",
     "composition_active": "Колонки состава",
-    "composition_exited": "Колонки вышедших",
+    "composition_exited": "Колонки состава",
     "cwl": "Колонки CWL",
 }
 
@@ -46,17 +47,12 @@ class ColumnDefinition:
 
 
 DEFAULT_COLUMN_DEFINITIONS: Final[tuple[ColumnDefinition, ...]] = (
-    ColumnDefinition("composition_active", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
-    ColumnDefinition("composition_active", "number", "№", True, "system", "integer", 10),
-    ColumnDefinition("composition_active", "tag", "Тег", True, "system", "string", 20),
-    ColumnDefinition("composition_active", "town_hall", "Ратуша", True, "system", "integer", 30),
-    ColumnDefinition("composition_active", "nickname", "Никнейм", True, "system", "string", 40),
-    ColumnDefinition("composition_exited", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
-    ColumnDefinition("composition_exited", "number", "№", True, "system", "integer", 10),
-    ColumnDefinition("composition_exited", "tag", "Тег", True, "system", "string", 20),
-    ColumnDefinition("composition_exited", "town_hall", "Ратуша", True, "system", "integer", 30),
-    ColumnDefinition("composition_exited", "nickname", "Никнейм", True, "system", "string", 40),
-    ColumnDefinition("composition_exited", "exited_at", "Дата выхода", True, "system", "datetime", 50),
+    ColumnDefinition("composition", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
+    ColumnDefinition("composition", "number", "№", True, "system", "integer", 10),
+    ColumnDefinition("composition", "tag", "Тег", True, "system", "string", 20),
+    ColumnDefinition("composition", "town_hall", "Ратуша", True, "system", "integer", 30),
+    ColumnDefinition("composition", "nickname", "Никнейм", True, "system", "string", 40),
+    ColumnDefinition("composition", "exited_at", "Дата выхода", True, "system", "datetime", 50),
     ColumnDefinition("cwl", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
     ColumnDefinition("cwl", "round", "Раунд", True, "system", "integer", 10),
     ColumnDefinition("cwl", "attacker_tag", "Тег", True, "system", "string", 20),

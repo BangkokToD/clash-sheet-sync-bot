@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, cast
 
 import aiosqlite
 
 from column_profiles import all_default_columns, default_columns
-import json
 from models import (
     ColumnKind,
     ColumnProfile,
@@ -1415,7 +1415,7 @@ def as_table_type(value: Any) -> TableType:
     """Проверяет тип таблицы профиля колонок."""
 
     raw = as_str(value, "table_type")
-    if raw not in {"composition_active", "composition_exited", "cwl"}:
+    if raw not in {"composition", "composition_active", "composition_exited", "cwl"}:
         raise RepositoryError(f"Некорректный table_type: {raw}.")
     return cast(TableType, raw)
 
@@ -1431,7 +1431,6 @@ def as_column_kind(value: Any) -> ColumnKind:
 
 def as_column_value_type(value: Any) -> ColumnValueType:
     """Проверяет value_type профиля колонки."""
-
 
     raw = as_str(value, "value_type")
     if raw not in {"string", "integer", "datetime"}:

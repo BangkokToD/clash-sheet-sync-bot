@@ -20,8 +20,8 @@ from sheets_client import CellValue, SheetValues, SheetsClient, range_from_start
 COMPOSITION_PLAYER_KEY_PREFIX: Final = "composition_player:"
 ACTIVE_BLOCK_PREFIX: Final = "composition_active:"
 EXITED_BLOCK_KEY: Final = "composition_exited"
-COMPOSITION_ACTIVE_TABLE: Final[TableType] = "composition_active"
-COMPOSITION_EXITED_TABLE: Final[TableType] = "composition_exited"
+COMPOSITION_TABLE: Final[TableType] = "composition"
+ACTIVE_EXCLUDED_COLUMN_KEYS: Final = {"exited_at"}
 DEFAULT_ACTIVE_START_CELL: Final = "A1"
 TITLE_ROWS_COUNT: Final = 2
 
@@ -42,7 +42,7 @@ class ImportedPlayerValues:
 
     Attributes:
         player_tag: Нормализованный тег игрока.
-        table_type: Тип таблицы, из которой прочитана строка.
+        is_exited: Была ли строка прочитана из блока `Вышедшие`.
         clan_tag: Тег клана для active-блока или `None`.
         town_hall: Ратуша из видимой system-колонки или `None`.
         nickname: Ник из видимой system-колонки или `None`.
@@ -51,7 +51,7 @@ class ImportedPlayerValues:
     """
 
     player_tag: str
-    table_type: TableType
+    is_exited: bool
     clan_tag: str | None
     town_hall: int | None
     nickname: str | None
@@ -66,10 +66,12 @@ class CompositionImportResult:
     Attributes:
         players: Игроки по player tag.
         warnings: Предупреждения импорта ручных полей.
+        saw_exited_block: Был ли прочитан предыдущий managed block `Вышедшие`.
     """
 
     players: dict[str, ImportedPlayerValues]
     warnings: tuple[str, ...]
+    saw_exited_block: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,10 +301,13 @@ async def import_current_composition_sheet(
     warnings: list[str] = []
     sheet_name = runtime_config.sheet_binding.composition_sheet_name
 
+    saw_exited_block = False
     for block in blocks:
         table_type = _table_type_from_block_key(block.block_key)
         if table_type is None:
             continue
+        is_exited_block = _is_exited_block_key(block.block_key)
+        saw_exited_block = saw_exited_block or is_exited_block
         block_range = range_from_start_cell(
             start_cell=block.start_cell,
             rows_count=block.rows_count,
@@ -313,6 +318,7 @@ async def import_current_composition_sheet(
             runtime_config=runtime_config,
             block=block,
             table_type=table_type,
+            is_exited=is_exited_block,
             values=values,
         )
         warnings.extend(block_warnings)
@@ -322,7 +328,11 @@ async def import_current_composition_sheet(
                 continue
             players[player.player_tag] = player
 
-    return CompositionImportResult(players=players, warnings=tuple(warnings))
+    return CompositionImportResult(
+        players=players,
+        warnings=tuple(warnings),
+        saw_exited_block=saw_exited_block,
+    )
 
 
 def build_composition_blocks(
@@ -340,8 +350,11 @@ def build_composition_blocks(
         Блоки значений и metadata для `sheet_blocks`.
     """
 
-    active_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_ACTIVE_TABLE)
-    exited_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_EXITED_TABLE)
+    composition_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_TABLE)
+    active_columns = tuple(
+        column for column in composition_columns if column.column_key not in ACTIVE_EXCLUDED_COLUMN_KEYS
+    )
+    exited_columns = composition_columns
     active_width = len(active_columns)
     exited_start_column = active_width + 2
     built_blocks: list[BuiltBlock] = []
@@ -353,7 +366,7 @@ def build_composition_blocks(
             title=clan.clan_name,
             columns=active_columns,
             states=states,
-            table_type=COMPOSITION_ACTIVE_TABLE,
+            is_exited=False,
         )
         block = SheetBlock(
             chat_id=runtime_config.chat_id,
@@ -372,7 +385,7 @@ def build_composition_blocks(
         title="Вышедшие",
         columns=exited_columns,
         states=exited_states,
-        table_type=COMPOSITION_EXITED_TABLE,
+        is_exited=True,
     )
     exited_block = SheetBlock(
         chat_id=runtime_config.chat_id,
@@ -510,6 +523,18 @@ def _plan_player_states(
                 )
             continue
         if previous.status == "exited":
+            if imported.saw_exited_block and player_tag not in imported.players:
+                planned[player_tag] = PlannedPlayerState(
+                    player_tag=player_tag,
+                    status="untracked",
+                    clan_tag=previous.clan_tag,
+                    town_hall=previous.town_hall,
+                    nickname=previous.nickname,
+                    exited_at=previous.exited_at,
+                    user_values=user_values,
+                    last_seen_at=previous.last_seen_at,
+                )
+                continue
             planned[player_tag] = PlannedPlayerState(
                 player_tag=player_tag,
                 status="exited",
@@ -555,8 +580,8 @@ def _merge_imported_sheet_state(
             continue
         merged[player_tag] = CompositionPlayerState(
             player_tag=player_tag,
-            status="active" if imported_player.table_type == COMPOSITION_ACTIVE_TABLE else "exited",
-            clan_tag=imported_player.clan_tag,
+            status="exited" if imported_player.is_exited else "active",
+            clan_tag=None if imported_player.is_exited else imported_player.clan_tag,
             town_hall=imported_player.town_hall,
             nickname=imported_player.nickname,
             exited_at=imported_player.exited_at,
@@ -571,6 +596,7 @@ def _parse_imported_block(
     runtime_config: RuntimeChatConfig,
     block: SheetBlock,
     table_type: TableType,
+    is_exited: bool,
     values: Sequence[Sequence[CellValue]],
 ) -> tuple[list[ImportedPlayerValues], list[str]]:
     """Парсит один сохранённый block range.
@@ -578,7 +604,8 @@ def _parse_imported_block(
     Args:
         runtime_config: Runtime-конфиг чата.
         block: Описание блока.
-        table_type: Тип таблицы блока.
+        table_type: Тип профиля колонок блока.
+        is_exited: Является ли block таблицей вышедших.
         values: Значения блока из Google Sheets.
 
     Returns:
@@ -619,8 +646,8 @@ def _parse_imported_block(
         imported.append(
             ImportedPlayerValues(
                 player_tag=player_tag,
-                table_type=table_type,
-                clan_tag=clan_tag if table_type == COMPOSITION_ACTIVE_TABLE else None,
+                is_exited=is_exited,
+                clan_tag=None if is_exited else clan_tag,
                 town_hall=_optional_int_cell(row, system_indexes.get("town_hall")),
                 nickname=_optional_str_cell(row, system_indexes.get("nickname")),
                 exited_at=_optional_str_cell(row, system_indexes.get("exited_at")),
@@ -732,7 +759,7 @@ def _build_block_values(
     title: str,
     columns: Sequence[ColumnProfile],
     states: Sequence[PlannedPlayerState],
-    table_type: TableType,
+    is_exited: bool,
 ) -> list[list[CellValue]]:
     """Строит значения одного блока состава."""
 
@@ -741,7 +768,7 @@ def _build_block_values(
         [column.title for column in columns],
     ]
     for row_number, state in enumerate(states, start=1):
-        values.append(_state_to_row(row_number=row_number, state=state, columns=columns, table_type=table_type))
+        values.append(_state_to_row(row_number=row_number, state=state, columns=columns, is_exited=is_exited))
     if len(values) == TITLE_ROWS_COUNT:
         values.append(["" for _ in columns])
     return values
@@ -752,7 +779,7 @@ def _state_to_row(
     row_number: int,
     state: PlannedPlayerState,
     columns: Sequence[ColumnProfile],
-    table_type: TableType,
+    is_exited: bool,
 ) -> list[CellValue]:
     """Преобразует состояние игрока в строку листа."""
 
@@ -770,7 +797,7 @@ def _state_to_row(
             row.append(state.town_hall or "")
         elif column.column_key == "nickname":
             row.append(state.nickname or "")
-        elif column.column_key == "exited_at" and table_type == COMPOSITION_EXITED_TABLE:
+        elif column.column_key == "exited_at" and is_exited:
             row.append(state.exited_at or "")
         else:
             row.append("")
@@ -862,12 +889,13 @@ async def _hide_bot_key_columns(
         )
 
 def _table_type_from_block_key(block_key: str) -> TableType | None:
-    if block_key.startswith(ACTIVE_BLOCK_PREFIX):
-        return COMPOSITION_ACTIVE_TABLE
-    if block_key == EXITED_BLOCK_KEY:
-        return COMPOSITION_EXITED_TABLE
-
+    if block_key.startswith(ACTIVE_BLOCK_PREFIX) or block_key == EXITED_BLOCK_KEY:
+        return COMPOSITION_TABLE
     return None
+
+
+def _is_exited_block_key(block_key: str) -> bool:
+    return block_key == EXITED_BLOCK_KEY
 
 
 def _clan_tag_from_block_key(block_key: str) -> str | None:

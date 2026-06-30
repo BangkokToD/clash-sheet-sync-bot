@@ -23,7 +23,7 @@ TelegramMemberStatus = Literal[
     "left",
     "kicked",
 ]
-TableType = Literal["composition_active", "composition_exited", "cwl"]
+TableType = Literal["composition", "composition_active", "composition_exited", "cwl"]
 ColumnKind = Literal["system", "user", "service"]
 ColumnValueType = Literal["string", "integer", "datetime"]
 CompositionPlayerStatus = Literal["active", "exited", "untracked"]
