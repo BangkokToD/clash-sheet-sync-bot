@@ -1,4 +1,4 @@
-"""Импорт и state-модель CWL в публичной runtime-архитектуре."""
+"""Импорт, state-модель и запись CWL в публичной runtime-архитектуре."""
 
 from __future__ import annotations
 
@@ -9,19 +9,29 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Final
 
 from coc_client import ClashApiUnavailableError, ClashClient, ClashCwlNotInProgressError
 from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE
 from models import ColumnProfile, RuntimeChatConfig, SheetBlock, TableType, TrackedClan, normalize_tag
-from repositories import CwlRowState, CwlRowStateRepository, SheetBlockRepository
-from sheets_client import CellValue, SheetsClient, range_from_start_cell
+from repositories import (
+    CwlRowState,
+    CwlRowStateRepository,
+    SheetBindingRepository,
+    SheetBlockRepository,
+)
+from sheets_client import CellValue, SheetMetadata, SheetValues, SheetsClient, range_from_start_cell
 
 logger = logging.getLogger(__name__)
 
 CWL_TABLE: Final[TableType] = "cwl"
 CWL_BLOCK_PREFIX: Final = "cwl:"
+CWL_MESSAGE_BLOCK_PREFIX: Final = "cwl_message:"
 CWL_WIDE_IMPORT_RANGE: Final = "A1:ZZ1000"
+CWL_ACTIVE_SHEET_NAME: Final = "CWL"
+CWL_STAGING_SHEET_PREFIX: Final = "CWL - staging - "
+CWL_ARCHIVE_SHEET_PREFIX: Final = "CWL - "
 CWL_ELIGIBLE_WAR_STATES: Final = {"warEnded", "inWar"}
 CWL_WAR_CONCURRENCY_LIMIT: Final = 5
 NO_ATTACK_MARKER: Final = "NO_ATTACK"
@@ -30,6 +40,11 @@ DEF_POS_MARKER_PREFIX: Final = "DEF_POS_"
 CWL_ROW_KEY_PARTS_COUNT: Final = 5
 BOT_KEY_PREFIX: Final = "cwl_row:"
 TECHNICAL_HASH_VERSION: Final = "1"
+TITLE_ROWS_COUNT: Final = 2
+DEFAULT_CWL_START_CELL: Final = "A1"
+BOT_STATE_SCHEMA_VERSION: Final = "1"
+MANAGED_BY_VALUE: Final = "clash-sheet-sync-bot"
+
 DEFENDER_POSITION_RE: Final = re.compile(r"^\s*(\d+)\b")
 
 SYSTEM_HEADER_ALIASES: Final[dict[str, set[str]]] = {
@@ -42,16 +57,29 @@ SYSTEM_HEADER_ALIASES: Final[dict[str, set[str]]] = {
     "destruction_percentage": {"Процент разрушений"},
 }
 
+GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
+DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
+WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
+BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
+LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
+BORDER_RGB: Final = {"red": 0.70, "green": 0.76, "blue": 0.73}
+
 JsonObject = dict[str, Any]
 JsonValues = dict[str, str]
 
 
 class CwlSyncError(RuntimeError):
-    """Базовая ошибка CWL sync-state."""
+    """Базовая ошибка CWL sync."""
 
 
 class CwlDataError(CwlSyncError):
-    """Ошибка данных CWL, при которой state нельзя обновлять."""
+    """Ошибка данных CWL, при которой state или лист нельзя обновлять."""
+
+
+class CwlSeasonMismatchError(CwlDataError):
+    """Ошибка несовпадения CWL-сезонов у участвующих кланов."""
+
+    stage: str = "проверка CWL-сезона"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +116,7 @@ class CwlTechnicalValues:
 
 @dataclass(frozen=True, slots=True)
 class CwlPlannedRow:
-    """Строка CWL, построенная из CoC API перед записью в SQLite."""
+    """Строка CWL, построенная из CoC API перед записью."""
 
     row_key: str
     season: str
@@ -112,6 +140,17 @@ class CwlPlannedRow:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    @property
+    def sort_key(self) -> tuple[int, int, int, str]:
+        """Возвращает ключ сортировки строки внутри CWL-таблицы."""
+
+        return (
+            self.round_number,
+            self.technical_values.attacker_map_position,
+            _marker_sort_index(self.marker),
+            self.attacker_tag,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CwlImportedRow:
@@ -131,12 +170,63 @@ class CwlImportResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CwlClanBlock:
+    """Будущий CWL-блок одного active clan."""
+
+    clan: TrackedClan
+    rows: tuple[CwlPlannedRow, ...]
+    message: str | None = None
+    rounds_count: int = 0
+
+    @property
+    def block_key(self) -> str:
+        """Возвращает block_key для `sheet_blocks`."""
+
+        prefix = CWL_MESSAGE_BLOCK_PREFIX if self.message is not None else CWL_BLOCK_PREFIX
+        return f"{prefix}{self.clan.clan_tag}"
+
+
+@dataclass(frozen=True, slots=True)
+class BuiltCwlBlock:
+    """Построенный блок CWL-листа."""
+
+    block: SheetBlock
+    values: list[list[CellValue]]
+    has_table: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CwlPreparedData:
+    """Подготовленные CWL-данные до записи в Google Sheets."""
+
+    season: str | None
+    clan_blocks: tuple[CwlClanBlock, ...]
+    rows: tuple[CwlPlannedRow, ...]
+    all_not_in_progress: bool
+    not_in_progress_clans: tuple[TrackedClan, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CwlStateSyncResult:
-    """Результат обновления CWL row state."""
+    """Результат обновления CWL row state без записи листа."""
 
     season: str | None
     rows_count: int
     all_not_in_progress: bool
+    not_in_progress_clans: tuple[TrackedClan, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CwlSheetSyncResult:
+    """Результат публичной записи CWL-листа."""
+
+    season: str | None
+    rows_count: int
+    blocks_count: int
+    all_not_in_progress: bool
+    archived_previous_season: bool = False
     not_in_progress_clans: tuple[TrackedClan, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -149,6 +239,7 @@ class CwlTableHeader:
     column_index: int
     width: int
     clan_tag: str | None
+    system_indexes: dict[str, int]
 
 
 async def run_cwl_state_sync(
@@ -161,77 +252,133 @@ async def run_cwl_state_sync(
 ) -> CwlStateSyncResult:
     """Обновляет `cwl_row_state` без записи Google Sheets."""
 
-    if not runtime_config.active_clans:
-        raise CwlDataError("Для CWL sync-state нужен хотя бы один активный клан.")
-
-    league_groups = await _load_league_groups(runtime_config.active_clans, clash_client)
-    participating_groups = {
-        clan_tag: group
-        for clan_tag, group in league_groups.items()
-        if group is not None
-    }
-    not_in_progress_clans = tuple(
-        clan for clan in runtime_config.active_clans if league_groups.get(clan.clan_tag) is None
+    prepared = await _prepare_cwl_data(
+        runtime_config=runtime_config,
+        clash_client=clash_client,
+        sheets_client=sheets_client,
+        cwl_repository=cwl_repository,
+        sheet_block_repository=sheet_block_repository,
     )
-    if not participating_groups:
+    if prepared.all_not_in_progress:
         return CwlStateSyncResult(
             season=None,
             rows_count=0,
             all_not_in_progress=True,
-            not_in_progress_clans=not_in_progress_clans,
+            not_in_progress_clans=prepared.not_in_progress_clans,
+            warnings=prepared.warnings,
         )
 
-    season = _resolve_cwl_season(participating_groups)
-    sheet_name = runtime_config.sheet_binding.active_cwl_sheet_name
-    previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
-    cwl_blocks = tuple(
-        block for block in previous_blocks if block.block_key.startswith(CWL_BLOCK_PREFIX)
+    await _upsert_cwl_row_states(
+        runtime_config=runtime_config,
+        cwl_repository=cwl_repository,
+        rows=prepared.rows,
     )
-    imported = await import_current_cwl_sheet(
+    return CwlStateSyncResult(
+        season=prepared.season,
+        rows_count=len(prepared.rows),
+        all_not_in_progress=False,
+        not_in_progress_clans=prepared.not_in_progress_clans,
+        warnings=prepared.warnings,
+    )
+
+
+async def run_public_cwl_sync(
+    *,
+    runtime_config: RuntimeChatConfig,
+    clash_client: ClashClient,
+    sheets_client: SheetsClient,
+    cwl_repository: CwlRowStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+    sheet_binding_repository: SheetBindingRepository,
+    sync_run_id: int,
+) -> CwlSheetSyncResult:
+    """Обновляет публичный CWL-лист и `cwl_row_state`.
+
+    Если CWL не проводится у всех активных кланов, лист CWL не меняется.
+    Если сезон изменился, новая версия пишется через staging-лист.
+    """
+
+    prepared = await _prepare_cwl_data(
+        runtime_config=runtime_config,
+        clash_client=clash_client,
+        sheets_client=sheets_client,
+        cwl_repository=cwl_repository,
+        sheet_block_repository=sheet_block_repository,
+    )
+    if prepared.all_not_in_progress or prepared.season is None:
+        return CwlSheetSyncResult(
+            season=None,
+            rows_count=0,
+            blocks_count=0,
+            all_not_in_progress=True,
+            not_in_progress_clans=prepared.not_in_progress_clans,
+            warnings=prepared.warnings,
+        )
+
+    columns = _physical_columns(runtime_config.column_profiles)
+    old_season = runtime_config.sheet_binding.active_cwl_season
+    season_changed = old_season is not None and old_season != prepared.season
+
+    if season_changed:
+        active_sheet = await _write_cwl_with_staging_archive(
+            runtime_config=runtime_config,
+            sheets_client=sheets_client,
+            prepared=prepared,
+            columns=columns,
+            sync_run_id=sync_run_id,
+            old_season=old_season,
+        )
+    else:
+        active_sheet = await _rewrite_active_cwl_sheet(
+            runtime_config=runtime_config,
+            sheets_client=sheets_client,
+            sheet_block_repository=sheet_block_repository,
+            prepared=prepared,
+            columns=columns,
+        )
+
+    built_blocks = build_cwl_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name=active_sheet.title,
+        sheet_id=active_sheet.sheet_id,
+        prepared=prepared,
+        columns=columns,
+    )
+    await _write_bot_state(
         runtime_config=runtime_config,
         sheets_client=sheets_client,
-        blocks=cwl_blocks,
-        season=season,
+        active_cwl_sheet_name=active_sheet.title,
+        active_cwl_sheet_id=active_sheet.sheet_id,
+        active_cwl_season=prepared.season,
     )
-
-    war_tags = _collect_unique_war_tags(participating_groups.values())
-    wars_by_tag = await _load_cwl_wars(clash_client, war_tags)
-    planned_rows = _build_planned_rows(
-        runtime_config=runtime_config,
-        season=season,
-        league_groups=league_groups,
-        wars_by_tag=wars_by_tag,
-    )
-    existing_rows = await cwl_repository.list_rows(
+    await sheet_binding_repository.update_active_cwl_binding(
         chat_id=runtime_config.chat_id,
-        season=season,
+        active_cwl_sheet_name=active_sheet.title,
+        active_cwl_sheet_id=active_sheet.sheet_id,
+        active_cwl_season=prepared.season,
+        now=_utc_now_iso(),
     )
-    rows_with_user_values = _apply_user_values(
-        planned_rows=planned_rows,
-        imported=imported,
-        existing_rows=existing_rows,
+    await sheet_block_repository.replace_blocks_by_prefixes(
+        chat_id=runtime_config.chat_id,
+        sheet_name=active_sheet.title,
+        block_key_prefixes=(CWL_BLOCK_PREFIX, CWL_MESSAGE_BLOCK_PREFIX),
+        blocks=tuple(block.block for block in built_blocks),
+        updated_at=_utc_now_iso(),
+    )
+    await _upsert_cwl_row_states(
+        runtime_config=runtime_config,
+        cwl_repository=cwl_repository,
+        rows=prepared.rows,
     )
 
-    for row in rows_with_user_values:
-        await cwl_repository.upsert_row_state(
-            chat_id=runtime_config.chat_id,
-            season=row.season,
-            row_key=row.row_key,
-            clan_tag=row.clan_tag,
-            round_number=row.round_number,
-            attacker_tag=row.attacker_tag,
-            marker=row.marker,
-            technical_values=row.technical_values.to_json(),
-            user_values=row.user_values,
-            row_hash=row.row_hash,
-        )
-
-    return CwlStateSyncResult(
-        season=season,
-        rows_count=len(rows_with_user_values),
+    return CwlSheetSyncResult(
+        season=prepared.season,
+        rows_count=len(prepared.rows),
+        blocks_count=len(prepared.clan_blocks),
         all_not_in_progress=False,
-        not_in_progress_clans=not_in_progress_clans,
-        warnings=imported.warnings,
+        archived_previous_season=season_changed,
+        not_in_progress_clans=prepared.not_in_progress_clans,
+        warnings=prepared.warnings,
     )
 
 
@@ -309,6 +456,334 @@ def make_cwl_row_key(
     )
 
 
+def build_cwl_sheet_blocks(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheet_name: str,
+    sheet_id: int | None,
+    prepared: CwlPreparedData,
+    columns: Sequence[ColumnProfile],
+) -> tuple[BuiltCwlBlock, ...]:
+    """Строит блоки CWL для записи в Google Sheets."""
+
+    built_blocks: list[BuiltCwlBlock] = []
+    row_cursor = 3
+    width = len(columns)
+
+    for index, clan_block in enumerate(prepared.clan_blocks):
+        if index > 0:
+            row_cursor += 1
+
+        if clan_block.message is None:
+            values = _build_cwl_table_values(clan_block=clan_block, columns=columns)
+            block_key = f"{CWL_BLOCK_PREFIX}{clan_block.clan.clan_tag}"
+            has_table = True
+        else:
+            values = _build_cwl_message_values(clan_block=clan_block, columns=columns)
+            block_key = f"{CWL_MESSAGE_BLOCK_PREFIX}{clan_block.clan.clan_tag}"
+            has_table = False
+
+        block = SheetBlock(
+            chat_id=runtime_config.chat_id,
+            sheet_name=sheet_name,
+            sheet_id=sheet_id,
+            block_key=block_key,
+            start_cell=f"A{row_cursor}",
+            rows_count=len(values),
+            columns_count=width,
+        )
+        built_blocks.append(BuiltCwlBlock(block=block, values=values, has_table=has_table))
+        row_cursor += len(values)
+
+    return tuple(built_blocks)
+
+
+def build_cwl_sheet_matrix(
+    *,
+    prepared: CwlPreparedData,
+    columns: Sequence[ColumnProfile],
+    built_blocks: Sequence[BuiltCwlBlock],
+) -> list[list[CellValue]]:
+    """Строит полную матрицу активного CWL-листа."""
+
+    if prepared.season is None:
+        raise CwlDataError("Нельзя строить CWL-лист без сезона.")
+
+    width = len(columns)
+    matrix: list[list[CellValue]] = [
+        _title_row(f"CWL season: {prepared.season}", width),
+        _empty_row(width),
+    ]
+    current_row = 3
+    for index, built_block in enumerate(built_blocks):
+        if index > 0:
+            matrix.append(_empty_row(width))
+            current_row += 1
+        expected_row = _row_number_from_start_cell(built_block.block.start_cell)
+        while current_row < expected_row:
+            matrix.append(_empty_row(width))
+            current_row += 1
+        matrix.extend(built_block.values)
+        current_row += len(built_block.values)
+    return matrix
+
+
+async def _prepare_cwl_data(
+    *,
+    runtime_config: RuntimeChatConfig,
+    clash_client: ClashClient,
+    sheets_client: SheetsClient,
+    cwl_repository: CwlRowStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+) -> CwlPreparedData:
+    """Загружает CoC/Sheets/SQLite и готовит CWL rows."""
+
+    if not runtime_config.active_clans:
+        raise CwlDataError("Для CWL sync нужен хотя бы один активный клан.")
+
+    league_groups = await _load_league_groups(runtime_config.active_clans, clash_client)
+    participating_groups = {
+        clan_tag: group
+        for clan_tag, group in league_groups.items()
+        if group is not None
+    }
+    not_in_progress_clans = tuple(
+        clan for clan in runtime_config.active_clans if league_groups.get(clan.clan_tag) is None
+    )
+    if not participating_groups:
+        return CwlPreparedData(
+            season=None,
+            clan_blocks=(),
+            rows=(),
+            all_not_in_progress=True,
+            not_in_progress_clans=not_in_progress_clans,
+            warnings=(),
+        )
+
+    season = _resolve_cwl_season(participating_groups)
+    sheet_name = runtime_config.sheet_binding.active_cwl_sheet_name
+    previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
+    cwl_blocks = tuple(
+        block
+        for block in previous_blocks
+        if block.block_key.startswith(CWL_BLOCK_PREFIX) or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
+    )
+    imported = await import_current_cwl_sheet(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        blocks=cwl_blocks,
+        season=season,
+    )
+
+    war_tags = _collect_unique_war_tags(participating_groups.values())
+    wars_by_tag = await _load_cwl_wars(clash_client, war_tags)
+    clan_blocks = _build_cwl_clan_blocks(
+        runtime_config=runtime_config,
+        season=season,
+        league_groups=league_groups,
+        wars_by_tag=wars_by_tag,
+    )
+    planned_rows = tuple(row for block in clan_blocks for row in block.rows)
+    existing_rows = await cwl_repository.list_rows(
+        chat_id=runtime_config.chat_id,
+        season=season,
+    )
+    rows_with_user_values = _apply_user_values(
+        planned_rows=planned_rows,
+        imported=imported,
+        existing_rows=existing_rows,
+    )
+    rows_by_key = {row.row_key: row for row in rows_with_user_values}
+    blocks_with_user_values = tuple(
+        CwlClanBlock(
+            clan=block.clan,
+            rows=tuple(rows_by_key[row.row_key] for row in block.rows),
+            message=block.message,
+            rounds_count=block.rounds_count,
+        )
+        for block in clan_blocks
+    )
+
+    return CwlPreparedData(
+        season=season,
+        clan_blocks=blocks_with_user_values,
+        rows=rows_with_user_values,
+        all_not_in_progress=False,
+        not_in_progress_clans=not_in_progress_clans,
+        warnings=imported.warnings,
+    )
+
+
+async def _rewrite_active_cwl_sheet(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    sheet_block_repository: SheetBlockRepository,
+    prepared: CwlPreparedData,
+    columns: Sequence[ColumnProfile],
+) -> SheetMetadata:
+    """Перезаписывает текущий active CWL-лист без архивирования."""
+
+    active_sheet = await _resolve_active_cwl_sheet(runtime_config, sheets_client)
+    built_blocks = build_cwl_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name=active_sheet.title,
+        sheet_id=active_sheet.sheet_id,
+        prepared=prepared,
+        columns=columns,
+    )
+    matrix = build_cwl_sheet_matrix(
+        prepared=prepared,
+        columns=columns,
+        built_blocks=built_blocks,
+    )
+    previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, active_sheet.title)
+    previous_cwl_blocks = tuple(
+        block
+        for block in previous_blocks
+        if block.block_key.startswith(CWL_BLOCK_PREFIX) or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
+    )
+    await _rewrite_cwl_values(
+        sheets_client=sheets_client,
+        sheet_name=active_sheet.title,
+        previous_blocks=previous_cwl_blocks,
+        matrix=matrix,
+    )
+    await _format_cwl_sheet(
+        sheets_client=sheets_client,
+        sheet_id=active_sheet.sheet_id,
+        matrix_rows_count=len(matrix),
+        columns_count=len(columns),
+        built_blocks=built_blocks,
+    )
+    await _hide_bot_key_column(sheets_client=sheets_client, sheet_id=active_sheet.sheet_id)
+    return active_sheet
+
+
+async def _write_cwl_with_staging_archive(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    prepared: CwlPreparedData,
+    columns: Sequence[ColumnProfile],
+    sync_run_id: int,
+    old_season: str,
+) -> SheetMetadata:
+    """Создаёт новый CWL через staging и архивирует старый активный лист."""
+
+    old_active = await _resolve_active_cwl_sheet(runtime_config, sheets_client)
+    staging_title = f"{CWL_STAGING_SHEET_PREFIX}{sync_run_id}"
+    staging = await sheets_client.add_sheet(staging_title)
+    staging_blocks = build_cwl_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name=staging.title,
+        sheet_id=staging.sheet_id,
+        prepared=prepared,
+        columns=columns,
+    )
+    matrix = build_cwl_sheet_matrix(
+        prepared=prepared,
+        columns=columns,
+        built_blocks=staging_blocks,
+    )
+
+    await sheets_client.write_values(
+        sheet_name=staging.title,
+        range_a1=range_from_start_cell(
+            start_cell=DEFAULT_CWL_START_CELL,
+            rows_count=len(matrix),
+            columns_count=len(columns),
+        ),
+        values=matrix,
+    )
+    await _format_cwl_sheet(
+        sheets_client=sheets_client,
+        sheet_id=staging.sheet_id,
+        matrix_rows_count=len(matrix),
+        columns_count=len(columns),
+        built_blocks=staging_blocks,
+    )
+    await _hide_bot_key_column(sheets_client=sheets_client, sheet_id=staging.sheet_id)
+
+    metadata = await sheets_client.get_spreadsheet_metadata()
+    archive_title = _unique_sheet_title(
+        base_title=f"{CWL_ARCHIVE_SHEET_PREFIX}{old_season}",
+        existing_titles={sheet.title for sheet in metadata.sheets if sheet.sheet_id != old_active.sheet_id},
+    )
+    await sheets_client.rename_sheet(old_active.sheet_id, archive_title)
+    await sheets_client.rename_sheet(staging.sheet_id, CWL_ACTIVE_SHEET_NAME)
+    await _move_cwl_before_composition(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        cwl_sheet_id=staging.sheet_id,
+    )
+    return SheetMetadata(sheet_id=staging.sheet_id, title=CWL_ACTIVE_SHEET_NAME)
+
+
+async def _rewrite_cwl_values(
+    *,
+    sheets_client: SheetsClient,
+    sheet_name: str,
+    previous_blocks: Sequence[SheetBlock],
+    matrix: Sequence[Sequence[CellValue]],
+) -> None:
+    """Очищает прошлые CWL-блоки и записывает новую матрицу."""
+
+    updates: list[SheetValues] = []
+    for block in previous_blocks:
+        if block.rows_count <= 0 or block.columns_count <= 0:
+            continue
+        updates.append(
+            SheetValues(
+                sheet_name=sheet_name,
+                range_a1=range_from_start_cell(
+                    start_cell=block.start_cell,
+                    rows_count=block.rows_count,
+                    columns_count=block.columns_count,
+                ),
+                values=[
+                    ["" for _ in range(block.columns_count)]
+                    for _ in range(block.rows_count)
+                ],
+            ),
+        )
+    updates.append(
+        SheetValues(
+            sheet_name=sheet_name,
+            range_a1=range_from_start_cell(
+                start_cell=DEFAULT_CWL_START_CELL,
+                rows_count=len(matrix),
+                columns_count=len(matrix[0]) if matrix else 1,
+            ),
+            values=matrix,
+        ),
+    )
+    await sheets_client.batch_update_values(updates)
+
+
+async def _upsert_cwl_row_states(
+    *,
+    runtime_config: RuntimeChatConfig,
+    cwl_repository: CwlRowStateRepository,
+    rows: Sequence[CwlPlannedRow],
+) -> None:
+    """Сохраняет planned rows в `cwl_row_state`."""
+
+    for row in rows:
+        await cwl_repository.upsert_row_state(
+            chat_id=runtime_config.chat_id,
+            season=row.season,
+            row_key=row.row_key,
+            clan_tag=row.clan_tag,
+            round_number=row.round_number,
+            attacker_tag=row.attacker_tag,
+            marker=row.marker,
+            technical_values=row.technical_values.to_json(),
+            user_values=row.user_values,
+            row_hash=row.row_hash,
+        )
+
+
 async def _load_league_groups(
     active_clans: Sequence[TrackedClan],
     clash_client: ClashClient,
@@ -329,9 +804,17 @@ async def _load_league_groups(
 def _resolve_cwl_season(groups: dict[str, JsonObject]) -> str:
     """Определяет единый CWL-сезон по participating league groups."""
 
-    seasons = {_require_str(group, "season", "leaguegroup") for group in groups.values()}
+    seasons_by_clan = {
+        clan_tag: _require_str(group, "season", "leaguegroup")
+        for clan_tag, group in groups.items()
+    }
+    seasons = set(seasons_by_clan.values())
     if len(seasons) != 1:
-        raise CwlDataError("Участвующие кланы вернули разные сезоны CWL.")
+        details = ", ".join(
+            f"{clan_tag}: {season}"
+            for clan_tag, season in sorted(seasons_by_clan.items())
+        )
+        raise CwlSeasonMismatchError(f"Участвующие кланы вернули разные сезоны CWL: {details}.")
     return next(iter(seasons))
 
 
@@ -371,55 +854,95 @@ async def _load_cwl_wars(
     return dict(loaded)
 
 
-def _build_planned_rows(
+def _build_cwl_clan_blocks(
     *,
     runtime_config: RuntimeChatConfig,
     season: str,
     league_groups: dict[str, JsonObject | None],
     wars_by_tag: dict[str, JsonObject],
-) -> tuple[CwlPlannedRow, ...]:
-    """Строит внутренние CWL rows из CoC API."""
+) -> tuple[CwlClanBlock, ...]:
+    """Строит CWL-блоки по active clans."""
 
-    rows: list[CwlPlannedRow] = []
+    blocks: list[CwlClanBlock] = []
     for clan in runtime_config.active_clans:
         group = league_groups.get(clan.clan_tag)
         if group is None:
+            blocks.append(CwlClanBlock(clan=clan, rows=(), message="CWL не проводится"))
             continue
 
-        rounds = _require_list(group, "rounds", "leaguegroup")
-        for round_number, round_payload in enumerate(rounds, start=1):
-            if not isinstance(round_payload, dict):
-                raise ClashApiUnavailableError("leaguegroup содержит некорректный round.")
+        rows, rounds_count = _build_clan_rows(
+            clan=clan,
+            group=group,
+            season=season,
+            wars_by_tag=wars_by_tag,
+        )
+        if not rows:
+            blocks.append(
+                CwlClanBlock(
+                    clan=clan,
+                    rows=(),
+                    message="Нет завершённых или текущих раундов",
+                    rounds_count=0,
+                ),
+            )
+            continue
 
-            for raw_tag in _require_list(round_payload, "warTags", "leaguegroup round"):
-                if not isinstance(raw_tag, str):
-                    raise ClashApiUnavailableError("leaguegroup содержит некорректный warTag.")
-                war_tag = normalize_tag(raw_tag)
-                if war_tag == "#0":
-                    continue
+        blocks.append(
+            CwlClanBlock(
+                clan=clan,
+                rows=tuple(sorted(rows, key=lambda row: row.sort_key)),
+                rounds_count=rounds_count,
+            ),
+        )
+    return tuple(blocks)
 
-                war = wars_by_tag.get(war_tag)
-                if war is None:
-                    continue
-                state = _require_str(war, "state", f"war {war_tag}")
-                if state not in CWL_ELIGIBLE_WAR_STATES:
-                    continue
+def _build_clan_rows(
+    *,
+    clan: TrackedClan,
+    group: JsonObject,
+    season: str,
+    wars_by_tag: dict[str, JsonObject],
+) -> tuple[list[CwlPlannedRow], int]:
+    """Строит строки CWL одного клана."""
 
-                side = _extract_war_side(war, clan.clan_tag)
-                if side is None:
-                    continue
+    rows: list[CwlPlannedRow] = []
+    included_rounds: set[int] = set()
+    rounds = _require_list(group, "rounds", "leaguegroup")
 
-                rows.extend(
-                    _build_war_rows(
-                        season=season,
-                        clan_tag=clan.clan_tag,
-                        round_number=round_number,
-                        our_side=side[0],
-                        opponent_side=side[1],
-                    ),
-                )
+    for round_number, round_payload in enumerate(rounds, start=1):
+        if not isinstance(round_payload, dict):
+            raise ClashApiUnavailableError("leaguegroup содержит некорректный round.")
 
-    return tuple(rows)
+        for raw_tag in _require_list(round_payload, "warTags", "leaguegroup round"):
+            if not isinstance(raw_tag, str):
+                raise ClashApiUnavailableError("leaguegroup содержит некорректный warTag.")
+            war_tag = normalize_tag(raw_tag)
+            if war_tag == "#0":
+                continue
+
+            war = wars_by_tag.get(war_tag)
+            if war is None:
+                continue
+            state = _require_str(war, "state", f"war {war_tag}")
+            if state not in CWL_ELIGIBLE_WAR_STATES:
+                continue
+
+            side = _extract_war_side(war, clan.clan_tag)
+            if side is None:
+                continue
+
+            included_rounds.add(round_number)
+            rows.extend(
+                _build_war_rows(
+                    season=season,
+                    clan_tag=clan.clan_tag,
+                    round_number=round_number,
+                    our_side=side[0],
+                    opponent_side=side[1],
+                ),
+            )
+
+    return rows, len(included_rounds)
 
 
 def _extract_war_side(
@@ -459,11 +982,12 @@ def _build_war_rows(
 
     rows: list[CwlPlannedRow] = []
     for member in our_members:
+        attacker_tag = _json_str(member, "tag")
         no_attack_key = make_cwl_row_key(
             season=season,
             clan_tag=clan_tag,
             round_number=round_number,
-            attacker_tag=_json_str(member, "tag"),
+            attacker_tag=attacker_tag,
             marker=NO_ATTACK_MARKER,
         )
         attacks = member["attacks"]
@@ -498,7 +1022,7 @@ def _build_war_rows(
                 season=season,
                 clan_tag=clan_tag,
                 round_number=round_number,
-                attacker_tag=_json_str(member, "tag"),
+                attacker_tag=attacker_tag,
                 marker=f"{DEF_POS_MARKER_PREFIX}{defender['map_position']}",
             )
             rows.append(
@@ -648,24 +1172,17 @@ def _find_table_headers(
 ) -> tuple[CwlTableHeader, ...]:
     """Ищет таблицы CWL в values."""
 
+    profiles = _profiles(runtime_config.column_profiles)
     headers: list[CwlTableHeader] = []
     for row_index, row in enumerate(rows):
         for column_index, cell in enumerate(row):
             normalized = cell.strip()
-            round_column_index: int | None = None
-            if normalized == BOT_KEY_TITLE:
-                next_cell = _cell_at(row, column_index + 1).strip()
-                if next_cell in SYSTEM_HEADER_ALIASES["round"]:
-                    round_column_index = column_index + 1
-            elif normalized in SYSTEM_HEADER_ALIASES["round"]:
-                round_column_index = column_index
-
-            if round_column_index is None:
+            if normalized != BOT_KEY_TITLE and normalized not in SYSTEM_HEADER_ALIASES["round"]:
                 continue
-            if not _looks_like_cwl_header(row, round_column_index):
+            start_column_index = column_index if normalized == BOT_KEY_TITLE else max(column_index - 1, 0)
+            system_indexes = _system_indexes_from_header(profiles, row, start_column_index)
+            if not _looks_like_cwl_header(system_indexes):
                 continue
-
-            start_column_index = column_index if normalized == BOT_KEY_TITLE else round_column_index
             width = max(_last_non_empty_index(row) - start_column_index + 1, 1)
             headers.append(
                 CwlTableHeader(
@@ -680,21 +1197,18 @@ def _find_table_headers(
                         block_key=block_key,
                         header_number=len(headers),
                     ),
+                    system_indexes=system_indexes,
                 ),
             )
 
     return tuple(headers)
 
 
-def _looks_like_cwl_header(row: Sequence[str], round_column_index: int) -> bool:
+def _looks_like_cwl_header(system_indexes: dict[str, int]) -> bool:
     """Проверяет, похожа ли строка на заголовок CWL-таблицы."""
 
-    attacker_tag = _cell_at(row, round_column_index + 1).strip()
-    attacker_name = _cell_at(row, round_column_index + 2).strip()
-    return (
-        attacker_tag in SYSTEM_HEADER_ALIASES["attacker_tag"]
-        and attacker_name in SYSTEM_HEADER_ALIASES["attacker_name"]
-    )
+    required = {"round", "attacker_tag", "attacker_name"}
+    return required.issubset(system_indexes)
 
 
 def _header_clan_tag(
@@ -708,12 +1222,14 @@ def _header_clan_tag(
 ) -> str | None:
     """Определяет clan_tag таблицы CWL."""
 
-    if block_key is not None and block_key.startswith(CWL_BLOCK_PREFIX):
-        raw_tag = block_key.removeprefix(CWL_BLOCK_PREFIX)
-        try:
-            return normalize_tag(raw_tag)
-        except ValueError:
-            pass
+    if block_key is not None:
+        for prefix in (CWL_BLOCK_PREFIX, CWL_MESSAGE_BLOCK_PREFIX):
+            if block_key.startswith(prefix):
+                raw_tag = block_key.removeprefix(prefix)
+                try:
+                    return normalize_tag(raw_tag)
+                except ValueError:
+                    pass
 
     detected = _find_clan_tag_above(rows, header_row_index, column_index)
     if detected is not None:
@@ -778,9 +1294,13 @@ def _fallback_row_key(
 
     if header.clan_tag is None:
         return None
-    system_indexes = _default_system_indexes(header)
-    round_raw = _cell_at(row, system_indexes["round"]).strip()
-    attacker_raw = _cell_at(row, system_indexes["attacker_tag"]).strip()
+    round_index = header.system_indexes.get("round")
+    attacker_index = header.system_indexes.get("attacker_tag")
+    if round_index is None or attacker_index is None:
+        return None
+
+    round_raw = _cell_at(row, round_index).strip()
+    attacker_raw = _cell_at(row, attacker_index).strip()
     if not round_raw.isdigit() or attacker_raw == "":
         return None
 
@@ -790,9 +1310,9 @@ def _fallback_row_key(
     except ValueError:
         return None
 
-    defender_raw = _cell_at(row, system_indexes["defender_town_hall"]).strip()
-    stars_raw = _cell_at(row, system_indexes["stars"]).strip()
-    destruction_raw = _cell_at(row, system_indexes["destruction_percentage"]).strip()
+    defender_raw = _cell_at(row, header.system_indexes.get("defender_town_hall", -1)).strip()
+    stars_raw = _cell_at(row, header.system_indexes.get("stars", -1)).strip()
+    destruction_raw = _cell_at(row, header.system_indexes.get("destruction_percentage", -1)).strip()
 
     if defender_raw == "" and stars_raw == "" and destruction_raw == "":
         marker = NO_ATTACK_MARKER
@@ -889,6 +1409,299 @@ def _lookup_user_values(
     return {}
 
 
+def _physical_columns(column_profiles: Sequence[ColumnProfile]) -> tuple[ColumnProfile, ...]:
+    """Возвращает физические CWL-колонки: service + visible non-service."""
+
+    profiles = sorted(
+        (profile for profile in column_profiles if profile.table_type == CWL_TABLE and profile.is_active),
+        key=lambda profile: (profile.sort_order, profile.column_key),
+    )
+    service = [
+        profile
+        for profile in profiles
+        if profile.column_key == BOT_KEY_COLUMN_KEY and profile.kind == "service"
+    ]
+    if not service:
+        raise CwlDataError(f"Профиль CWL не содержит service-колонку {BOT_KEY_TITLE}.")
+    visible = [profile for profile in profiles if profile.kind != "service" and profile.visible]
+    return tuple([service[0], *visible])
+
+
+def _build_cwl_table_values(
+    *,
+    clan_block: CwlClanBlock,
+    columns: Sequence[ColumnProfile],
+) -> list[list[CellValue]]:
+    """Строит values одного табличного CWL-блока."""
+
+    title = f"{clan_block.clan.clan_name} | {clan_block.clan.clan_tag}"
+    values: list[list[CellValue]] = [
+        _title_row(title, len(columns)),
+        [column.title for column in columns],
+    ]
+    values.extend(
+        _cwl_row_to_values(row=row, columns=columns)
+        for row in clan_block.rows
+    )
+    if len(values) == TITLE_ROWS_COUNT:
+        values.append(_empty_row(len(columns)))
+    return values
+
+
+def _build_cwl_message_values(
+    *,
+    clan_block: CwlClanBlock,
+    columns: Sequence[ColumnProfile],
+) -> list[list[CellValue]]:
+    """Строит values CWL-блока со служебным сообщением."""
+
+    title = f"{clan_block.clan.clan_name} | {clan_block.clan.clan_tag}"
+    message = clan_block.message or ""
+    return [
+        _title_row(title, len(columns)),
+        _message_row(message, len(columns)),
+    ]
+
+
+def _cwl_row_to_values(*, row: CwlPlannedRow, columns: Sequence[ColumnProfile]) -> list[CellValue]:
+    """Преобразует planned row в строку Google Sheets."""
+
+    values: list[CellValue] = []
+    technical = row.technical_values
+    for column in columns:
+        if column.kind == "service" and column.column_key == BOT_KEY_COLUMN_KEY:
+            values.append(f"{BOT_KEY_PREFIX}{row.row_key}")
+        elif column.kind == "user":
+            values.append(row.user_values.get(column.column_key, ""))
+        elif column.column_key == "round":
+            values.append(technical.round_number)
+        elif column.column_key == "attacker_tag":
+            values.append(technical.attacker_tag)
+        elif column.column_key == "attacker_name":
+            values.append(technical.attacker_name)
+        elif column.column_key == "attacker_town_hall":
+            values.append(format_town_hall(technical.attacker_town_hall))
+        elif column.column_key == "defender_town_hall":
+            values.append(format_town_hall(technical.defender_town_hall) if technical.defender_town_hall is not None else "")
+        elif column.column_key == "stars":
+            values.append(technical.stars if technical.stars is not None else "")
+        elif column.column_key == "destruction_percentage":
+            values.append(technical.destruction_percentage if technical.destruction_percentage is not None else "")
+        else:
+            values.append("")
+    return values
+
+
+def format_town_hall(town_hall: int) -> str:
+    """Форматирует ратушу для CWL без номера карты."""
+
+    return f"TH{town_hall}"
+
+
+async def _format_cwl_sheet(
+    *,
+    sheets_client: SheetsClient,
+    sheet_id: int,
+    matrix_rows_count: int,
+    columns_count: int,
+    built_blocks: Sequence[BuiltCwlBlock],
+) -> None:
+    """Форматирует управляемые CWL-блоки."""
+
+    requests = _build_cwl_format_requests(
+        sheet_id=sheet_id,
+        matrix_rows_count=matrix_rows_count,
+        columns_count=columns_count,
+        built_blocks=built_blocks,
+    )
+    await sheets_client.batch_update_spreadsheet(requests)
+
+
+def _build_cwl_format_requests(
+    *,
+    sheet_id: int,
+    matrix_rows_count: int,
+    columns_count: int,
+    built_blocks: Sequence[BuiltCwlBlock],
+) -> list[JsonObject]:
+    """Строит Google Sheets formatting requests."""
+
+    requests: list[JsonObject] = []
+    if matrix_rows_count > 0:
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_from_start_cell(
+                    sheet_id=sheet_id,
+                    start_cell=DEFAULT_CWL_START_CELL,
+                    rows_count=matrix_rows_count,
+                    columns_count=columns_count,
+                ),
+                _base_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_from_start_cell(
+                    sheet_id=sheet_id,
+                    start_cell=DEFAULT_CWL_START_CELL,
+                    rows_count=1,
+                    columns_count=columns_count,
+                ),
+                _title_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+
+    for built_block in built_blocks:
+        block_range = _grid_range_from_start_cell(
+            sheet_id=sheet_id,
+            start_cell=built_block.block.start_cell,
+            rows_count=built_block.block.rows_count,
+            columns_count=built_block.block.columns_count,
+        )
+        requests.append(_update_borders_request(block_range))
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_for_block_row(sheet_id, built_block.block, row_offset=0),
+                _title_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        if built_block.has_table:
+            requests.append(
+                _repeat_cell_request(
+                    _grid_range_for_block_row(sheet_id, built_block.block, row_offset=1),
+                    _header_cell_format(),
+                    "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+                ),
+            )
+            data_rows_count = max(built_block.block.rows_count - 2, 0)
+            for data_row_offset in range(data_rows_count):
+                if data_row_offset % 2 == 0:
+                    continue
+                requests.append(
+                    _repeat_cell_request(
+                        _grid_range_for_block_row(
+                            sheet_id,
+                            built_block.block,
+                            row_offset=2 + data_row_offset,
+                        ),
+                        {"userEnteredFormat": {"backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}}},
+                        "userEnteredFormat.backgroundColorStyle",
+                    ),
+                )
+        else:
+            requests.append(
+                _repeat_cell_request(
+                    _grid_range_for_block_row(sheet_id, built_block.block, row_offset=1),
+                    _message_cell_format(),
+                    "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+                ),
+            )
+
+    return requests
+
+
+async def _hide_bot_key_column(*, sheets_client: SheetsClient, sheet_id: int) -> None:
+    """Скрывает первую физическую колонку CWL-листа."""
+
+    await sheets_client.hide_dimension(
+        sheet_id=sheet_id,
+        dimension="COLUMNS",
+        start_index=0,
+        end_index=1,
+        hidden=True,
+    )
+
+
+async def _resolve_active_cwl_sheet(
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+) -> SheetMetadata:
+    """Находит активный CWL-лист по sheet_id, затем по названию, либо создаёт."""
+
+    metadata = await sheets_client.get_spreadsheet_metadata()
+    active_sheet_id = runtime_config.sheet_binding.active_cwl_sheet_id
+    if active_sheet_id is not None:
+        for sheet in metadata.sheets:
+            if sheet.sheet_id == active_sheet_id:
+                return sheet
+
+    for sheet in metadata.sheets:
+        if sheet.title == runtime_config.sheet_binding.active_cwl_sheet_name:
+            return sheet
+
+    for sheet in metadata.sheets:
+        if sheet.title == CWL_ACTIVE_SHEET_NAME:
+            return sheet
+
+    return await sheets_client.add_sheet(CWL_ACTIVE_SHEET_NAME)
+
+
+async def _move_cwl_before_composition(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    cwl_sheet_id: int,
+) -> None:
+    """Ставит новый active CWL перед листом `Состав`."""
+
+    metadata = await sheets_client.get_spreadsheet_metadata()
+    composition_sheet_id = runtime_config.sheet_binding.composition_sheet_id
+    composition_sheet: SheetMetadata | None = None
+    if composition_sheet_id is not None:
+        composition_sheet = next(
+            (sheet for sheet in metadata.sheets if sheet.sheet_id == composition_sheet_id),
+            None,
+        )
+    if composition_sheet is None:
+        composition_sheet = next(
+            (
+                sheet
+                for sheet in metadata.sheets
+                if sheet.title == runtime_config.sheet_binding.composition_sheet_name
+            ),
+            None,
+        )
+    if composition_sheet is None:
+        return
+    await sheets_client.move_sheet(cwl_sheet_id, composition_sheet.index or 0)
+
+
+async def _write_bot_state(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    active_cwl_sheet_name: str,
+    active_cwl_sheet_id: int,
+    active_cwl_season: str,
+) -> None:
+    """Обновляет `_bot_state` после CWL-записи."""
+
+    binding = runtime_config.sheet_binding
+    values: list[list[CellValue]] = [
+        ["managed_by", MANAGED_BY_VALUE],
+        ["schema_version", BOT_STATE_SCHEMA_VERSION],
+        ["chat_id", runtime_config.chat_id],
+        ["google_sheet_id", binding.google_sheet_id],
+        ["composition_sheet_name", binding.composition_sheet_name],
+        ["composition_sheet_id", binding.composition_sheet_id or ""],
+        ["active_cwl_sheet_name", active_cwl_sheet_name],
+        ["active_cwl_sheet_id", active_cwl_sheet_id],
+        ["active_cwl_season", active_cwl_season],
+        ["bot_state_sheet_name", binding.bot_state_sheet_name],
+        ["bot_state_sheet_id", binding.bot_state_sheet_id or ""],
+        ["timezone", binding.timezone],
+        ["updated_at", _utc_now_iso()],
+    ]
+    await sheets_client.write_values(
+        sheet_name=binding.bot_state_sheet_name,
+        range_a1=f"A1:B{len(values)}",
+        values=values,
+    )
+
+
 def _put_imported_values(
     rows_by_key: dict[str, JsonValues],
     row_key: str,
@@ -937,6 +1750,29 @@ def _profiles(column_profiles: Sequence[ColumnProfile]) -> tuple[ColumnProfile, 
     )
 
 
+def _system_indexes_from_header(
+    profiles: Sequence[ColumnProfile],
+    header_row: Sequence[str],
+    block_start_index: int,
+) -> dict[str, int]:
+    """Ищет system column indexes по текущим title и legacy aliases."""
+
+    normalized_row = [cell.strip() for cell in header_row]
+    result: dict[str, int] = {}
+    for profile in profiles:
+        if profile.kind != "system" or not profile.visible:
+            continue
+        aliases = set(SYSTEM_HEADER_ALIASES.get(profile.column_key, set()))
+        aliases.add(profile.title)
+        for index, title in enumerate(normalized_row):
+            if index < block_start_index:
+                continue
+            if title in aliases:
+                result[profile.column_key] = index
+                break
+    return result
+
+
 def _user_indexes_from_header(
     profiles: Sequence[ColumnProfile],
     header_row: Sequence[str],
@@ -958,22 +1794,6 @@ def _user_indexes_from_header(
         selected = next((index for index in indexes if index >= block_start_index), indexes[0])
         result[profile.column_key] = selected
     return result
-
-
-def _default_system_indexes(header: CwlTableHeader) -> dict[str, int]:
-    """Возвращает индексы system columns для текущего или старого CWL layout."""
-
-    start = header.column_index
-    round_index = start + 1
-    return {
-        "round": round_index,
-        "attacker_tag": round_index + 1,
-        "attacker_name": round_index + 2,
-        "attacker_town_hall": round_index + 3,
-        "defender_town_hall": round_index + 4,
-        "stars": round_index + 5,
-        "destruction_percentage": round_index + 6,
-    }
 
 
 def _find_next_header_row(headers: Sequence[CwlTableHeader], current: CwlTableHeader) -> int:
@@ -1032,6 +1852,227 @@ def _parse_defender_position(value: str) -> int | None:
     if match is None:
         return None
     return int(match.group(1))
+
+
+def _marker_sort_index(marker: str) -> int:
+    """Возвращает порядок marker внутри атакующего."""
+
+    if marker == NO_ATTACK_MARKER:
+        return 0
+    prefix = f"{ATTACK_MARKER_PREFIX}_"
+    if marker.startswith(prefix):
+        raw_number = marker.removeprefix(prefix)
+        if raw_number.isdigit():
+            return int(raw_number)
+    return 10**6
+
+
+def _unique_sheet_title(*, base_title: str, existing_titles: set[str]) -> str:
+    """Подбирает свободное имя листа с суффиксом `- N`."""
+
+    if base_title not in existing_titles:
+        return base_title
+    suffix = 2
+    while True:
+        title = f"{base_title} - {suffix}"
+        if title not in existing_titles:
+            return title
+        suffix += 1
+
+
+def _title_row(title: str, width: int) -> list[CellValue]:
+    """Создаёт строку заголовка с видимым title после hidden key column."""
+
+    if width <= 1:
+        return [title]
+    return ["", title, *["" for _ in range(width - 2)]]
+
+
+def _message_row(message: str, width: int) -> list[CellValue]:
+    """Создаёт строку служебного сообщения."""
+
+    if width <= 1:
+        return [message]
+    return ["", message, *["" for _ in range(width - 2)]]
+
+
+def _empty_row(width: int) -> list[CellValue]:
+    """Создаёт пустую строку."""
+
+    return ["" for _ in range(width)]
+
+
+def _base_cell_format() -> JsonObject:
+    """Возвращает базовый формат managed range."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _title_cell_format() -> JsonObject:
+    """Возвращает формат строки названия."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": DARK_GREEN_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
+                "bold": True,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _header_cell_format() -> JsonObject:
+    """Возвращает формат заголовков."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": GREEN_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
+                "bold": True,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _message_cell_format() -> JsonObject:
+    """Возвращает формат служебной строки."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _repeat_cell_request(grid_range: JsonObject, cell: JsonObject, fields: str) -> JsonObject:
+    """Создаёт repeatCell request."""
+
+    return {"repeatCell": {"range": grid_range, "cell": cell, "fields": fields}}
+
+
+def _update_borders_request(grid_range: JsonObject) -> JsonObject:
+    """Создаёт updateBorders request."""
+
+    border = {
+        "style": "SOLID",
+        "width": 1,
+        "colorStyle": {"rgbColor": BORDER_RGB},
+    }
+    return {
+        "updateBorders": {
+            "range": grid_range,
+            "top": border,
+            "bottom": border,
+            "left": border,
+            "right": border,
+            "innerHorizontal": border,
+            "innerVertical": border,
+        },
+    }
+
+
+def _grid_range_for_block_row(sheet_id: int, block: SheetBlock, *, row_offset: int) -> JsonObject:
+    """Строит GridRange строки блока."""
+
+    return _grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=_offset_cell(block.start_cell, row_offset=row_offset, column_offset=0),
+        rows_count=1,
+        columns_count=block.columns_count,
+    )
+
+
+def _grid_range_from_start_cell(
+    *,
+    sheet_id: int,
+    start_cell: str,
+    rows_count: int,
+    columns_count: int,
+) -> JsonObject:
+    """Строит GridRange по start cell и размеру."""
+
+    start_column_number, start_row = _parse_a1_cell(start_cell)
+    return {
+        "sheetId": sheet_id,
+        "startRowIndex": start_row - 1,
+        "endRowIndex": start_row - 1 + rows_count,
+        "startColumnIndex": start_column_number - 1,
+        "endColumnIndex": start_column_number - 1 + columns_count,
+    }
+
+
+def _offset_cell(start_cell: str, *, row_offset: int, column_offset: int) -> str:
+    """Сдвигает A1-ячейку."""
+
+    start_column_number, start_row = _parse_a1_cell(start_cell)
+    return f"{_number_to_column(start_column_number + column_offset)}{start_row + row_offset}"
+
+
+def _row_number_from_start_cell(start_cell: str) -> int:
+    """Возвращает номер строки из A1-ячейки."""
+
+    _, row_number = _parse_a1_cell(start_cell)
+    return row_number
+
+
+def _parse_a1_cell(cell: str) -> tuple[int, int]:
+    """Парсит A1-ячейку."""
+
+    column = ""
+    row = ""
+    for char in cell.strip():
+        if char.isalpha():
+            column += char
+        elif char.isdigit():
+            row += char
+        else:
+            raise CwlDataError(f"Некорректная A1-ячейка: {cell}.")
+    if column == "" or row == "":
+        raise CwlDataError(f"Некорректная A1-ячейка: {cell}.")
+    return _column_to_number(column), int(row)
+
+
+def _column_to_number(column: str) -> int:
+    """Преобразует имя колонки в номер."""
+
+    number = 0
+    for char in column.upper():
+        number = number * 26 + ord(char) - ord("A") + 1
+    return number
+
+
+def _number_to_column(number: int) -> str:
+    """Преобразует номер колонки в имя."""
+
+    if number <= 0:
+        raise CwlDataError("Номер колонки должен быть положительным.")
+    chars: list[str] = []
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        chars.append(chr(ord("A") + remainder))
+    return "".join(reversed(chars))
 
 
 def _json_str(data: JsonObject, key: str) -> str:
@@ -1112,3 +2153,9 @@ def _require_dict(data: JsonObject, key: str, context: str) -> JsonObject:
     if not isinstance(value, dict):
         raise ClashApiUnavailableError(f"{context}: поле {key} должно быть объектом.")
     return value
+
+
+def _utc_now_iso() -> str:
+    """Возвращает текущую UTC-дату."""
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

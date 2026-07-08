@@ -1132,6 +1132,38 @@ class SheetBindingRepository:
         )
 
 
+    async def update_active_cwl_binding(
+        self,
+        *,
+        chat_id: int,
+        active_cwl_sheet_name: str,
+        active_cwl_sheet_id: int,
+        active_cwl_season: str,
+        now: str,
+    ) -> None:
+        """Обновляет активный CWL-лист binding после записи/архивации.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            active_cwl_sheet_name: Название активного CWL-листа.
+            active_cwl_sheet_id: Числовой ID активного CWL-листа.
+            active_cwl_season: Активный CWL-сезон.
+            now: ISO-дата обновления.
+        """
+
+        await self._connection.execute(
+            """
+            UPDATE sheet_bindings
+            SET active_cwl_sheet_name = ?,
+                active_cwl_sheet_id = ?,
+                active_cwl_season = ?,
+                updated_at = ?
+            WHERE chat_id = ? AND is_active = 1
+            """,
+            (active_cwl_sheet_name, active_cwl_sheet_id, active_cwl_season, now, chat_id),
+        )
+
+
 class SheetBlockRepository:
     """Repository последних управляемых прямоугольников Google Sheets.
 
@@ -1203,6 +1235,46 @@ class SheetBlockRepository:
                 updated_at,
             ),
         )
+
+
+    async def replace_blocks_by_prefixes(
+        self,
+        *,
+        chat_id: int,
+        sheet_name: str,
+        block_key_prefixes: tuple[str, ...],
+        blocks: tuple[SheetBlock, ...],
+        updated_at: str,
+    ) -> None:
+        """Заменяет набор block records для листа по prefix-фильтру.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            sheet_name: Название листа.
+            block_key_prefixes: Prefixes block_key, которые нужно заменить.
+            blocks: Новый набор блоков.
+            updated_at: ISO-дата обновления.
+        """
+
+        if block_key_prefixes:
+            conditions = " OR ".join("block_key LIKE ?" for _ in block_key_prefixes)
+            parameters: tuple[object, ...] = (
+                chat_id,
+                sheet_name,
+                *(f"{prefix}%" for prefix in block_key_prefixes),
+            )
+            await self._connection.execute(
+                f"""
+                DELETE FROM sheet_blocks
+                WHERE chat_id = ?
+                  AND sheet_name = ?
+                  AND ({conditions})
+                """,
+                parameters,
+            )
+
+        for block in blocks:
+            await self.upsert_block(block=block, updated_at=updated_at)
 
 
 class CompositionPlayerStateRepository:

@@ -49,10 +49,12 @@ class SheetMetadata:
     Attributes:
         sheet_id: Числовой ID листа.
         title: Название листа.
+        index: Позиция листа в Spreadsheet или `None`.
     """
 
     sheet_id: int
     title: str
+    index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -814,14 +816,18 @@ def _sheet_metadata_from_properties(
 
     sheet_id = properties.get("sheetId")
     title = properties.get("title")
+    index = properties.get("index")
     if not isinstance(sheet_id, int) or isinstance(sheet_id, bool):
         raise error_cls("Sheet metadata содержит некорректный sheetId.")
     if not isinstance(title, str):
         raise error_cls("Sheet metadata содержит некорректный title.")
+    if index is not None and (not isinstance(index, int) or isinstance(index, bool)):
+        raise error_cls("Sheet metadata содержит некорректный index.")
 
     return SheetMetadata(
         sheet_id=sheet_id,
         title=title,
+        index=index,
     )
 
 
