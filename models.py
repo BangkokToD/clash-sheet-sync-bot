@@ -28,7 +28,6 @@ ColumnKind = Literal["system", "user", "service"]
 ColumnValueType = Literal["string", "integer", "datetime"]
 CompositionPlayerStatus = Literal["active", "exited", "untracked"]
 SyncRunStatus = Literal["success", "error", "rate_limited", "skipped"]
-SyncResultStatus = Literal["success", "error"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,73 +304,6 @@ class SyncDiff:
         return bool(self.items)
 
 
-@dataclass(slots=True)
-class SyncSettings:
-    """Legacy-состояние последних ручных синхронизаций.
-
-    Модель временно оставлена для совместимости старого `settings_store.py` до
-    удаления JSON-хранилища в следующих коммитах. Новая runtime-архитектура
-    должна использовать SQLite-таблицы `sync_runs` и `telegram_chats`.
-
-    Attributes:
-        last_composition_sync_at: ISO-дата последнего запуска состава.
-        last_composition_sync_status: Статус последнего запуска состава.
-        last_composition_sync_error: Текст последней ошибки состава.
-        last_cwl_sync_at: ISO-дата последнего запуска CWL.
-        last_cwl_sync_status: Статус последнего запуска CWL.
-        last_cwl_sync_error: Текст последней ошибки CWL.
-    """
-
-    last_composition_sync_at: str | None = None
-    last_composition_sync_status: SyncResultStatus | None = None
-    last_composition_sync_error: str | None = None
-    last_cwl_sync_at: str | None = None
-    last_cwl_sync_status: SyncResultStatus | None = None
-    last_cwl_sync_error: str | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, object]) -> SyncSettings:
-        """Создаёт legacy-настройки из JSON-словаря.
-
-        Args:
-            data: Словарь, прочитанный из `sync_settings.json`.
-
-        Returns:
-            Нормализованный объект настроек синхронизации.
-        """
-
-        return cls(
-            last_composition_sync_at=_read_optional_str(data, "last_composition_sync_at"),
-            last_composition_sync_status=_read_optional_status(
-                data,
-                "last_composition_sync_status",
-            ),
-            last_composition_sync_error=_read_optional_str(
-                data,
-                "last_composition_sync_error",
-            ),
-            last_cwl_sync_at=_read_optional_str(data, "last_cwl_sync_at"),
-            last_cwl_sync_status=_read_optional_status(data, "last_cwl_sync_status"),
-            last_cwl_sync_error=_read_optional_str(data, "last_cwl_sync_error"),
-        )
-
-    def to_dict(self) -> dict[str, str | None]:
-        """Преобразует legacy-настройки в JSON-совместимый словарь.
-
-        Returns:
-            Словарь с полями `sync_settings.json`.
-        """
-
-        return {
-            "last_composition_sync_at": self.last_composition_sync_at,
-            "last_composition_sync_status": self.last_composition_sync_status,
-            "last_composition_sync_error": self.last_composition_sync_error,
-            "last_cwl_sync_at": self.last_cwl_sync_at,
-            "last_cwl_sync_status": self.last_cwl_sync_status,
-            "last_cwl_sync_error": self.last_cwl_sync_error,
-        }
-
-
 @dataclass(frozen=True, slots=True)
 class SheetBlock:
     """Последний записанный ботом прямоугольник на листе.
@@ -445,35 +377,3 @@ def normalize_tag(value: str) -> str:
     if not normalized.startswith("#"):
         raise ValueError(f"Тег должен начинаться с '#': {normalized}")
     return normalized
-
-
-def _read_optional_str(data: dict[str, object], key: str) -> str | None:
-    """Читает необязательную строку из JSON-словаря.
-
-    Args:
-        data: Словарь с данными.
-        key: Имя поля.
-
-    Returns:
-        Строка или `None`, если поле пустое/отсутствует.
-    """
-
-    value = data.get(key)
-    return value if isinstance(value, str) else None
-
-
-def _read_optional_status(data: dict[str, object], key: str) -> SyncResultStatus | None:
-    """Читает legacy-статус синхронизации из JSON-словаря.
-
-    Args:
-        data: Словарь с данными.
-        key: Имя поля.
-
-    Returns:
-        `success`, `error` или `None`.
-    """
-
-    value = data.get(key)
-    if value == "success" or value == "error":
-        return value
-    return None
