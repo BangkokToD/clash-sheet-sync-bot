@@ -210,6 +210,7 @@ class SyncService:
                     sheets_client=sheets_client,
                     cwl_repository=cwl_repository,
                     sheet_block_repository=sheet_block_repository,
+                    cwl_war_concurrency_limit=self._config.cwl_war_concurrency_limit,
                 )
 
                 await apply_prepared_composition_sync(

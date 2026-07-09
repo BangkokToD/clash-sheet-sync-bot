@@ -33,7 +33,6 @@ CWL_ACTIVE_SHEET_NAME: Final = "CWL"
 CWL_STAGING_SHEET_PREFIX: Final = "CWL - staging - "
 CWL_ARCHIVE_SHEET_PREFIX: Final = "CWL - "
 CWL_ELIGIBLE_WAR_STATES: Final = {"warEnded", "inWar"}
-CWL_WAR_CONCURRENCY_LIMIT: Final = 5
 NO_ATTACK_MARKER: Final = "NO_ATTACK"
 ATTACK_MARKER_PREFIX: Final = "ATTACK"
 DEF_POS_MARKER_PREFIX: Final = "DEF_POS_"
@@ -259,6 +258,7 @@ async def run_cwl_state_sync(
     sheets_client: SheetsClient,
     cwl_repository: CwlRowStateRepository,
     sheet_block_repository: SheetBlockRepository,
+    cwl_war_concurrency_limit: int,
 ) -> CwlStateSyncResult:
     """Обновляет `cwl_row_state` без записи Google Sheets."""
 
@@ -268,6 +268,7 @@ async def run_cwl_state_sync(
         sheets_client=sheets_client,
         cwl_repository=cwl_repository,
         sheet_block_repository=sheet_block_repository,
+        cwl_war_concurrency_limit=cwl_war_concurrency_limit,
     )
     if prepared.all_not_in_progress:
         return CwlStateSyncResult(
@@ -301,6 +302,7 @@ async def run_public_cwl_sync(
     sheet_block_repository: SheetBlockRepository,
     sheet_binding_repository: SheetBindingRepository,
     sync_run_id: int,
+    cwl_war_concurrency_limit: int,
 ) -> CwlSheetSyncResult:
     """Обновляет публичный CWL-лист и `cwl_row_state`.
 
@@ -314,6 +316,7 @@ async def run_public_cwl_sync(
         sheets_client=sheets_client,
         cwl_repository=cwl_repository,
         sheet_block_repository=sheet_block_repository,
+        cwl_war_concurrency_limit=cwl_war_concurrency_limit,
     )
     return await apply_public_cwl_sync(
         runtime_config=runtime_config,
@@ -333,6 +336,7 @@ async def prepare_public_cwl_sync(
     sheets_client: SheetsClient,
     cwl_repository: CwlRowStateRepository,
     sheet_block_repository: SheetBlockRepository,
+    cwl_war_concurrency_limit: int,
 ) -> CwlPreparedData:
     """Готовит CWL-данные без записи в Google Sheets и SQLite."""
 
@@ -342,6 +346,7 @@ async def prepare_public_cwl_sync(
         sheets_client=sheets_client,
         cwl_repository=cwl_repository,
         sheet_block_repository=sheet_block_repository,
+        cwl_war_concurrency_limit=cwl_war_concurrency_limit,
     )
 
 
@@ -589,6 +594,7 @@ async def _prepare_cwl_data(
     sheets_client: SheetsClient,
     cwl_repository: CwlRowStateRepository,
     sheet_block_repository: SheetBlockRepository,
+    cwl_war_concurrency_limit: int,
 ) -> CwlPreparedData:
     """Загружает CoC/Sheets/SQLite и готовит CWL rows."""
 
@@ -615,17 +621,7 @@ async def _prepare_cwl_data(
             diff_items=(),
         )
 
-    season = _resolve_cwl_season(participating_groups)
-    participating_groups = {
-        clan_tag: group
-        for clan_tag, group in participating_groups.items()
-        if _require_str(group, "season", "leaguegroup") == season
-    }
-    not_in_progress_clans = tuple(
-        clan
-        for clan in runtime_config.active_clans
-        if league_groups.get(clan.clan_tag) is None or clan.clan_tag not in participating_groups
-    )
+    season = _resolve_cwl_season(runtime_config.active_clans, participating_groups)
     sheet_name = runtime_config.sheet_binding.active_cwl_sheet_name
     previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
     cwl_blocks = tuple(
@@ -641,7 +637,11 @@ async def _prepare_cwl_data(
     )
 
     war_tags = _collect_unique_war_tags(participating_groups.values())
-    wars_by_tag = await _load_cwl_wars(clash_client, war_tags)
+    wars_by_tag = await _load_cwl_wars(
+        clash_client=clash_client,
+        war_tags=war_tags,
+        concurrency_limit=cwl_war_concurrency_limit,
+    )
     clan_blocks = _build_cwl_clan_blocks(
         runtime_config=runtime_config,
         season=season,
@@ -871,20 +871,37 @@ async def _load_league_groups(
     return groups
 
 
-def _resolve_cwl_season(groups: dict[str, JsonObject]) -> str:
+def _resolve_cwl_season(
+    active_clans: Sequence[TrackedClan],
+    groups: dict[str, JsonObject],
+) -> str:
     """Определяет активный CWL-сезон по participating league groups.
 
-    Если API вернул разные сезоны, используется самый новый сезон, а кланы
-    с более старым сезоном считаются не участвующими в текущей CWL.
+    Если API вернул разные сезоны для активных кланов, sync отменяется.
     """
 
-    seasons = {
-        _require_str(group, "season", "leaguegroup")
-        for group in groups.values()
+    season_by_clan_tag = {
+        clan_tag: _require_str(group, "season", "leaguegroup")
+        for clan_tag, group in groups.items()
     }
+    seasons = set(season_by_clan_tag.values())
     if not seasons:
         raise CwlDataError("Не удалось определить CWL-сезон.")
-    return max(seasons)
+    if len(seasons) == 1:
+        return next(iter(seasons))
+
+    details = []
+    for clan in active_clans:
+        season = season_by_clan_tag.get(clan.clan_tag)
+        if season is None:
+            continue
+        details.append(f"{clan.clan_name} | {clan.clan_tag}: {season}")
+
+    raise CwlSeasonMismatchError(
+        "CWL-сезоны активных кланов не совпадают: "
+        + "; ".join(details)
+        + ".",
+    )
 
 
 def _collect_unique_war_tags(groups: Sequence[JsonObject]) -> list[str]:
@@ -908,12 +925,17 @@ def _collect_unique_war_tags(groups: Sequence[JsonObject]) -> list[str]:
 
 
 async def _load_cwl_wars(
+    *,
     clash_client: ClashClient,
     war_tags: Sequence[str],
+    concurrency_limit: int,
 ) -> dict[str, JsonObject]:
     """Загружает CWL wars с ограничением конкурентности."""
 
-    semaphore = asyncio.Semaphore(CWL_WAR_CONCURRENCY_LIMIT)
+    if concurrency_limit <= 0:
+        raise CwlDataError("CWL war concurrency limit должен быть положительным.")
+
+    semaphore = asyncio.Semaphore(concurrency_limit)
 
     async def load_one(war_tag: str) -> tuple[str, JsonObject]:
         async with semaphore:
