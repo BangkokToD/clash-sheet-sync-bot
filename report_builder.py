@@ -143,8 +143,9 @@ def _fit_telegram_length(text: str, spreadsheet_url: str) -> str:
     if len(text) <= MAX_TELEGRAM_MESSAGE_LENGTH:
         return text
     suffix = "\n\nОтчёт сокращён. Полный результат смотри в таблице.\n" + _table_link(spreadsheet_url)
-    limit = MAX_TELEGRAM_MESSAGE_LENGTH - len(suffix)
-    return f"{text[:max(limit, 0)].rstrip()}...{suffix}"
+    ellipsis = "..."
+    limit = MAX_TELEGRAM_MESSAGE_LENGTH - len(ellipsis) - len(suffix)
+    return f"{text[:max(limit, 0)].rstrip()}{ellipsis}{suffix}"
 
 
 def build_error_report(*, reason: str, spreadsheet_url: str | None = None) -> SyncReportPayload:
