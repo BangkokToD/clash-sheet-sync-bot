@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from models import ColumnProfile, RuntimeChatConfig, SheetBinding, SheetBlock, TrackedClan
+from models import AppConfig, ColumnProfile, RuntimeChatConfig, SheetBinding, SheetBlock, TrackedClan
 from repositories import CompositionPlayerState
 from sheets_client import SheetMetadata
+from telegram_access import AdminCheckResult
+from telegram_client import TelegramMessageNotModifiedError
 
 
 def make_tracked_clan(
@@ -55,6 +58,34 @@ def make_sheet_binding(
         bot_state_sheet_name=bot_state_sheet_name,
         bot_state_sheet_id=bot_state_sheet_id,
         timezone=timezone,
+    )
+
+
+def make_app_config(
+    *,
+    telegram_bot_token: str = "telegram-token",
+    coc_api_token: str = "coc-token",
+    google_service_account_file: str | Path = "credentials.json",
+    google_service_account_email: str | None = None,
+    db_path: str | Path = "bot.db",
+) -> AppConfig:
+    """Создаёт AppConfig для setup/sync service tests."""
+
+    return AppConfig(
+        telegram_bot_token=telegram_bot_token,
+        coc_api_token=coc_api_token,
+        google_service_account_file=Path(google_service_account_file),
+        google_service_account_email=google_service_account_email,
+        db_path=Path(db_path),
+        default_timezone="Europe/Kyiv",
+        max_clans_per_chat=20,
+        sync_cooldown_seconds=60,
+        max_concurrent_syncs=3,
+        cwl_war_concurrency_limit=5,
+        admin_cache_ttl_seconds=300,
+        setup_token_ttl_seconds=900,
+        transfer_token_ttl_seconds=900,
+        report_max_items=50,
     )
 
 
@@ -329,3 +360,103 @@ class RecordingSheetBlockRepository:
         if self.fail_on_upsert:
             raise AssertionError("composition apply must use replace_blocks_by_prefixes")
         self.upsert_calls.append({"block": block, "updated_at": updated_at})
+
+
+@dataclass(slots=True)
+class FakeTelegram:
+    """Fake Telegram client для setup-flow tests."""
+
+    raise_not_modified_on_edit: bool = False
+    sent_messages: list[dict[str, Any]] = field(default_factory=list)
+    edit_attempts: list[dict[str, Any]] = field(default_factory=list)
+    edited_messages: list[dict[str, Any]] = field(default_factory=list)
+    answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Any | None = None,
+        *,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> None:
+        """Запоминает отправленное сообщение."""
+
+        self.sent_messages.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": disable_web_page_preview,
+            },
+        )
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: Any | None = None,
+        *,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> None:
+        """Запоминает попытку редактирования сообщения."""
+
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "reply_markup": reply_markup,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": disable_web_page_preview,
+        }
+        self.edit_attempts.append(payload)
+        if self.raise_not_modified_on_edit:
+            raise TelegramMessageNotModifiedError("Telegram message is not modified.")
+        self.edited_messages.append(payload)
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str | None = None,
+        *,
+        show_alert: bool = False,
+    ) -> None:
+        """Запоминает callback answer."""
+
+        self.answered_callbacks.append(
+            {
+                "callback_query_id": callback_query_id,
+                "text": text,
+                "show_alert": show_alert,
+            },
+        )
+
+
+@dataclass(slots=True)
+class RecordingAccessService:
+    """Fake access service с записью force_refresh."""
+
+    is_admin_result: bool = True
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    async def is_admin(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        force_refresh: bool = False,
+    ) -> AdminCheckResult:
+        """Запоминает admin-check и возвращает заданный результат."""
+
+        self.calls.append(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "force_refresh": force_refresh,
+            },
+        )
+        return AdminCheckResult(is_admin=self.is_admin_result, from_cache=False)
