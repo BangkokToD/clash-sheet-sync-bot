@@ -173,7 +173,7 @@ class BotApp:
 
         if command.name == "/cancel":
             if is_private:
-                await flow.cancel_private_setup(chat.chat_id)
+                await flow.cancel_private_setup(chat_id=chat.chat_id, user_id=user_id)
             else:
                 await self._telegram.send_message(
                     chat_id=chat.chat_id,

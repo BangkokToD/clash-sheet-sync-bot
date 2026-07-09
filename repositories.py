@@ -1008,6 +1008,48 @@ class TelegramChatRepository:
             (setup_state, now, chat_id),
         )
 
+    async def clear_setup_states_for_user(self, *, user_id: int, now: str) -> int:
+        """Сбрасывает ожидающие setup_state, принадлежащие пользователю.
+
+        Метод чистит только состояния групп, где у пользователя есть активная
+        admin-связь. Это не даёт одному пользователю сбросить чужую настройку
+        группы через личную команду `/cancel`.
+
+        Args:
+            user_id: Telegram user ID пользователя, отправившего `/cancel`.
+            now: ISO-дата обновления.
+
+        Returns:
+            Количество Telegram-групп, где setup_state был сброшен.
+        """
+
+        setup_state_patterns = (
+            f"awaiting_sheet_link:{user_id}",
+            f"awaiting_sheet_access:{user_id}:*",
+            f"awaiting_clan_tag:{user_id}",
+            f"awaiting_user_column_title:{user_id}:*",
+            f"awaiting_column_rename:{user_id}:*",
+        )
+        conditions = " OR ".join("telegram_chats.setup_state GLOB ?" for _ in setup_state_patterns)
+        cursor = await self._connection.execute(
+            f"""
+            UPDATE telegram_chats
+            SET setup_state = NULL,
+                updated_at = ?
+            WHERE setup_state IS NOT NULL
+              AND ({conditions})
+              AND EXISTS (
+                  SELECT 1
+                  FROM chat_admin_links
+                  WHERE chat_admin_links.chat_id = telegram_chats.chat_id
+                    AND chat_admin_links.user_id = ?
+                    AND chat_admin_links.is_active = 1
+              )
+            """,
+            (now, *setup_state_patterns, user_id),
+        )
+        return cursor.rowcount
+
     async def set_status(self, *, chat_id: int, status: TelegramChatStatus, now: str) -> None:
         """Обновляет статус Telegram-чата."""
 

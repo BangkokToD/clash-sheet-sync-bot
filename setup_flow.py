@@ -196,17 +196,24 @@ class SetupFlow:
             )
         await self._telegram.send_message(chat_id=chat_id, text=text)
 
-    async def cancel_private_setup(self, chat_id: int) -> None:
+    async def cancel_private_setup(self, *, chat_id: int, user_id: int) -> None:
         """Сбрасывает текущую setup-сессию пользователя.
-
-        В коммите 2 отдельная per-user session ещё не хранится. Метод оставлен как
-        стабильная точка расширения для следующих шагов настройки.
 
         Args:
             chat_id: ID личного чата.
+            user_id: Telegram user ID пользователя, отправившего `/cancel`.
         """
 
-        await self._telegram.send_message(chat_id=chat_id, text="Текущая настройка сброшена.")
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            cleared_count = await self._telegram_chats.clear_setup_states_for_user(
+                user_id=user_id,
+                now=now,
+            )
+
+        text = "Текущая настройка сброшена." if cleared_count > 0 else "Активной настройки нет."
+        await self._telegram.send_message(chat_id=chat_id, text=text)
+
     async def handle_private_text(self, *, chat_id: int, user_id: int, text: str) -> None:
         """Обрабатывает текст в личке для текущего setup_state.
 
@@ -349,6 +356,13 @@ class SetupFlow:
         if table_type is None:
             return False
 
+        if not await self._has_sensitive_group_settings_access(
+            group_chat_id=pending.chat_id,
+            user_id=user_id,
+        ):
+            await self._telegram.send_message(chat_id=chat_id, text="Нет доступа.")
+            return True
+
         try:
             title = normalize_column_title(text)
         except ValueError as exc:
@@ -402,6 +416,13 @@ class SetupFlow:
         if parsed is None:
             return False
         table_type, column_key = parsed
+
+        if not await self._has_sensitive_group_settings_access(
+            group_chat_id=pending.chat_id,
+            user_id=user_id,
+        ):
+            await self._telegram.send_message(chat_id=chat_id, text="Нет доступа.")
+            return True
 
         try:
             title = normalize_column_title(text)
@@ -1259,7 +1280,7 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         binding = await self._runtime.get_active_sheet_binding(group_chat_id)
@@ -1717,7 +1738,7 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         if await self._clans.count_active_clans(group_chat_id) >= self._config.max_clans_per_chat:
@@ -1752,7 +1773,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректный клан.", show_alert=True)
             return
         group_chat_id, clan_tag = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         if not await self._clans.is_active_clan(chat_id=group_chat_id, clan_tag=clan_tag):
@@ -1796,7 +1817,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректный клан.", show_alert=True)
             return
         group_chat_id, clan_tag = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -1824,7 +1845,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректный клан.", show_alert=True)
             return
         group_chat_id, clan_tag = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -1924,7 +1945,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректный раздел.", show_alert=True)
             return
         group_chat_id, table_type = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -1951,7 +1972,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -1979,7 +2000,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         columns = await self._columns.list_columns(chat_id=group_chat_id, table_type=table_type)
@@ -2019,7 +2040,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -2059,7 +2080,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректная колонка.", show_alert=True)
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступ.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -2094,7 +2115,7 @@ class SetupFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Некорректный раздел.", show_alert=True)
             return
         group_chat_id, table_type = parsed
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
             return
         now = _format_dt(_utc_now())
@@ -2724,7 +2745,7 @@ async def _edit_or_send_message(
             reply_markup=reply_markup,
         )
     except TelegramMessageNotModifiedError:
-        await telegram.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        return
 
 
 def _utc_now() -> datetime:
