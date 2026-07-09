@@ -179,55 +179,6 @@ def build_status_report(summary: SyncStatusSummary | None) -> SyncReportPayload:
     return SyncReportPayload(text="\n".join(lines))
 
 
-def _composition_item_to_text(message: str) -> str:
-    """Экранирует строку diff состава."""
-
-    return f"- {escape(message)}"
-
-
-def _cwl_result_lines(cwl_result: CwlSheetSyncResult) -> list[str]:
-    """Строит блок CWL-отчёта."""
-
-    lines = ["", "CWL:"]
-    if cwl_result.all_not_in_progress:
-        lines.append("CWL сейчас не проводится. Лист CWL не менялся.")
-        return lines
-
-    if cwl_result.archived_previous_season:
-        lines.append(f"Смена сезона: {escape(cwl_result.season or '-')}")
-    if cwl_result.diff_items:
-        lines.extend(f"- {escape(item.message)}" for item in cwl_result.diff_items)
-    else:
-        lines.append(f"CWL обновлена. Строк: {cwl_result.rows_count}.")
-    if cwl_result.not_in_progress_clans:
-        lines.extend(["", "Не проводится:"])
-        lines.extend(
-            f"- {escape(clan.clan_name)} | {escape(clan.clan_tag)}"
-            for clan in cwl_result.not_in_progress_clans
-        )
-    return lines
-
-def _limit_diff_lines(lines: list[str], limit: int) -> tuple[list[str], bool]:
-    """Ограничивает количество строк изменений, не считая пустые заголовки."""
-
-    if limit <= 0:
-        return [], bool(lines)
-
-    result: list[str] = []
-    counted = 0
-    truncated = False
-    for line in lines:
-        if line == "" or line.endswith(":"):
-            result.append(line)
-            continue
-        if counted >= limit:
-            truncated = True
-            continue
-        result.append(line)
-        counted += 1
-    return result, truncated
-
-
 def _display_sync_status(status: str | None) -> str:
     """Преобразует технический статус в короткий текст."""
 

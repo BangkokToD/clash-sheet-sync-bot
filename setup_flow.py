@@ -899,65 +899,6 @@ class SetupFlow:
             show_alert=True,
         )
 
-    async def send_sync_boundary_message(self, *, chat: TelegramChatInfo) -> None:
-        """Отправляет временный ответ на `/sync` до реализации sync pipeline.
-
-        Args:
-            chat: Данные Telegram-чата.
-        """
-
-        if chat.type == "private":
-            await self._telegram.send_message(
-                chat_id=chat.chat_id,
-                text="Команда /sync работает в подключённой группе.",
-            )
-            return
-
-        status = await self._runtime.get_chat_status(chat.chat_id)
-        if status != "ready":
-            await self._telegram.send_message(
-                chat_id=chat.chat_id,
-                text=(
-                    "Группа не настроена. Администратор может подключить её "
-                    "через личный чат с ботом."
-                ),
-            )
-            return
-
-        await self._telegram.send_message(
-            chat_id=chat.chat_id,
-            text="Команда /sync будет подключена в следующем этапе разработки.",
-        )
-
-    async def send_status_boundary_message(self, *, chat: TelegramChatInfo) -> None:
-        """Отправляет временный ответ на `/status` до реализации sync reports.
-
-        Args:
-            chat: Данные Telegram-чата.
-        """
-
-        if chat.type == "private":
-            await self._telegram.send_message(
-                chat_id=chat.chat_id,
-                text="Команда /status работает в подключённой группе.",
-            )
-            return
-
-        status = await self._runtime.get_chat_status(chat.chat_id)
-        if status is None or status == "disabled":
-            await self._telegram.send_message(
-                chat_id=chat.chat_id,
-                text=(
-                    "Группа не настроена. Администратор может подключить её "
-                    "через личный чат с ботом."
-                ),
-            )
-            return
-
-        await self._telegram.send_message(
-            chat_id=chat.chat_id,
-            text="Статус обновлений будет доступен после подключения /sync pipeline.",
-        )
 
     async def _show_group_settings_menu(
         self,
@@ -1076,7 +1017,7 @@ class SetupFlow:
             return
 
         title = SETTINGS_SECTIONS.get(section_key, "Раздел")
-        text = f"Раздел «{title}» будет реализован в следующем шаге разработки."
+        text = f"Раздел «{title}» недоступен."
         await _edit_or_send_message(
             telegram=self._telegram,
             chat_id=chat_id,
