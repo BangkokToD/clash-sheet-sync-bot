@@ -7,10 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
-from coc_client import ClashClient
-from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, table_title
-from common_time import format_dt as _format_dt
-from models import (
+from clash_sheet_sync_bot.coc.client import ClashClient
+from clash_sheet_sync_bot.common.time import format_dt as _format_dt
+from clash_sheet_sync_bot.models import (
     ColumnProfile,
     RuntimeChatConfig,
     SheetBlock,
@@ -18,27 +17,37 @@ from models import (
     TrackedClan,
     normalize_tag,
 )
-from repositories import (
+from clash_sheet_sync_bot.repositories import (
     CompositionPlayerState,
     CompositionPlayerStateRepository,
     SheetBlockRepository,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.client import (
+    CellValue,
+    SheetsClient,
+    SheetValues,
+    range_from_start_cell,
+)
+from clash_sheet_sync_bot.sheets.column_profiles import (
+    BOT_KEY_COLUMN_KEY,
+    BOT_KEY_TITLE,
+    table_title,
+)
+from clash_sheet_sync_bot.sheets.ranges import (
     column_to_number as _shared_column_to_number,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     grid_range_from_start_cell as _shared_grid_range_from_start_cell,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     number_to_column as _shared_number_to_column,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     offset_cell as _shared_offset_cell,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     parse_a1_cell as _shared_parse_a1_cell,
 )
-from sheets_client import CellValue, SheetsClient, SheetValues, range_from_start_cell
 
 COMPOSITION_PLAYER_KEY_PREFIX: Final = "composition_player:"
 ACTIVE_BLOCK_PREFIX: Final = "composition_active:"

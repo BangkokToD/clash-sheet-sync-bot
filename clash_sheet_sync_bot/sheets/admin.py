@@ -7,16 +7,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from common_time import utc_now_iso as _utc_now_iso
-from models import SheetBinding, SheetBlock
-from sheet_ranges import parse_a1_cell as _parse_a1_cell
-from sheets_client import (
+from clash_sheet_sync_bot.common.time import utc_now_iso as _utc_now_iso
+from clash_sheet_sync_bot.models import SheetBinding, SheetBlock
+from clash_sheet_sync_bot.sheets.client import (
     CellValue,
     GoogleSheetsError,
     SheetMetadata,
     SheetsClient,
     range_from_start_cell,
 )
+from clash_sheet_sync_bot.sheets.ranges import parse_a1_cell as _parse_a1_cell
 
 SPREADSHEET_URL_RE: Final = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 SPREADSHEET_ID_RE: Final = re.compile(r"^[a-zA-Z0-9-_]+$")

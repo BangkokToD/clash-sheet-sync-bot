@@ -5,8 +5,8 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
-from models import SheetBlock
-from repositories import (
+from clash_sheet_sync_bot.models import SheetBlock
+from clash_sheet_sync_bot.repositories import (
     RuntimeConfigRepository,
     SheetBlockRepository,
     SyncRunRepository,

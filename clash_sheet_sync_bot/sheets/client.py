@@ -15,13 +15,13 @@ import httpx
 from google.auth import exceptions as google_auth_exceptions
 from google.oauth2 import service_account
 
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     column_to_number as _shared_column_to_number,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     number_to_column as _shared_number_to_column,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     parse_a1_cell as _shared_parse_a1_cell,
 )
 

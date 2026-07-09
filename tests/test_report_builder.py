@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from composition_sync import CompositionSyncResult
-from cwl_sync import CwlSheetSyncResult
-from report_builder import (
+from clash_sheet_sync_bot.repositories import SyncStatusSummary
+from clash_sheet_sync_bot.sync.composition import CompositionSyncResult
+from clash_sheet_sync_bot.sync.cwl import CwlSheetSyncResult
+from clash_sheet_sync_bot.sync.reports import (
     MAX_TELEGRAM_MESSAGE_LENGTH,
     build_error_report,
     build_status_report,
     build_success_report,
 )
-from repositories import SyncStatusSummary
 
 
 def _composition_result(*, warnings: tuple[str, ...] = ()) -> CompositionSyncResult:

@@ -8,8 +8,8 @@ from pathlib import Path
 import aiosqlite
 import pytest_asyncio
 
-from migrations import apply_migrations
-from storage import Database
+from clash_sheet_sync_bot.migrations import apply_migrations
+from clash_sheet_sync_bot.storage import Database
 
 
 @pytest_asyncio.fixture

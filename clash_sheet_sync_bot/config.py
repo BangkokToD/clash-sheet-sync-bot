@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
-from models import AppConfig
+from clash_sheet_sync_bot.models import AppConfig
 
 
 class ConfigError(RuntimeError):

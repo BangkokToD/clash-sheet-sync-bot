@@ -15,7 +15,7 @@ from fakes import (
     make_tracked_clan,
 )
 
-from composition_sync import (
+from clash_sheet_sync_bot.sync.composition import (
     CompositionDiffItem,
     CompositionImportResult,
     CurrentClanMember,

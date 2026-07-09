@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from models import SyncRunStatus
+from clash_sheet_sync_bot.models import SyncRunStatus
 
 from .base import RepositoryError, fetch_one
 

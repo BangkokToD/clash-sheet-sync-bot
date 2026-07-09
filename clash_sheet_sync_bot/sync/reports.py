@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from html import escape
 from typing import Final
 
-from composition_sync import CompositionDiffItem, CompositionSyncResult
-from cwl_sync import CwlDiffItem, CwlSheetSyncResult
-from repositories import SyncStatusSummary
+from clash_sheet_sync_bot.repositories import SyncStatusSummary
+from clash_sheet_sync_bot.sync.composition import CompositionDiffItem, CompositionSyncResult
+from clash_sheet_sync_bot.sync.cwl import CwlDiffItem, CwlSheetSyncResult
 
 TABLE_LINK_TEXT: Final = "Таблица"
 MAX_TELEGRAM_MESSAGE_LENGTH: Final = 3500

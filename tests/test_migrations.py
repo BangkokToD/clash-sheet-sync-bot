@@ -5,7 +5,7 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
-from migrations import SCHEMA_VERSION, apply_migrations
+from clash_sheet_sync_bot.migrations import SCHEMA_VERSION, apply_migrations
 
 NOW = "2026-07-09T12:00:00+00:00"
 

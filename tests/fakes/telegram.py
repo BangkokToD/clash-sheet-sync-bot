@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from telegram_access import AdminCheckResult
-from telegram_client import TelegramMessageNotModifiedError
+from clash_sheet_sync_bot.telegram.access import AdminCheckResult
+from clash_sheet_sync_bot.telegram.client import TelegramMessageNotModifiedError
 
 
 @dataclass(slots=True)

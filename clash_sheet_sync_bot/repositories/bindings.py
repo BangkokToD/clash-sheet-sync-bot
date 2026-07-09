@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import aiosqlite
 
-from models import ColumnProfile, RuntimeChatConfig, SheetBinding, TelegramChatStatus, TrackedClan
+from clash_sheet_sync_bot.models import (
+    ColumnProfile,
+    RuntimeChatConfig,
+    SheetBinding,
+    TelegramChatStatus,
+    TrackedClan,
+)
 
 from .base import (
     as_chat_status,

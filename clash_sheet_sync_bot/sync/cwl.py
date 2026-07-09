@@ -11,10 +11,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from coc_client import ClashApiUnavailableError, ClashClient, ClashCwlNotInProgressError
-from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE
-from common_time import utc_now_iso as _utc_now_iso
-from models import (
+from clash_sheet_sync_bot.coc.client import (
+    ClashApiUnavailableError,
+    ClashClient,
+    ClashCwlNotInProgressError,
+)
+from clash_sheet_sync_bot.common.time import utc_now_iso as _utc_now_iso
+from clash_sheet_sync_bot.models import (
     ColumnProfile,
     RuntimeChatConfig,
     SheetBlock,
@@ -22,28 +25,35 @@ from models import (
     TrackedClan,
     normalize_tag,
 )
-from repositories import (
+from clash_sheet_sync_bot.repositories import (
     CwlRowState,
     CwlRowStateRepository,
     SheetBindingRepository,
     SheetBlockRepository,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.client import (
+    CellValue,
+    SheetMetadata,
+    SheetsClient,
+    SheetValues,
+    range_from_start_cell,
+)
+from clash_sheet_sync_bot.sheets.column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE
+from clash_sheet_sync_bot.sheets.ranges import (
     column_to_number as _shared_column_to_number,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     grid_range_from_start_cell as _shared_grid_range_from_start_cell,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     number_to_column as _shared_number_to_column,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     offset_cell as _shared_offset_cell,
 )
-from sheet_ranges import (
+from clash_sheet_sync_bot.sheets.ranges import (
     parse_a1_cell as _shared_parse_a1_cell,
 )
-from sheets_client import CellValue, SheetMetadata, SheetsClient, SheetValues, range_from_start_cell
 
 logger = logging.getLogger(__name__)
 

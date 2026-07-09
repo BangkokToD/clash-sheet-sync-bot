@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from models import (
+from clash_sheet_sync_bot.models import (
     AppConfig,
     ColumnProfile,
     RuntimeChatConfig,
@@ -12,7 +12,7 @@ from models import (
     SheetBlock,
     TrackedClan,
 )
-from repositories import CompositionPlayerState
+from clash_sheet_sync_bot.repositories import CompositionPlayerState
 
 
 def make_tracked_clan(

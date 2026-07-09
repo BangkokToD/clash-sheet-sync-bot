@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-from models import TelegramChatStatus
+from clash_sheet_sync_bot.models import TelegramChatStatus
 
 from .base import as_chat_status, as_int, as_str, fetch_all
 

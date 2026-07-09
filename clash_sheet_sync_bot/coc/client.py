@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import httpx
 
-from models import normalize_tag
+from clash_sheet_sync_bot.models import normalize_tag
 
 COC_API_BASE_URL: Final = "https://api.clashofclans.com/v1"
 

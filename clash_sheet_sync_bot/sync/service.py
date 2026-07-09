@@ -11,23 +11,11 @@ from typing import Any, Final
 
 import httpx
 
-from coc_client import ClashApiUnavailableError, ClashClient
-from common_time import format_dt as _format_dt
-from common_time import utc_now as _utc_now
-from composition_sync import (
-    CompositionDataError,
-    CompositionSyncResult,
-    apply_prepared_composition_sync,
-    prepare_composition_sync,
-)
-from config import AppConfig
-from cwl_sync import (
-    CwlDataError,
-    apply_public_cwl_sync,
-    prepare_public_cwl_sync,
-)
-from report_builder import build_error_report, build_status_report, build_success_report
-from repositories import (
+from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError, ClashClient
+from clash_sheet_sync_bot.common.time import format_dt as _format_dt
+from clash_sheet_sync_bot.common.time import utc_now as _utc_now
+from clash_sheet_sync_bot.config import AppConfig
+from clash_sheet_sync_bot.repositories import (
     CompositionPlayerStateRepository,
     CwlRowStateRepository,
     RuntimeConfigRepository,
@@ -36,8 +24,28 @@ from repositories import (
     SyncRunRepository,
     TelegramChatRepository,
 )
-from sheets_client import GoogleAccessTokenProvider, GoogleSheetsError, SheetsClient
-from telegram_client import TelegramApiError, TelegramClient
+from clash_sheet_sync_bot.sheets.client import (
+    GoogleAccessTokenProvider,
+    GoogleSheetsError,
+    SheetsClient,
+)
+from clash_sheet_sync_bot.sync.composition import (
+    CompositionDataError,
+    CompositionSyncResult,
+    apply_prepared_composition_sync,
+    prepare_composition_sync,
+)
+from clash_sheet_sync_bot.sync.cwl import (
+    CwlDataError,
+    apply_public_cwl_sync,
+    prepare_public_cwl_sync,
+)
+from clash_sheet_sync_bot.sync.reports import (
+    build_error_report,
+    build_status_report,
+    build_success_report,
+)
+from clash_sheet_sync_bot.telegram.client import TelegramApiError, TelegramClient
 
 CHAT_SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 SHEET_SYNC_LOCKS: dict[str, asyncio.Lock] = {}

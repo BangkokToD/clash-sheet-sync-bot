@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import aiosqlite
 
-from column_profiles import all_default_columns, default_columns
-from models import ColumnProfile, TableType
+from clash_sheet_sync_bot.models import ColumnProfile, TableType
+from clash_sheet_sync_bot.sheets.column_profiles import all_default_columns, default_columns
 
 from .base import (
     as_bool_int,

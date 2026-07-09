@@ -6,7 +6,7 @@ import aiosqlite
 import pytest
 from fakes import FakeTelegram, RecordingAccessService, make_app_config
 
-from setup_flow import (
+from clash_sheet_sync_bot.setup.flow import (
     AWAITING_CLAN_TAG_STATE_PREFIX,
     AWAITING_COLUMN_RENAME_STATE_PREFIX,
     AWAITING_USER_COLUMN_TITLE_STATE_PREFIX,

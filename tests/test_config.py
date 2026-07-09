@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from config import ConfigError, load_config
+from clash_sheet_sync_bot.config import ConfigError, load_config
 
 CONFIG_ENV_NAMES = (
     "TELEGRAM_BOT_TOKEN",

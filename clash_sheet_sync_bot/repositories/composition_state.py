@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-from models import CompositionPlayerStatus
+from clash_sheet_sync_bot.models import CompositionPlayerStatus
 
 from .base import (
     as_composition_player_status,

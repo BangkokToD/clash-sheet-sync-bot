@@ -11,16 +11,15 @@ from typing import Final
 import aiosqlite
 import httpx
 
-from coc_client import (
+from clash_sheet_sync_bot.coc.client import (
     ClashApiUnavailableError,
     ClashClanNotFoundError,
     ClashClient,
 )
-from column_profiles import new_user_column_key, normalize_column_title, table_title
-from common_time import format_dt as _format_dt
-from common_time import utc_now as _utc_now
-from models import AppConfig, SetupToken, TableType, normalize_tag
-from repositories import (
+from clash_sheet_sync_bot.common.time import format_dt as _format_dt
+from clash_sheet_sync_bot.common.time import utc_now as _utc_now
+from clash_sheet_sync_bot.models import AppConfig, SetupToken, TableType, normalize_tag
+from clash_sheet_sync_bot.repositories import (
     AdminChatRepository,
     ChatLifecycleRepository,
     ClanSettingsRepository,
@@ -32,7 +31,7 @@ from repositories import (
     TelegramChatRepository,
     TransferTokenRepository,
 )
-from setup_keyboards import (
+from clash_sheet_sync_bot.setup.keyboards import (
     CALLBACK_BIND_SHEET_PREFIX,
     CALLBACK_CHANGE_SHEET_PREFIX,
     CALLBACK_CHECK_SHEET_PREFIX,
@@ -74,21 +73,26 @@ from setup_keyboards import (
     settings_menu_keyboard,
     sheet_section_keyboard,
 )
-from sheet_admin import (
+from clash_sheet_sync_bot.sheets.admin import (
     SheetAdminError,
     SheetAdminService,
     TableDiagnosticIssue,
     TableDiagnosticResult,
     extract_spreadsheet_id,
 )
-from sheets_client import (
+from clash_sheet_sync_bot.sheets.client import (
     GoogleAccessTokenProvider,
     GoogleSheetsAuthError,
     SheetsClient,
 )
-from storage import transaction
-from telegram_access import TelegramAccessService
-from telegram_client import (
+from clash_sheet_sync_bot.sheets.column_profiles import (
+    new_user_column_key,
+    normalize_column_title,
+    table_title,
+)
+from clash_sheet_sync_bot.storage import transaction
+from clash_sheet_sync_bot.telegram.access import TelegramAccessService
+from clash_sheet_sync_bot.telegram.client import (
     JsonObject,
     TelegramApiError,
     TelegramClient,

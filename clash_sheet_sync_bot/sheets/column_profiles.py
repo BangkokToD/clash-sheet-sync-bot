@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Final
 
-from models import ColumnKind, ColumnValueType, TableType
+from clash_sheet_sync_bot.models import ColumnKind, ColumnValueType, TableType
 
 BOT_KEY_COLUMN_KEY: Final = "bot_key"
 BOT_KEY_TITLE: Final = "__bot_key"

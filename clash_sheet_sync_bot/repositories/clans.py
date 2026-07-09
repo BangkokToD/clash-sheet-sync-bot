@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from models import TrackedClan
+from clash_sheet_sync_bot.models import TrackedClan
 
 from .base import as_int, fetch_one
 from .bindings import RuntimeConfigRepository

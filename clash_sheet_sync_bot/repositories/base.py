@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import aiosqlite
 
-from models import (
+from clash_sheet_sync_bot.models import (
     ColumnKind,
     ColumnValueType,
     CompositionPlayerStatus,

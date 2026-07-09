@@ -7,15 +7,15 @@ from typing import Any
 
 import pytest
 
-from coc_client import ClashApiUnavailableError
-from cwl_sync import (
+from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError
+from clash_sheet_sync_bot.models import TrackedClan
+from clash_sheet_sync_bot.sync.cwl import (
     CwlDataError,
     CwlSeasonMismatchError,
     _load_cwl_wars,
     _resolve_cwl_season,
     make_cwl_row_key,
 )
-from models import TrackedClan
 
 JsonObject = dict[str, Any]
 

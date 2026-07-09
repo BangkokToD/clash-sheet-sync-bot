@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
-from common_time import utc_now_iso as _utc_now_iso
-from repositories import TelegramChatRepository
-from telegram_client import TelegramApiError, TelegramClient
+from clash_sheet_sync_bot.common.time import utc_now_iso as _utc_now_iso
+from clash_sheet_sync_bot.repositories import TelegramChatRepository
+from clash_sheet_sync_bot.telegram.client import TelegramApiError, TelegramClient
 
 ADMIN_STATUSES = frozenset({"creator", "administrator"})
 

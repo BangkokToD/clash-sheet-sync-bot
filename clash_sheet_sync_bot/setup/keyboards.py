@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-from models import TableType
-from telegram_client import JsonObject
+from clash_sheet_sync_bot.models import TableType
+from clash_sheet_sync_bot.telegram.client import JsonObject
 
 CALLBACK_CONNECT_GROUP: Final = "setup:create_token"
 CALLBACK_PRIVATE_START: Final = "setup:start"

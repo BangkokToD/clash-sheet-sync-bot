@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from models import SetupToken
+from clash_sheet_sync_bot.models import SetupToken
 
 from .base import as_int, as_optional_int, as_optional_str, as_str, fetch_one
 

@@ -9,11 +9,11 @@ import aiosqlite
 import pytest
 from fakes import FakeTelegram, make_app_config
 
-import sync_service
-from composition_sync import PreparedCompositionSync
-from cwl_sync import CwlPreparedData
-from sheets_client import GoogleSheetsWriteError
-from sync_service import (
+import clash_sheet_sync_bot.sync.service as sync_service
+from clash_sheet_sync_bot.sheets.client import GoogleSheetsWriteError
+from clash_sheet_sync_bot.sync.composition import PreparedCompositionSync
+from clash_sheet_sync_bot.sync.cwl import CwlPreparedData
+from clash_sheet_sync_bot.sync.service import (
     PARTIAL_SHEET_WRITE_WARNING,
     UNEXPECTED_SYNC_ERROR_REASON,
     WRITE_PHASE_COMPOSITION_WRITTEN,
@@ -21,7 +21,7 @@ from sync_service import (
     SyncService,
     _sync_error_reason,
 )
-from telegram_client import TelegramApiError
+from clash_sheet_sync_bot.telegram.client import TelegramApiError
 
 NOW = "2026-07-09T12:00:00+00:00"
 
