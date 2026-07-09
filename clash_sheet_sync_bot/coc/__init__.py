@@ -1,1 +1,1 @@
-"""Application package."""
+"""Clash of Clans API integration."""

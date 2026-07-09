@@ -1,1 +1,1 @@
-"""Application package."""
+"""Clash Sheet Sync Bot application package."""

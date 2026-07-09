@@ -1,1 +1,1 @@
-"""Application package."""
+"""Telegram setup-flow package."""

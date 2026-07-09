@@ -56,6 +56,7 @@
 - CWL write pipeline усилен проверкой season mismatch.
 - Composition sheet blocks metadata теперь заменяется согласованно через prefix-based replace.
 - Repository-слой разделён на focused package modules.
+- Runtime-код перенесён из корня проекта в пакет `clash_sheet_sync_bot/`; корневой `bot.py` оставлен как compatibility launcher.
 - Setup keyboard builders вынесены из `setup_flow.py`.
 - Общие time/A1 helpers вынесены в отдельные модули.
 - Test fakes/factories вынесены в пакет `tests/fakes/`.

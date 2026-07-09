@@ -1,1 +1,1 @@
-"""Application package."""
+"""Shared utility helpers."""

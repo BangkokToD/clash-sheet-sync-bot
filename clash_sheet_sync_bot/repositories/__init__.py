@@ -1,7 +1,7 @@
-"""Публичный API repository-слоя.
+"""Public API for focused SQLite repositories.
 
-Модуль сохраняет старый контракт `from repositories import ...`,
-хотя реализация разнесена по focused modules.
+Repository classes and helpers are re-exported here so application code can
+import them from `clash_sheet_sync_bot.repositories`.
 """
 
 from __future__ import annotations

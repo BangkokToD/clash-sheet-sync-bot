@@ -1,1 +1,1 @@
-"""Application package."""
+"""Telegram Bot API integration."""

@@ -1,1 +1,1 @@
-"""Application package."""
+"""Google Sheets integration package."""
