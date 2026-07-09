@@ -55,7 +55,7 @@ class BotApp:
     Args:
         config: Глобальная конфигурация приложения.
         telegram: Клиент Telegram Bot API.
-        connection: SQLite-подключение.
+        database: Фабрика SQLite-подключений.
         bot_username: Username бота без `@` или `None`.
     """
 
@@ -64,12 +64,12 @@ class BotApp:
         *,
         config: AppConfig,
         telegram: TelegramClient,
-        connection: Any,
+        database: Database,
         bot_username: str | None,
     ) -> None:
         self._config = config
         self._telegram = telegram
-        self._connection = connection
+        self._database = database
         self._bot_username = bot_username
         self._update_tasks: set[asyncio.Task[None]] = set()
 
@@ -126,20 +126,32 @@ class BotApp:
             update: Update-объект Telegram Bot API.
         """
 
+        async with self._database.connect() as connection:
+            await self._handle_update_with_connection(update=update, connection=connection)
+
+    async def _handle_update_with_connection(self, *, update: JsonObject, connection: Any) -> None:
+        """Обрабатывает один Telegram update на отдельном SQLite-подключении.
+
+        Args:
+            update: Update-объект Telegram Bot API.
+            connection: SQLite-подключение, открытое только для этого update.
+        """
+
         message = update.get("message")
         if isinstance(message, dict):
-            await self._handle_message(message)
+            await self._handle_message(message=message, connection=connection)
             return
 
         callback_query = update.get("callback_query")
         if isinstance(callback_query, dict):
-            await self._handle_callback_query(callback_query)
+            await self._handle_callback_query(callback_query=callback_query, connection=connection)
 
-    async def _handle_message(self, message: JsonObject) -> None:
+    async def _handle_message(self, *, message: JsonObject, connection: Any) -> None:
         """Обрабатывает обычное Telegram-сообщение.
 
         Args:
             message: Объект `message` из Telegram update.
+            connection: SQLite-подключение текущего update.
         """
 
         chat = _extract_chat_info(message)
@@ -147,7 +159,7 @@ class BotApp:
         if chat is None or user_id is None:
             return
 
-        flow = self._setup_flow()
+        flow = self._setup_flow(connection)
         is_private = chat.type == "private"
         raw_text = message.get("text")
         command = _extract_command(raw_text, self._bot_username)
@@ -197,23 +209,24 @@ class BotApp:
             return
 
         if command.name == "/sync":
-            await self._sync_service().handle_sync_command(
+            await self._sync_service(connection).handle_sync_command(
                 chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
                 user_id=user_id,
             )
             return
 
         if command.name == "/status":
-            await self._sync_service().handle_status_command(
+            await self._sync_service(connection).handle_status_command(
                 chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
             )
             return
 
-    async def _handle_callback_query(self, callback_query: JsonObject) -> None:
+    async def _handle_callback_query(self, *, callback_query: JsonObject, connection: Any) -> None:
         """Обрабатывает нажатие inline-кнопки.
 
         Args:
             callback_query: Объект `callback_query` из Telegram update.
+            connection: SQLite-подключение текущего update.
         """
 
         callback_query_id = callback_query.get("id")
@@ -233,7 +246,7 @@ class BotApp:
         if chat is None or not isinstance(message_id, int):
             return
 
-        flow = self._setup_flow()
+        flow = self._setup_flow(connection)
         await flow.handle_callback(
             callback_data=data,
             callback_query_id=callback_query_id,
@@ -242,33 +255,39 @@ class BotApp:
             user_id=user_id,
         )
 
-    def _setup_flow(self) -> SetupFlow:
-        """Создаёт setup-flow поверх текущего SQLite-подключения.
+    def _setup_flow(self, connection: Any) -> SetupFlow:
+        """Создаёт setup-flow поверх SQLite-подключения текущего update.
 
         Returns:
             Сервис Telegram setup-flow.
         """
-
         access = TelegramAccessService(
             telegram=self._telegram,
-            connection=self._connection,
+            connection=connection,
             admin_cache_ttl_seconds=self._config.admin_cache_ttl_seconds,
         )
         return SetupFlow(
             config=self._config,
             telegram=self._telegram,
-            connection=self._connection,
+            connection=connection,
             access=access,
             bot_username=self._bot_username,
         )
 
-    def _sync_service(self) -> SyncService:
-        """Создаёт sync-service поверх текущего SQLite-подключения."""
+    def _sync_service(self, connection: Any) -> SyncService:
+        """Создаёт sync-service поверх SQLite-подключения текущего update.
+
+        Args:
+            connection: SQLite-подключение текущего update.
+
+        Returns:
+            Сервис синхронизации.
+        """
 
         return SyncService(
             config=self._config,
             telegram=self._telegram,
-            connection=self._connection,
+            connection=connection,
         )
 
 
@@ -372,17 +391,18 @@ async def async_main() -> int:
     try:
         async with database.connect() as connection:
             await apply_migrations(connection)
-            async with httpx.AsyncClient(timeout=timeout) as http_client:
-                telegram = TelegramClient(config.telegram_bot_token, http_client)
-                identity = await telegram.get_me()
-                logger.info("bot started")
-                app = BotApp(
-                    config=config,
-                    telegram=telegram,
-                    connection=connection,
-                    bot_username=identity.username,
-                )
-                await app.run_polling()
+
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            telegram = TelegramClient(config.telegram_bot_token, http_client)
+            identity = await telegram.get_me()
+            logger.info("bot started")
+            app = BotApp(
+                config=config,
+                telegram=telegram,
+                database=database,
+                bot_username=identity.username,
+            )
+            await app.run_polling()
     except (StorageError, TelegramApiError) as exc:
         logger.error("bot startup failed: %s", exc)
         return 1
