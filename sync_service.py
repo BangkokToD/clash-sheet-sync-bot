@@ -42,6 +42,12 @@ SHEET_SYNC_LOCKS: dict[str, asyncio.Lock] = {}
 GLOBAL_SEMAPHORE: asyncio.Semaphore | None = None
 GLOBAL_SEMAPHORE_LIMIT: int | None = None
 SYNC_HTTP_TIMEOUT_SECONDS: Final = 90.0
+WRITE_PHASE_PREPARED: Final = "prepared"
+WRITE_PHASE_COMPOSITION_WRITTEN: Final = "composition_written"
+WRITE_PHASE_CWL_WRITTEN: Final = "cwl_written"
+WRITE_PHASE_SQLITE_COMMITTED: Final = "sqlite_committed"
+PARTIAL_SHEET_WRITE_WARNING: Final = "Таблица могла быть частично обновлена. Запустите диагностику и повторите /sync."
+UNEXPECTED_SYNC_ERROR_REASON: Final = "Непредвиденная ошибка во время обновления. Подробности записаны в лог."
 
 logger = logging.getLogger(__name__)
 
@@ -170,11 +176,13 @@ class SyncService:
         )
         await self._connection.commit()
 
+        write_phase = WRITE_PHASE_PREPARED
         runtime = await self._runtime.get_runtime_chat_config(runtime_chat_id)
         if runtime is None:
             await self._finish_error(
                 chat_id=runtime_chat_id,
                 sync_run_id=sync_run_id,
+                error_stage=write_phase,
                 reason="RuntimeChatConfig не найден.",
                 spreadsheet_url=None,
             )
@@ -213,6 +221,7 @@ class SyncService:
                     cwl_war_concurrency_limit=self._config.cwl_war_concurrency_limit,
                 )
 
+                write_phase = WRITE_PHASE_COMPOSITION_WRITTEN
                 await apply_prepared_composition_sync(
                     runtime_config=runtime,
                     sheets_client=sheets_client,
@@ -221,6 +230,8 @@ class SyncService:
                     detected_at=started_at_dt,
                     prepared=prepared_composition,
                 )
+
+                write_phase = WRITE_PHASE_CWL_WRITTEN
                 cwl_result = await apply_public_cwl_sync(
                     runtime_config=runtime,
                     sheets_client=sheets_client,
@@ -258,6 +269,7 @@ class SyncService:
                 error=None,
             )
             await self._connection.commit()
+            write_phase = WRITE_PHASE_SQLITE_COMMITTED
             try:
                 await self._telegram.send_message(
                     chat_id=runtime_chat_id,
@@ -269,18 +281,23 @@ class SyncService:
                 logger.warning("sync finished, but telegram report delivery failed: %s", exc)
         except (ClashApiUnavailableError, GoogleSheetsError, CompositionDataError, CwlDataError) as exc:
             await self._connection.rollback()
+            reason = _sync_error_reason(str(exc), write_phase)
             await self._finish_error(
                 chat_id=runtime_chat_id,
                 sync_run_id=sync_run_id,
-                reason=str(exc),
+                error_stage=write_phase,
+                reason=reason,
                 spreadsheet_url=spreadsheet_url,
             )
         except Exception as exc:
             await self._connection.rollback()
+            logger.exception("unexpected sync failure")
+            reason = _sync_error_reason(UNEXPECTED_SYNC_ERROR_REASON, write_phase)
             await self._finish_error(
                 chat_id=runtime_chat_id,
                 sync_run_id=sync_run_id,
-                reason=f"Непредвиденная ошибка: {exc}",
+                error_stage=write_phase,
+                reason=reason,
                 spreadsheet_url=spreadsheet_url,
             )
 
@@ -289,6 +306,7 @@ class SyncService:
         *,
         chat_id: int,
         sync_run_id: int,
+        error_stage: str | None,
         reason: str,
         spreadsheet_url: str | None,
     ) -> None:
@@ -300,6 +318,7 @@ class SyncService:
             sync_run_id=sync_run_id,
             status="error",
             finished_at=finished_at,
+            error_stage=error_stage,
             error_message=reason,
             report_json=json.dumps({"telegram_report": report.text}, ensure_ascii=False),
         )
@@ -369,6 +388,23 @@ def _global_semaphore(limit: int) -> asyncio.Semaphore:
         GLOBAL_SEMAPHORE = asyncio.Semaphore(limit)
         GLOBAL_SEMAPHORE_LIMIT = limit
     return GLOBAL_SEMAPHORE
+
+
+def _sync_error_reason(reason: str, write_phase: str) -> str:
+    """Дополняет ошибку предупреждением о возможной частичной записи."""
+
+    normalized_reason = reason.strip() or "Ошибка во время обновления."
+    if not _has_sheet_write_started(write_phase):
+        return normalized_reason
+    if PARTIAL_SHEET_WRITE_WARNING in normalized_reason:
+        return normalized_reason
+    return f"{normalized_reason}\n\n{PARTIAL_SHEET_WRITE_WARNING}"
+
+
+def _has_sheet_write_started(write_phase: str) -> bool:
+    """Проверяет, могла ли Google-таблица уже измениться."""
+
+    return write_phase in {WRITE_PHASE_COMPOSITION_WRITTEN, WRITE_PHASE_CWL_WRITTEN}
 
 
 def _utc_now() -> datetime:
