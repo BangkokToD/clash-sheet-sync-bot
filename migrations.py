@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import aiosqlite
+from typing import Final
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION: Final = 2
 
-SCHEMA_SQL = """
+SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -193,6 +194,76 @@ CREATE TABLE IF NOT EXISTS transfer_tokens (
 );
 """
 
+MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
+    2: """
+    INSERT INTO column_profiles(
+        chat_id,
+        table_type,
+        column_key,
+        title,
+        visible,
+        is_active,
+        sort_order,
+        kind,
+        value_type,
+        created_at,
+        updated_at
+    )
+    SELECT
+        chat_id,
+        'composition_active',
+        column_key,
+        title,
+        visible,
+        is_active,
+        sort_order,
+        kind,
+        value_type,
+        created_at,
+        updated_at
+    FROM column_profiles
+    WHERE table_type = 'composition'
+      AND column_key != 'exited_at'
+    ON CONFLICT(chat_id, table_type, column_key) DO NOTHING;
+
+    INSERT INTO column_profiles(
+        chat_id,
+        table_type,
+        column_key,
+        title,
+        visible,
+        is_active,
+        sort_order,
+        kind,
+        value_type,
+        created_at,
+        updated_at
+    )
+    SELECT
+        chat_id,
+        'composition_exited',
+        column_key,
+        title,
+        visible,
+        is_active,
+        sort_order,
+        kind,
+        value_type,
+        created_at,
+        updated_at
+    FROM column_profiles
+    WHERE table_type = 'composition'
+    ON CONFLICT(chat_id, table_type, column_key) DO NOTHING;
+
+    UPDATE column_profiles
+    SET visible = 0,
+        is_active = 0,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE table_type = 'composition_active'
+      AND column_key = 'exited_at';
+    """,
+}
+
 
 async def apply_migrations(connection: aiosqlite.Connection) -> None:
     """Создаёт или обновляет схему SQLite до актуальной версии.
@@ -202,8 +273,31 @@ async def apply_migrations(connection: aiosqlite.Connection) -> None:
     """
 
     await connection.executescript(SCHEMA_SQL)
+    await _ensure_baseline_version(connection)
+    applied_versions = await _applied_versions(connection)
+    for version in sorted(MIGRATION_SQL_BY_VERSION):
+        if version in applied_versions:
+            continue
+        await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+        await connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+            (version,),
+        )
+    await connection.commit()
+
+
+async def _ensure_baseline_version(connection: aiosqlite.Connection) -> None:
+    """Фиксирует baseline-схему как migration version 1."""
+
     await connection.execute(
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
-        (SCHEMA_VERSION,),
+        (1,),
     )
-    await connection.commit()
+
+
+async def _applied_versions(connection: aiosqlite.Connection) -> set[int]:
+    """Читает уже применённые версии миграций."""
+
+    cursor = await connection.execute("SELECT version FROM schema_migrations")
+    rows = await cursor.fetchall()
+    return {int(row[0]) for row in rows}
