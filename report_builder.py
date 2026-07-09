@@ -7,10 +7,8 @@ from dataclasses import dataclass
 from html import escape
 from typing import Final
 
-from composition_sync import CompositionSyncResult
-from composition_sync import CompositionDiffItem
-from cwl_sync import CwlSheetSyncResult
-from cwl_sync import CwlDiffItem
+from composition_sync import CompositionDiffItem, CompositionSyncResult
+from cwl_sync import CwlDiffItem, CwlSheetSyncResult
 from repositories import SyncStatusSummary
 
 TABLE_LINK_TEXT: Final = "Таблица"
@@ -55,10 +53,7 @@ def build_success_report(
 
     if is_baseline:
         return SyncReportPayload(
-            text=(
-                "Первичная синхронизация завершена.\n\n"
-                f"{_table_link(spreadsheet_url)}"
-            ),
+            text=(f"Первичная синхронизация завершена.\n\n{_table_link(spreadsheet_url)}"),
         )
 
     lines = ["Обновление завершено.", ""]
@@ -120,9 +115,7 @@ def _cwl_summary_lines(cwl_result: CwlSheetSyncResult) -> list[str]:
     lines.append(f"Сезон: {season}.")
     lines.append(f"Всего строк: {cwl_result.rows_count}.")
     lines.append(
-        "Изменения: "
-        f"новых {counts.get('added', 0)}, "
-        f"обновлено {counts.get('updated', 0)}."
+        f"Изменения: новых {counts.get('added', 0)}, обновлено {counts.get('updated', 0)}."
     )
     if cwl_result.archived_previous_season:
         lines.append("Сезон сменился, старый CWL архивирован.")
@@ -131,7 +124,9 @@ def _cwl_summary_lines(cwl_result: CwlSheetSyncResult) -> list[str]:
     return lines
 
 
-def _count_items_by_kind(items: tuple[CompositionDiffItem, ...] | tuple[CwlDiffItem, ...]) -> Counter[str]:
+def _count_items_by_kind(
+    items: tuple[CompositionDiffItem, ...] | tuple[CwlDiffItem, ...],
+) -> Counter[str]:
     """Считает diff items по kind."""
 
     return Counter(item.kind for item in items)
@@ -142,10 +137,12 @@ def _fit_telegram_length(text: str, spreadsheet_url: str) -> str:
 
     if len(text) <= MAX_TELEGRAM_MESSAGE_LENGTH:
         return text
-    suffix = "\n\nОтчёт сокращён. Полный результат смотри в таблице.\n" + _table_link(spreadsheet_url)
+    suffix = "\n\nОтчёт сокращён. Полный результат смотри в таблице.\n" + _table_link(
+        spreadsheet_url
+    )
     ellipsis = "..."
     limit = MAX_TELEGRAM_MESSAGE_LENGTH - len(ellipsis) - len(suffix)
-    return f"{text[:max(limit, 0)].rstrip()}{ellipsis}{suffix}"
+    return f"{text[: max(limit, 0)].rstrip()}{ellipsis}{suffix}"
 
 
 def build_error_report(*, reason: str, spreadsheet_url: str | None = None) -> SyncReportPayload:

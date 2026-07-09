@@ -7,7 +7,6 @@ import pytest
 
 from migrations import SCHEMA_VERSION, apply_migrations
 
-
 NOW = "2026-07-09T12:00:00+00:00"
 
 
@@ -220,8 +219,7 @@ async def test_migration_2_copies_legacy_composition_profile_to_active_and_exite
     )
     rows = await cursor.fetchall()
     state_by_key = {
-        (row["table_type"], row["column_key"]): (row["visible"], row["is_active"])
-        for row in rows
+        (row["table_type"], row["column_key"]): (row["visible"], row["is_active"]) for row in rows
     }
 
     assert ("composition_active", "bot_key") in state_by_key

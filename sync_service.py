@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import httpx
@@ -46,8 +46,12 @@ WRITE_PHASE_PREPARED: Final = "prepared"
 WRITE_PHASE_COMPOSITION_WRITTEN: Final = "composition_written"
 WRITE_PHASE_CWL_WRITTEN: Final = "cwl_written"
 WRITE_PHASE_SQLITE_COMMITTED: Final = "sqlite_committed"
-PARTIAL_SHEET_WRITE_WARNING: Final = "Таблица могла быть частично обновлена. Запустите диагностику и повторите /sync."
-UNEXPECTED_SYNC_ERROR_REASON: Final = "Непредвиденная ошибка во время обновления. Подробности записаны в лог."
+PARTIAL_SHEET_WRITE_WARNING: Final = (
+    "Таблица могла быть частично обновлена. Запустите диагностику и повторите /sync."
+)
+UNEXPECTED_SYNC_ERROR_REASON: Final = (
+    "Непредвиденная ошибка во время обновления. Подробности записаны в лог."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +104,9 @@ class SyncService:
             )
             return
         if not runtime.active_clans:
-            await self._telegram.send_message(chat_id=chat.chat_id, text="Добавьте хотя бы один клан в настройках.")
+            await self._telegram.send_message(
+                chat_id=chat.chat_id, text="Добавьте хотя бы один клан в настройках."
+            )
             return
 
         retry_after = await self._rate_limit_retry_after(chat.chat_id)
@@ -114,7 +120,9 @@ class SyncService:
 
         chat_lock = _lock_for_key(CHAT_SYNC_LOCKS, chat.chat_id)
         if chat_lock.locked():
-            await self._telegram.send_message(chat_id=chat.chat_id, text="Обновление уже выполняется.")
+            await self._telegram.send_message(
+                chat_id=chat.chat_id, text="Обновление уже выполняется."
+            )
             return
 
         async with chat_lock:
@@ -128,7 +136,9 @@ class SyncService:
 
             sheet_lock = _lock_for_key(SHEET_SYNC_LOCKS, runtime.sheet_binding.google_sheet_id)
             if sheet_lock.locked():
-                await self._telegram.send_message(chat_id=chat.chat_id, text="Обновление уже выполняется.")
+                await self._telegram.send_message(
+                    chat_id=chat.chat_id, text="Обновление уже выполняется."
+                )
                 return
 
             async with sheet_lock:
@@ -197,7 +207,9 @@ class SyncService:
                 timeout=httpx.Timeout(SYNC_HTTP_TIMEOUT_SECONDS, connect=10.0),
             ) as http_client:
                 clash_client = ClashClient(self._config.coc_api_token, http_client)
-                sheets_client = SheetsClient(runtime.sheet_binding.google_sheet_id, token_provider, http_client)
+                sheets_client = SheetsClient(
+                    runtime.sheet_binding.google_sheet_id, token_provider, http_client
+                )
 
                 composition_repository = CompositionPlayerStateRepository(self._connection)
                 cwl_repository = CwlRowStateRepository(self._connection)
@@ -279,7 +291,12 @@ class SyncService:
                 )
             except TelegramApiError as exc:
                 logger.warning("sync finished, but telegram report delivery failed: %s", exc)
-        except (ClashApiUnavailableError, GoogleSheetsError, CompositionDataError, CwlDataError) as exc:
+        except (
+            ClashApiUnavailableError,
+            GoogleSheetsError,
+            CompositionDataError,
+            CwlDataError,
+        ) as exc:
             await self._connection.rollback()
             reason = _sync_error_reason(str(exc), write_phase)
             await self._finish_error(
@@ -289,7 +306,7 @@ class SyncService:
                 reason=reason,
                 spreadsheet_url=spreadsheet_url,
             )
-        except Exception as exc:
+        except Exception:
             await self._connection.rollback()
             logger.exception("unexpected sync failure")
             reason = _sync_error_reason(UNEXPECTED_SYNC_ERROR_REASON, write_phase)
@@ -364,8 +381,8 @@ class SyncService:
         except ValueError:
             return 0
         if last_started.tzinfo is None:
-            last_started = last_started.replace(tzinfo=timezone.utc)
-        elapsed = (_utc_now() - last_started.astimezone(timezone.utc)).total_seconds()
+            last_started = last_started.replace(tzinfo=UTC)
+        elapsed = (_utc_now() - last_started.astimezone(UTC)).total_seconds()
         remaining = self._config.sync_cooldown_seconds - int(elapsed)
         return max(remaining, 0)
 
@@ -384,7 +401,7 @@ def _global_semaphore(limit: int) -> asyncio.Semaphore:
     """Возвращает process-local global semaphore."""
 
     global GLOBAL_SEMAPHORE, GLOBAL_SEMAPHORE_LIMIT
-    if GLOBAL_SEMAPHORE is None or GLOBAL_SEMAPHORE_LIMIT != limit:
+    if GLOBAL_SEMAPHORE is None or limit != GLOBAL_SEMAPHORE_LIMIT:
         GLOBAL_SEMAPHORE = asyncio.Semaphore(limit)
         GLOBAL_SEMAPHORE_LIMIT = limit
     return GLOBAL_SEMAPHORE
@@ -410,10 +427,10 @@ def _has_sheet_write_started(write_phase: str) -> bool:
 def _utc_now() -> datetime:
     """Возвращает текущую UTC-дату."""
 
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 def _format_dt(value: datetime) -> str:
     """Форматирует дату для SQLite."""
 
-    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    return value.astimezone(UTC).replace(microsecond=0).isoformat()

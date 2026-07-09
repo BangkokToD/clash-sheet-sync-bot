@@ -65,7 +65,6 @@ class ClashClient:
             "Authorization": f"Bearer {api_token}",
         }
 
-
     async def get_clan(self, clan_tag: str) -> ClanLookupResult:
         """Получает краткую информацию о клане по тегу.
 

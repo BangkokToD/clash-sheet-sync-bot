@@ -6,7 +6,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from models import AppConfig, ColumnProfile, RuntimeChatConfig, SheetBinding, SheetBlock, TrackedClan
+from models import (
+    AppConfig,
+    ColumnProfile,
+    RuntimeChatConfig,
+    SheetBinding,
+    SheetBlock,
+    TrackedClan,
+)
 from repositories import CompositionPlayerState
 from sheets_client import SheetMetadata
 from telegram_access import AdminCheckResult
@@ -385,7 +392,9 @@ class RecordingSheetBlockRepository:
     replace_calls: list[dict[str, Any]] = field(default_factory=list)
     upsert_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    async def list_blocks(self, chat_id: int, sheet_name: str | None = None) -> tuple[SheetBlock, ...]:
+    async def list_blocks(
+        self, chat_id: int, sheet_name: str | None = None
+    ) -> tuple[SheetBlock, ...]:
         """Возвращает сохранённые блоки с фильтром по чату и листу."""
 
         return tuple(

@@ -4,18 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Final
 
-from coc_client import ClashApiUnavailableError, ClashClient
+from coc_client import ClashClient
 from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, table_title
-from models import ColumnProfile, RuntimeChatConfig, SheetBlock, TableType, TrackedClan, normalize_tag
+from models import (
+    ColumnProfile,
+    RuntimeChatConfig,
+    SheetBlock,
+    TableType,
+    TrackedClan,
+    normalize_tag,
+)
 from repositories import (
     CompositionPlayerState,
     CompositionPlayerStateRepository,
     SheetBlockRepository,
 )
-from sheets_client import CellValue, SheetValues, SheetsClient, range_from_start_cell
+from sheets_client import CellValue, SheetsClient, SheetValues, range_from_start_cell
 
 COMPOSITION_PLAYER_KEY_PREFIX: Final = "composition_player:"
 ACTIVE_BLOCK_PREFIX: Final = "composition_active:"
@@ -427,7 +434,9 @@ async def import_current_composition_sheet(
         warnings.extend(block_warnings)
         for player in block_players:
             if player.player_tag in players:
-                warnings.append(f"Дубль строки игрока {player.player_tag} на листе `Состав`; использована первая строка.")
+                warnings.append(
+                    f"Дубль строки игрока {player.player_tag} на листе `Состав`; использована первая строка."
+                )
                 continue
             players[player.player_tag] = player
 
@@ -567,9 +576,13 @@ def _plan_player_states(
         previous = state_by_tag.get(player_tag)
         user_values = _user_values_for(player_tag, previous, imported)
         if previous is None or previous.status == "untracked":
-            diff_items.append(CompositionDiffItem("added", f"Новый игрок: {member.nickname} ({player_tag})."))
+            diff_items.append(
+                CompositionDiffItem("added", f"Новый игрок: {member.nickname} ({player_tag}).")
+            )
         elif previous.status == "exited":
-            diff_items.append(CompositionDiffItem("returned", f"Вернулся: {member.nickname} ({player_tag})."))
+            diff_items.append(
+                CompositionDiffItem("returned", f"Вернулся: {member.nickname} ({player_tag}).")
+            )
         else:
             if previous.clan_tag is not None and previous.clan_tag != member.clan_tag:
                 diff_items.append(
@@ -579,7 +592,9 @@ def _plan_player_states(
                     ),
                 )
             if _technical_changed(previous, member):
-                diff_items.append(CompositionDiffItem("updated", _technical_update_message(previous, member)))
+                diff_items.append(
+                    CompositionDiffItem("updated", _technical_update_message(previous, member))
+                )
 
         planned[player_tag] = PlannedPlayerState(
             player_tag=player_tag,
@@ -599,7 +614,11 @@ def _plan_player_states(
         if previous.status == "active":
             if previous.clan_tag in active_clan_tags:
                 exited_at = detected_at_text
-                diff_items.append(CompositionDiffItem("exited", f"Вышел: {previous.nickname or player_tag} ({player_tag})."))
+                diff_items.append(
+                    CompositionDiffItem(
+                        "exited", f"Вышел: {previous.nickname or player_tag} ({player_tag})."
+                    )
+                )
                 planned[player_tag] = PlannedPlayerState(
                     player_tag=player_tag,
                     status="exited",
@@ -740,7 +759,9 @@ def _parse_imported_block(
                     f"Строка {row_offset} блока {block.block_key}: повреждён __bot_key, fallback по Тегу невозможен.",
                 )
                 continue
-            warnings.append(f"Строка {row_offset} блока {block.block_key}: использован fallback по Тегу.")
+            warnings.append(
+                f"Строка {row_offset} блока {block.block_key}: использован fallback по Тегу."
+            )
             player_tag = fallback_tag
 
         imported.append(
@@ -752,8 +773,7 @@ def _parse_imported_block(
                 nickname=_optional_str_cell(row, system_indexes.get("nickname")),
                 exited_at=_optional_str_cell(row, system_indexes.get("exited_at")),
                 user_values={
-                    column_key: _cell_at(row, index)
-                    for column_key, index in user_indexes.items()
+                    column_key: _cell_at(row, index) for column_key, index in user_indexes.items()
                 },
             ),
         )
@@ -761,7 +781,9 @@ def _parse_imported_block(
     return imported, warnings
 
 
-def _physical_columns(column_profiles: Sequence[ColumnProfile], table_type: TableType) -> tuple[ColumnProfile, ...]:
+def _physical_columns(
+    column_profiles: Sequence[ColumnProfile], table_type: TableType
+) -> tuple[ColumnProfile, ...]:
     """Возвращает физические колонки блока: service + visible non-service.
 
     Args:
@@ -773,17 +795,29 @@ def _physical_columns(column_profiles: Sequence[ColumnProfile], table_type: Tabl
     """
 
     profiles = sorted(
-        (profile for profile in column_profiles if profile.table_type == table_type and profile.is_active),
+        (
+            profile
+            for profile in column_profiles
+            if profile.table_type == table_type and profile.is_active
+        ),
         key=lambda profile: (profile.sort_order, profile.column_key),
     )
-    service = [profile for profile in profiles if profile.column_key == BOT_KEY_COLUMN_KEY and profile.kind == "service"]
+    service = [
+        profile
+        for profile in profiles
+        if profile.column_key == BOT_KEY_COLUMN_KEY and profile.kind == "service"
+    ]
     if not service:
-        raise CompositionDataError(f"Профиль {table_title(table_type)} не содержит service-колонку {BOT_KEY_TITLE}.")
+        raise CompositionDataError(
+            f"Профиль {table_title(table_type)} не содержит service-колонку {BOT_KEY_TITLE}."
+        )
     visible = [profile for profile in profiles if profile.kind != "service" and profile.visible]
     return tuple([service[0], *visible])
 
 
-def _profiles(column_profiles: Sequence[ColumnProfile], table_type: TableType) -> tuple[ColumnProfile, ...]:
+def _profiles(
+    column_profiles: Sequence[ColumnProfile], table_type: TableType
+) -> tuple[ColumnProfile, ...]:
     """Возвращает активные профили одного table_type.
 
     Args:
@@ -845,8 +879,7 @@ def _user_title_to_key(profiles: Sequence[ColumnProfile], warnings: list[str]) -
         previous = result.get(profile.title)
         if previous is not None:
             warnings.append(
-                f"Дублирующийся заголовок user-колонки `{profile.title}`; "
-                "импорт неоднозначен.",
+                f"Дублирующийся заголовок user-колонки `{profile.title}`; импорт неоднозначен.",
             )
             continue
         result[profile.title] = profile.column_key
@@ -868,7 +901,9 @@ def _build_block_values(
         [column.title for column in columns],
     ]
     for row_number, state in enumerate(states, start=1):
-        values.append(_state_to_row(row_number=row_number, state=state, columns=columns, is_exited=is_exited))
+        values.append(
+            _state_to_row(row_number=row_number, state=state, columns=columns, is_exited=is_exited)
+        )
     if len(values) == TITLE_ROWS_COUNT:
         values.append(["" for _ in columns])
     return values
@@ -904,12 +939,18 @@ def _state_to_row(
     return row
 
 
-def _sorted_active_states(states: Iterable[PlannedPlayerState], clan_tag: str) -> list[PlannedPlayerState]:
+def _sorted_active_states(
+    states: Iterable[PlannedPlayerState], clan_tag: str
+) -> list[PlannedPlayerState]:
     """Сортирует active rows внутри клана."""
 
     return sorted(
         (state for state in states if state.status == "active" and state.clan_tag == clan_tag),
-        key=lambda state: (-(state.town_hall or 0), (state.nickname or "").lower(), state.player_tag),
+        key=lambda state: (
+            -(state.town_hall or 0),
+            (state.nickname or "").lower(),
+            state.player_tag,
+        ),
     )
 
 
@@ -974,7 +1015,9 @@ async def _format_composition_sheet(
         return
     sheet_id = runtime_config.sheet_binding.composition_sheet_id
     if sheet_id is None:
-        metadata = await sheets_client.get_sheet_metadata(runtime_config.sheet_binding.composition_sheet_name)
+        metadata = await sheets_client.get_sheet_metadata(
+            runtime_config.sheet_binding.composition_sheet_name
+        )
         sheet_id = metadata.sheet_id
     requests = _build_composition_format_requests(sheet_id=sheet_id, built_blocks=built_blocks)
     await sheets_client.batch_update_spreadsheet(requests)
@@ -1046,7 +1089,9 @@ async def _hide_bot_key_columns(
 
     sheet_id = runtime_config.sheet_binding.composition_sheet_id
     if sheet_id is None:
-        metadata = await sheets_client.get_sheet_metadata(runtime_config.sheet_binding.composition_sheet_name)
+        metadata = await sheets_client.get_sheet_metadata(
+            runtime_config.sheet_binding.composition_sheet_name
+        )
         sheet_id = metadata.sheet_id
     hidden_columns: set[int] = set()
     for built_block in built_blocks:
@@ -1198,13 +1243,13 @@ def _is_exited_block_key(block_key: str) -> bool:
 
 def _clan_tag_from_block_key(block_key: str) -> str | None:
     if not block_key.startswith(ACTIVE_BLOCK_PREFIX):
-
         return None
     raw_tag = block_key.removeprefix(ACTIVE_BLOCK_PREFIX)
     try:
         return normalize_tag(raw_tag)
     except ValueError:
         return None
+
 
 def _bot_key(player_tag: str) -> str:
     return f"{COMPOSITION_PLAYER_KEY_PREFIX}{player_tag}"
@@ -1229,6 +1274,7 @@ def _fallback_tag_from_row(row: Sequence[str], system_indexes: dict[str, int]) -
     except ValueError:
         return None
 
+
 def _user_values_for(
     player_tag: str,
     previous: CompositionPlayerState | None,
@@ -1252,6 +1298,7 @@ def _technical_update_message(previous: CompositionPlayerState, member: CurrentC
     if previous.nickname != member.nickname:
         changes.append(f"ник {previous.nickname or '-'} → {member.nickname}")
     return f"Обновлён: {member.player_tag} ({', '.join(changes)})."
+
 
 def _member_tag(raw_member: dict[str, Any]) -> str:
 
@@ -1283,6 +1330,7 @@ def _cell_at(row: Sequence[str], index: int) -> str:
         return ""
     return row[index]
 
+
 def _optional_str_cell(row: Sequence[str], index: int | None) -> str | None:
     if index is None:
         return None
@@ -1300,6 +1348,7 @@ def _optional_int_cell(row: Sequence[str], index: int | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
 
 def _string_row(row: Sequence[CellValue]) -> list[str]:
 
@@ -1352,5 +1401,5 @@ def _number_to_column(number: int) -> str:
 
 def _format_dt(value: datetime) -> str:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).replace(microsecond=0).isoformat()

@@ -214,7 +214,6 @@ class SheetsClient:
             sheets=tuple(_parse_sheet_metadata(raw_sheet) for raw_sheet in sheets),
         )
 
-
     async def get_sheet_metadata(self, sheet_name: str) -> SheetMetadata:
         """Читает метаданные листа.
 
@@ -538,7 +537,9 @@ class SheetsClient:
             ],
         )
 
-    async def write_values(self, sheet_name: str, range_a1: str, values: Sequence[Sequence[CellValue]]) -> None:
+    async def write_values(
+        self, sheet_name: str, range_a1: str, values: Sequence[Sequence[CellValue]]
+    ) -> None:
         """Записывает один диапазон значений с `RAW`.
 
         Args:

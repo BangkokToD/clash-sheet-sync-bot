@@ -115,8 +115,6 @@ class CwlRowState:
     row_hash: str | None
 
 
-
-
 @dataclass(frozen=True, slots=True)
 class TransferToken:
     """Одноразовый токен переноса таблицы на другой чат.
@@ -262,7 +260,9 @@ class RuntimeConfigRepository:
             google_sheet_id=as_str(row["google_sheet_id"], "google_sheet_id"),
             spreadsheet_url=as_str(row["spreadsheet_url"], "spreadsheet_url"),
             composition_sheet_name=as_str(row["composition_sheet_name"], "composition_sheet_name"),
-            composition_sheet_id=as_optional_int(row["composition_sheet_id"], "composition_sheet_id"),
+            composition_sheet_id=as_optional_int(
+                row["composition_sheet_id"], "composition_sheet_id"
+            ),
             active_cwl_sheet_name=as_str(row["active_cwl_sheet_name"], "active_cwl_sheet_name"),
             active_cwl_sheet_id=as_optional_int(row["active_cwl_sheet_id"], "active_cwl_sheet_id"),
             active_cwl_season=as_optional_str(row["active_cwl_season"], "active_cwl_season"),
@@ -600,7 +600,9 @@ class ColumnProfileRepository:
                 ),
             )
 
-    async def list_columns(self, *, chat_id: int, table_type: TableType) -> tuple[ColumnProfile, ...]:
+    async def list_columns(
+        self, *, chat_id: int, table_type: TableType
+    ) -> tuple[ColumnProfile, ...]:
         """Читает активные колонки одного профиля."""
 
         rows = await fetch_all(
@@ -1151,8 +1153,12 @@ class TelegramChatRepository:
         return SyncStatusSummary(
             chat_id=as_int(row["chat_id"], "chat_id"),
             status=as_chat_status(row["status"]),
-            last_sync_started_at=as_optional_str(row["last_sync_started_at"], "last_sync_started_at"),
-            last_sync_finished_at=as_optional_str(row["last_sync_finished_at"], "last_sync_finished_at"),
+            last_sync_started_at=as_optional_str(
+                row["last_sync_started_at"], "last_sync_started_at"
+            ),
+            last_sync_finished_at=as_optional_str(
+                row["last_sync_finished_at"], "last_sync_finished_at"
+            ),
             last_sync_status=as_optional_str(row["last_sync_status"], "last_sync_status"),
             last_sync_error=as_optional_str(row["last_sync_error"], "last_sync_error"),
             active_clans_count=as_int(row["active_clans_count"], "active_clans_count"),
@@ -1321,7 +1327,6 @@ class SheetBindingRepository:
             ),
         )
 
-
     async def update_active_cwl_binding(
         self,
         *,
@@ -1352,8 +1357,6 @@ class SheetBindingRepository:
             """,
             (active_cwl_sheet_name, active_cwl_sheet_id, active_cwl_season, now, chat_id),
         )
-
-
 
     async def update_sheet_ids(
         self,
@@ -1440,6 +1443,7 @@ class SheetBindingRepository:
             (target_chat_id, now, source_chat_id),
         )
 
+
 class SheetBlockRepository:
     """Repository последних управляемых прямоугольников Google Sheets.
 
@@ -1450,7 +1454,9 @@ class SheetBlockRepository:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
 
-    async def list_blocks(self, chat_id: int, sheet_name: str | None = None) -> tuple[SheetBlock, ...]:
+    async def list_blocks(
+        self, chat_id: int, sheet_name: str | None = None
+    ) -> tuple[SheetBlock, ...]:
         """Читает последние записанные блоки чата."""
 
         sql = """
@@ -1511,7 +1517,6 @@ class SheetBlockRepository:
                 updated_at,
             ),
         )
-
 
     async def replace_blocks_by_prefixes(
         self,
@@ -1641,7 +1646,6 @@ class CompositionPlayerStateRepository:
         )
 
 
-
 class CwlRowStateRepository:
     """Repository состояния CWL-строк.
 
@@ -1751,8 +1755,6 @@ class CwlRowStateRepository:
                 row_hash,
             ),
         )
-
-
 
 
 class TransferTokenRepository:
@@ -1867,6 +1869,7 @@ class ChatLifecycleRepository:
             (now, target_chat_id),
         )
 
+
 class SyncRunRepository:
     """Repository для истории запусков `/sync`.
 
@@ -1973,7 +1976,6 @@ async def fetch_all(
     cursor = await connection.execute(sql, parameters)
     rows = await cursor.fetchall()
     return tuple(rows)
-
 
 
 def _row_to_cwl_row_state(row: aiosqlite.Row) -> CwlRowState:
@@ -2116,7 +2118,6 @@ def as_composition_player_status(value: Any) -> CompositionPlayerStatus:
     if raw not in {"active", "exited", "untracked"}:
         raise RepositoryError(f"Некорректный status игрока состава: {raw}.")
     return cast(CompositionPlayerStatus, raw)
-
 
 
 def as_json_dict(value: Any, field_name: str) -> dict[str, object]:

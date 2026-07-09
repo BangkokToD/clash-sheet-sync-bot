@@ -165,4 +165,3 @@ def test_build_success_report_truncates_long_report() -> None:
     assert len(payload.text) <= MAX_TELEGRAM_MESSAGE_LENGTH
     assert "Отчёт сокращён. Полный результат смотри в таблице." in payload.text
     assert payload.text.endswith('<a href="https://example.com/sheet">Таблица</a>')
-    

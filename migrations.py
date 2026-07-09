@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import aiosqlite
 from typing import Final
+
+import aiosqlite
 
 SCHEMA_VERSION: Final = 2
 

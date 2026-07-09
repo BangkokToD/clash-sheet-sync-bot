@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Final
 
 from models import SheetBinding, SheetBlock
@@ -212,17 +212,23 @@ class SheetAdminService:
         if composition_sheet is None:
             issues.append(TableDiagnosticIssue("error", "Лист Состав отсутствует.", True))
         else:
-            issues.append(TableDiagnosticIssue("ok", f"Лист Состав найден: {composition_sheet.title}."))
+            issues.append(
+                TableDiagnosticIssue("ok", f"Лист Состав найден: {composition_sheet.title}.")
+            )
 
         if binding.active_cwl_sheet_id is None:
-            issues.append(TableDiagnosticIssue("error", "active_cwl_sheet_id отсутствует в SQLite.", True))
+            issues.append(
+                TableDiagnosticIssue("error", "active_cwl_sheet_id отсутствует в SQLite.", True)
+            )
         cwl_sheet = _sheet_by_id(metadata.sheets, binding.active_cwl_sheet_id)
         if cwl_sheet is None:
             cwl_sheet = sheets_by_title.get(binding.active_cwl_sheet_name)
         if cwl_sheet is None:
             issues.append(TableDiagnosticIssue("error", "Активный лист CWL отсутствует.", True))
         else:
-            issues.append(TableDiagnosticIssue("ok", f"Активный лист CWL найден: {cwl_sheet.title}."))
+            issues.append(
+                TableDiagnosticIssue("ok", f"Активный лист CWL найден: {cwl_sheet.title}.")
+            )
 
         bot_state_sheet = _sheet_by_id(metadata.sheets, binding.bot_state_sheet_id)
         if bot_state_sheet is None:
@@ -256,15 +262,15 @@ class SheetAdminService:
 
         issues.extend(await self._diagnose_bot_key_blocks(blocks))
         staging_sheets = tuple(
-            sheet.title
-            for sheet in metadata.sheets
-            if sheet.title.startswith("CWL - staging - ")
+            sheet.title for sheet in metadata.sheets if sheet.title.startswith("CWL - staging - ")
         )
         if staging_sheets:
             issues.append(
                 TableDiagnosticIssue(
                     "warning",
-                    "Найдены staging-листы после прошлых ошибок: " + ", ".join(staging_sheets) + ".",
+                    "Найдены staging-листы после прошлых ошибок: "
+                    + ", ".join(staging_sheets)
+                    + ".",
                     False,
                 ),
             )
@@ -341,11 +347,7 @@ class SheetAdminService:
     ) -> tuple[TableDiagnosticIssue, ...]:
         """Проверяет наличие `__bot_key` в управляемых табличных блоках."""
 
-        table_blocks = [
-            block
-            for block in blocks
-            if not block.block_key.startswith("cwl_message:")
-        ]
+        table_blocks = [block for block in blocks if not block.block_key.startswith("cwl_message:")]
         if not table_blocks:
             return (
                 TableDiagnosticIssue(
@@ -533,7 +535,8 @@ def _utc_now_iso() -> str:
         ISO-дата с timezone offset.
     """
 
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
 
 def _sheet_by_id(sheets: Sequence[SheetMetadata], sheet_id: int | None) -> SheetMetadata | None:
     """Ищет лист по числовому ID."""

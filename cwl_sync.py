@@ -9,19 +9,26 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from coc_client import ClashApiUnavailableError, ClashClient, ClashCwlNotInProgressError
 from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE
-from models import ColumnProfile, RuntimeChatConfig, SheetBlock, TableType, TrackedClan, normalize_tag
+from models import (
+    ColumnProfile,
+    RuntimeChatConfig,
+    SheetBlock,
+    TableType,
+    TrackedClan,
+    normalize_tag,
+)
 from repositories import (
     CwlRowState,
     CwlRowStateRepository,
     SheetBindingRepository,
     SheetBlockRepository,
 )
-from sheets_client import CellValue, SheetMetadata, SheetValues, SheetsClient, range_from_start_cell
+from sheets_client import CellValue, SheetMetadata, SheetsClient, SheetValues, range_from_start_cell
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +446,7 @@ async def apply_public_cwl_sync(
         diff_items=prepared.diff_items,
     )
 
+
 async def import_current_cwl_sheet(
     *,
     runtime_config: RuntimeChatConfig,
@@ -603,9 +611,7 @@ async def _prepare_cwl_data(
 
     league_groups = await _load_league_groups(runtime_config.active_clans, clash_client)
     participating_groups = {
-        clan_tag: group
-        for clan_tag, group in league_groups.items()
-        if group is not None
+        clan_tag: group for clan_tag, group in league_groups.items() if group is not None
     }
     not_in_progress_clans = tuple(
         clan for clan in runtime_config.active_clans if league_groups.get(clan.clan_tag) is None
@@ -627,7 +633,8 @@ async def _prepare_cwl_data(
     cwl_blocks = tuple(
         block
         for block in previous_blocks
-        if block.block_key.startswith(CWL_BLOCK_PREFIX) or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
+        if block.block_key.startswith(CWL_BLOCK_PREFIX)
+        or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
     )
     imported = await import_current_cwl_sheet(
         runtime_config=runtime_config,
@@ -707,11 +714,14 @@ async def _rewrite_active_cwl_sheet(
         columns=columns,
         built_blocks=built_blocks,
     )
-    previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, active_sheet.title)
+    previous_blocks = await sheet_block_repository.list_blocks(
+        runtime_config.chat_id, active_sheet.title
+    )
     previous_cwl_blocks = tuple(
         block
         for block in previous_blocks
-        if block.block_key.startswith(CWL_BLOCK_PREFIX) or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
+        if block.block_key.startswith(CWL_BLOCK_PREFIX)
+        or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
     )
     await _rewrite_cwl_values(
         sheets_client=sheets_client,
@@ -778,7 +788,9 @@ async def _write_cwl_with_staging_archive(
     metadata = await sheets_client.get_spreadsheet_metadata()
     archive_title = _unique_sheet_title(
         base_title=f"{CWL_ARCHIVE_SHEET_PREFIX}{old_season}",
-        existing_titles={sheet.title for sheet in metadata.sheets if sheet.sheet_id != old_active.sheet_id},
+        existing_titles={
+            sheet.title for sheet in metadata.sheets if sheet.sheet_id != old_active.sheet_id
+        },
     )
     await sheets_client.rename_sheet(old_active.sheet_id, archive_title)
     await sheets_client.rename_sheet(staging.sheet_id, CWL_ACTIVE_SHEET_NAME)
@@ -811,10 +823,7 @@ async def _rewrite_cwl_values(
                     rows_count=block.rows_count,
                     columns_count=block.columns_count,
                 ),
-                values=[
-                    ["" for _ in range(block.columns_count)]
-                    for _ in range(block.rows_count)
-                ],
+                values=[["" for _ in range(block.columns_count)] for _ in range(block.rows_count)],
             ),
         )
     updates.append(
@@ -881,8 +890,7 @@ def _resolve_cwl_season(
     """
 
     season_by_clan_tag = {
-        clan_tag: _require_str(group, "season", "leaguegroup")
-        for clan_tag, group in groups.items()
+        clan_tag: _require_str(group, "season", "leaguegroup") for clan_tag, group in groups.items()
     }
     seasons = set(season_by_clan_tag.values())
     if not seasons:
@@ -898,9 +906,7 @@ def _resolve_cwl_season(
         details.append(f"{clan.clan_name} | {clan.clan_tag}: {season}")
 
     raise CwlSeasonMismatchError(
-        "CWL-сезоны активных кланов не совпадают: "
-        + "; ".join(details)
-        + ".",
+        "CWL-сезоны активных кланов не совпадают: " + "; ".join(details) + ".",
     )
 
 
@@ -986,6 +992,7 @@ def _build_cwl_clan_blocks(
             ),
         )
     return tuple(blocks)
+
 
 def _build_clan_rows(
     *,
@@ -1240,7 +1247,9 @@ def _parse_cwl_values(
         profiles = _profiles(runtime_config.column_profiles)
         user_indexes = _user_indexes_from_header(profiles, header_row, header.column_index)
 
-        for row_offset, row in enumerate(rows[header.row_index + 1 : next_row], start=header.row_index + 2):
+        for row_offset, row in enumerate(
+            rows[header.row_index + 1 : next_row], start=header.row_index + 2
+        ):
             parsed = _parse_imported_row(
                 row=row,
                 header=header,
@@ -1277,7 +1286,9 @@ def _find_table_headers(
             normalized = cell.strip()
             if normalized != BOT_KEY_TITLE and normalized not in SYSTEM_HEADER_ALIASES["round"]:
                 continue
-            start_column_index = column_index if normalized == BOT_KEY_TITLE else max(column_index - 1, 0)
+            start_column_index = (
+                column_index if normalized == BOT_KEY_TITLE else max(column_index - 1, 0)
+            )
             position = (row_index, start_column_index)
             if position in seen_positions:
                 continue
@@ -1359,10 +1370,7 @@ def _parse_imported_row(
 
     bot_key = _cell_at(row, header.column_index)
     exact_key = _row_key_from_bot_key(bot_key)
-    user_values = {
-        column_key: _cell_at(row, index)
-        for column_key, index in user_indexes.items()
-    }
+    user_values = {column_key: _cell_at(row, index) for column_key, index in user_indexes.items()}
 
     if exact_key is not None:
         return CwlImportedRow(row_key=exact_key, user_values=user_values)
@@ -1536,9 +1544,15 @@ def _new_cwl_row_message(row: CwlPlannedRow) -> str:
     technical = row.technical_values
     if row.marker == NO_ATTACK_MARKER:
         return f"Без атаки: {technical.attacker_name} | Раунд {technical.round_number}."
-    target = format_town_hall(technical.defender_town_hall) if technical.defender_town_hall is not None else "-"
+    target = (
+        format_town_hall(technical.defender_town_hall)
+        if technical.defender_town_hall is not None
+        else "-"
+    )
     stars = technical.stars if technical.stars is not None else "-"
-    destruction = technical.destruction_percentage if technical.destruction_percentage is not None else "-"
+    destruction = (
+        technical.destruction_percentage if technical.destruction_percentage is not None else "-"
+    )
     return f"Атака: {technical.attacker_name} → {target} | {stars}⭐ {destruction}%."
 
 
@@ -1548,9 +1562,15 @@ def _updated_cwl_row_message(row: CwlPlannedRow) -> str:
     technical = row.technical_values
     if row.marker == NO_ATTACK_MARKER:
         return f"Без атаки обновлено: {technical.attacker_name} | Раунд {technical.round_number}."
-    target = format_town_hall(technical.defender_town_hall) if technical.defender_town_hall is not None else "-"
+    target = (
+        format_town_hall(technical.defender_town_hall)
+        if technical.defender_town_hall is not None
+        else "-"
+    )
     stars = technical.stars if technical.stars is not None else "-"
-    destruction = technical.destruction_percentage if technical.destruction_percentage is not None else "-"
+    destruction = (
+        technical.destruction_percentage if technical.destruction_percentage is not None else "-"
+    )
     return f"Атака обновлена: {technical.attacker_name} → {target} | {stars}⭐ {destruction}%."
 
 
@@ -1558,7 +1578,11 @@ def _physical_columns(column_profiles: Sequence[ColumnProfile]) -> tuple[ColumnP
     """Возвращает физические CWL-колонки: service + visible non-service."""
 
     profiles = sorted(
-        (profile for profile in column_profiles if profile.table_type == CWL_TABLE and profile.is_active),
+        (
+            profile
+            for profile in column_profiles
+            if profile.table_type == CWL_TABLE and profile.is_active
+        ),
         key=lambda profile: (profile.sort_order, profile.column_key),
     )
     service = [
@@ -1584,10 +1608,7 @@ def _build_cwl_table_values(
         _title_row(title, len(columns)),
         [column.title for column in columns],
     ]
-    values.extend(
-        _cwl_row_to_values(row=row, columns=columns)
-        for row in clan_block.rows
-    )
+    values.extend(_cwl_row_to_values(row=row, columns=columns) for row in clan_block.rows)
     if len(values) == TITLE_ROWS_COUNT:
         values.append(_empty_row(len(columns)))
     return values
@@ -1627,11 +1648,19 @@ def _cwl_row_to_values(*, row: CwlPlannedRow, columns: Sequence[ColumnProfile]) 
         elif column.column_key == "attacker_town_hall":
             values.append(format_town_hall(technical.attacker_town_hall))
         elif column.column_key == "defender_town_hall":
-            values.append(format_town_hall(technical.defender_town_hall) if technical.defender_town_hall is not None else "")
+            values.append(
+                format_town_hall(technical.defender_town_hall)
+                if technical.defender_town_hall is not None
+                else ""
+            )
         elif column.column_key == "stars":
             values.append(technical.stars if technical.stars is not None else "")
         elif column.column_key == "destruction_percentage":
-            values.append(technical.destruction_percentage if technical.destruction_percentage is not None else "")
+            values.append(
+                technical.destruction_percentage
+                if technical.destruction_percentage is not None
+                else ""
+            )
         else:
             values.append("")
     return values
@@ -1732,7 +1761,11 @@ def _build_cwl_format_requests(
                             built_block.block,
                             row_offset=2 + data_row_offset,
                         ),
-                        {"userEnteredFormat": {"backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}}},
+                        {
+                            "userEnteredFormat": {
+                                "backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}
+                            }
+                        },
                         "userEnteredFormat.backgroundColorStyle",
                     ),
                 )
@@ -2303,4 +2336,4 @@ def _require_dict(data: JsonObject, key: str, context: str) -> JsonObject:
 def _utc_now_iso() -> str:
     """Возвращает текущую UTC-дату."""
 
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()

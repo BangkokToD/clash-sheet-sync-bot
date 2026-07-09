@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import aiosqlite
 import pytest
-
 from fakes import FakeTelegram, RecordingAccessService, make_app_config
+
 from setup_flow import (
     AWAITING_CLAN_TAG_STATE_PREFIX,
     AWAITING_COLUMN_RENAME_STATE_PREFIX,

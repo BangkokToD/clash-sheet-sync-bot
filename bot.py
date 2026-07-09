@@ -291,7 +291,6 @@ class BotApp:
         )
 
 
-
 def _extract_command(raw_text: object, bot_username: str | None) -> TelegramCommand | None:
     """Извлекает Telegram-команду из текста сообщения.
 

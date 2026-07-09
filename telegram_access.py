@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import aiosqlite
 
@@ -114,8 +114,8 @@ class TelegramAccessService:
             return False
 
         if checked_at.tzinfo is None:
-            checked_at = checked_at.replace(tzinfo=timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - checked_at).total_seconds()
+            checked_at = checked_at.replace(tzinfo=UTC)
+        age_seconds = (datetime.now(UTC) - checked_at).total_seconds()
         return 0 <= age_seconds <= self._admin_cache_ttl_seconds
 
 
@@ -126,4 +126,4 @@ def _utc_now_iso() -> str:
         ISO-дата с timezone offset.
     """
 
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()

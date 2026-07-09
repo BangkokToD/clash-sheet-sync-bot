@@ -46,17 +46,23 @@ class ColumnDefinition:
 
 
 DEFAULT_COLUMN_DEFINITIONS: Final[tuple[ColumnDefinition, ...]] = (
-    ColumnDefinition("composition_active", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
+    ColumnDefinition(
+        "composition_active", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0
+    ),
     ColumnDefinition("composition_active", "number", "№", True, "system", "integer", 10),
     ColumnDefinition("composition_active", "tag", "Тег", True, "system", "string", 20),
     ColumnDefinition("composition_active", "town_hall", "Ратуша", True, "system", "integer", 30),
     ColumnDefinition("composition_active", "nickname", "Никнейм", True, "system", "string", 40),
-    ColumnDefinition("composition_exited", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
+    ColumnDefinition(
+        "composition_exited", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0
+    ),
     ColumnDefinition("composition_exited", "number", "№", True, "system", "integer", 10),
     ColumnDefinition("composition_exited", "tag", "Тег", True, "system", "string", 20),
     ColumnDefinition("composition_exited", "town_hall", "Ратуша", True, "system", "integer", 30),
     ColumnDefinition("composition_exited", "nickname", "Никнейм", True, "system", "string", 40),
-    ColumnDefinition("composition_exited", "exited_at", "Дата выхода", True, "system", "datetime", 50),
+    ColumnDefinition(
+        "composition_exited", "exited_at", "Дата выхода", True, "system", "datetime", 50
+    ),
     ColumnDefinition("cwl", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
     ColumnDefinition("cwl", "round", "Раунд", True, "system", "integer", 10),
     ColumnDefinition("cwl", "attacker_tag", "Тег", True, "system", "string", 20),
@@ -64,7 +70,9 @@ DEFAULT_COLUMN_DEFINITIONS: Final[tuple[ColumnDefinition, ...]] = (
     ColumnDefinition("cwl", "attacker_town_hall", "ТХ", True, "system", "string", 40),
     ColumnDefinition("cwl", "defender_town_hall", "ТХ соперника", True, "system", "string", 50),
     ColumnDefinition("cwl", "stars", "Звезды", True, "system", "integer", 60),
-    ColumnDefinition("cwl", "destruction_percentage", "Процент разрушений", True, "system", "integer", 70),
+    ColumnDefinition(
+        "cwl", "destruction_percentage", "Процент разрушений", True, "system", "integer", 70
+    ),
 )
 
 
@@ -121,7 +129,9 @@ def normalize_column_title(value: str) -> str:
     if title == "":
         raise ValueError("Название колонки не может быть пустым.")
     if len(title) > MAX_COLUMN_TITLE_LENGTH:
-        raise ValueError(f"Название колонки не должно быть длиннее {MAX_COLUMN_TITLE_LENGTH} символов.")
+        raise ValueError(
+            f"Название колонки не должно быть длиннее {MAX_COLUMN_TITLE_LENGTH} символов."
+        )
     return title
 
 

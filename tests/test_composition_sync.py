@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
+from fakes import (
+    FakeSheetsClient,
+    RecordingCompositionRepository,
+    RecordingSheetBlockRepository,
+    make_composition_state,
+    make_runtime_config,
+    make_sheet_block,
+    make_tracked_clan,
+)
 
 from composition_sync import (
     CompositionDiffItem,
@@ -17,17 +26,8 @@ from composition_sync import (
     apply_prepared_composition_sync,
     build_composition_blocks,
 )
-from fakes import (
-    FakeSheetsClient,
-    RecordingCompositionRepository,
-    RecordingSheetBlockRepository,
-    make_composition_state,
-    make_runtime_config,
-    make_sheet_block,
-    make_tracked_clan,
-)
 
-DETECTED_AT = datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone.utc)
+DETECTED_AT = datetime(2026, 7, 9, 12, 0, 0, tzinfo=UTC)
 DETECTED_AT_TEXT = "2026-07-09T12:00:00+00:00"
 
 

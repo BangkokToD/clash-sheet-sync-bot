@@ -7,11 +7,11 @@ from typing import Any
 
 import aiosqlite
 import pytest
+from fakes import FakeTelegram, make_app_config
 
 import sync_service
 from composition_sync import PreparedCompositionSync
 from cwl_sync import CwlPreparedData
-from fakes import FakeTelegram, make_app_config
 from sheets_client import GoogleSheetsWriteError
 from sync_service import (
     PARTIAL_SHEET_WRITE_WARNING,
@@ -184,7 +184,9 @@ def _patch_successful_sync_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sync_service, "GoogleAccessTokenProvider", lambda _: object())
     monkeypatch.setattr(sync_service, "prepare_composition_sync", _successful_prepare_composition)
     monkeypatch.setattr(sync_service, "prepare_public_cwl_sync", _successful_prepare_cwl)
-    monkeypatch.setattr(sync_service, "apply_prepared_composition_sync", _successful_apply_composition)
+    monkeypatch.setattr(
+        sync_service, "apply_prepared_composition_sync", _successful_apply_composition
+    )
     monkeypatch.setattr(sync_service, "apply_public_cwl_sync", _successful_apply_cwl)
 
 
