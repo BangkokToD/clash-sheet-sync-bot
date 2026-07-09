@@ -1,8 +1,61 @@
+# Env / secrets
 .env
+.env.*
+!.env.example
 credentials.json
+credentials*.json
+service-account*.json
+*.pem
+*.key
+
+# SQLite runtime DB
+bot.db
+bot.db-shm
+bot.db-wal
+bot.db.backup.*
+bot.db-shm.backup.*
+bot.db-wal.backup.*
+*.sqlite
+*.sqlite3
+
+# Legacy/local runtime files
 sync_settings.json
+outputs/
+runtime/
+tmp/
+temp/
+
+# Logs
 *.log
+logs/
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
 .venv/
+venv/
+env/
+
+# Tool caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local patch/diff scratch
+*.patch
+*.diff
