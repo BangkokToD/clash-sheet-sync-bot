@@ -1320,7 +1320,6 @@ def _technical_update_message(previous: CompositionPlayerState, member: CurrentC
 
 
 def _member_tag(raw_member: dict[str, Any]) -> str:
-
     value = raw_member.get("tag")
     if not isinstance(value, str):
         raise CompositionDataError("CoC API вернул участника без tag.")
@@ -1370,7 +1369,6 @@ def _optional_int_cell(row: Sequence[str], index: int | None) -> int | None:
 
 
 def _string_row(row: Sequence[CellValue]) -> list[str]:
-
     return [_cell_to_str(cell) for cell in row]
 
 
