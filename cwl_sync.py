@@ -9,11 +9,11 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any, Final
 
 from coc_client import ClashApiUnavailableError, ClashClient, ClashCwlNotInProgressError
 from column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE
+from common_time import utc_now_iso as _utc_now_iso
 from models import (
     ColumnProfile,
     RuntimeChatConfig,
@@ -27,6 +27,21 @@ from repositories import (
     CwlRowStateRepository,
     SheetBindingRepository,
     SheetBlockRepository,
+)
+from sheet_ranges import (
+    column_to_number as _shared_column_to_number,
+)
+from sheet_ranges import (
+    grid_range_from_start_cell as _shared_grid_range_from_start_cell,
+)
+from sheet_ranges import (
+    number_to_column as _shared_number_to_column,
+)
+from sheet_ranges import (
+    offset_cell as _shared_offset_cell,
+)
+from sheet_ranges import (
+    parse_a1_cell as _shared_parse_a1_cell,
 )
 from sheets_client import CellValue, SheetMetadata, SheetsClient, SheetValues, range_from_start_cell
 
@@ -2191,21 +2206,24 @@ def _grid_range_from_start_cell(
 ) -> JsonObject:
     """Строит GridRange по start cell и размеру."""
 
-    start_column_number, start_row = _parse_a1_cell(start_cell)
-    return {
-        "sheetId": sheet_id,
-        "startRowIndex": start_row - 1,
-        "endRowIndex": start_row - 1 + rows_count,
-        "startColumnIndex": start_column_number - 1,
-        "endColumnIndex": start_column_number - 1 + columns_count,
-    }
+    return _shared_grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=start_cell,
+        rows_count=rows_count,
+        columns_count=columns_count,
+        error_cls=CwlDataError,
+    )
 
 
 def _offset_cell(start_cell: str, *, row_offset: int, column_offset: int) -> str:
     """Сдвигает A1-ячейку."""
 
-    start_column_number, start_row = _parse_a1_cell(start_cell)
-    return f"{_number_to_column(start_column_number + column_offset)}{start_row + row_offset}"
+    return _shared_offset_cell(
+        start_cell,
+        row_offset=row_offset,
+        column_offset=column_offset,
+        error_cls=CwlDataError,
+    )
 
 
 def _row_number_from_start_cell(start_cell: str) -> int:
@@ -2218,39 +2236,19 @@ def _row_number_from_start_cell(start_cell: str) -> int:
 def _parse_a1_cell(cell: str) -> tuple[int, int]:
     """Парсит A1-ячейку."""
 
-    column = ""
-    row = ""
-    for char in cell.strip():
-        if char.isalpha():
-            column += char
-        elif char.isdigit():
-            row += char
-        else:
-            raise CwlDataError(f"Некорректная A1-ячейка: {cell}.")
-    if column == "" or row == "":
-        raise CwlDataError(f"Некорректная A1-ячейка: {cell}.")
-    return _column_to_number(column), int(row)
+    return _shared_parse_a1_cell(cell, error_cls=CwlDataError)
 
 
 def _column_to_number(column: str) -> int:
     """Преобразует имя колонки в номер."""
 
-    number = 0
-    for char in column.upper():
-        number = number * 26 + ord(char) - ord("A") + 1
-    return number
+    return _shared_column_to_number(column)
 
 
 def _number_to_column(number: int) -> str:
     """Преобразует номер колонки в имя."""
 
-    if number <= 0:
-        raise CwlDataError("Номер колонки должен быть положительным.")
-    chars: list[str] = []
-    while number > 0:
-        number, remainder = divmod(number - 1, 26)
-        chars.append(chr(ord("A") + remainder))
-    return "".join(reversed(chars))
+    return _shared_number_to_column(number, error_cls=CwlDataError)
 
 
 def _json_str(data: JsonObject, key: str) -> str:
@@ -2331,9 +2329,3 @@ def _require_dict(data: JsonObject, key: str, context: str) -> JsonObject:
     if not isinstance(value, dict):
         raise ClashApiUnavailableError(f"{context}: поле {key} должно быть объектом.")
     return value
-
-
-def _utc_now_iso() -> str:
-    """Возвращает текущую UTC-дату."""
-
-    return datetime.now(UTC).replace(microsecond=0).isoformat()

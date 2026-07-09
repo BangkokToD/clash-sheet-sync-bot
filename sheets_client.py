@@ -15,6 +15,16 @@ import httpx
 from google.auth import exceptions as google_auth_exceptions
 from google.oauth2 import service_account
 
+from sheet_ranges import (
+    column_to_number as _shared_column_to_number,
+)
+from sheet_ranges import (
+    number_to_column as _shared_number_to_column,
+)
+from sheet_ranges import (
+    parse_a1_cell as _shared_parse_a1_cell,
+)
+
 SHEETS_API_BASE_URL: Final = "https://sheets.googleapis.com/v4/spreadsheets"
 SHEETS_SCOPE: Final = "https://www.googleapis.com/auth/spreadsheets"
 GOOGLE_AUTH_TIMEOUT_SECONDS: Final = 30.0
@@ -700,11 +710,7 @@ def parse_a1_cell(cell: str) -> tuple[int, int]:
         GoogleSheetsWriteError: Если ячейка некорректна.
     """
 
-    match = re.fullmatch(r"^\$?([A-Za-z]+)\$?([1-9][0-9]*)$", cell.strip())
-    if match is None:
-        raise GoogleSheetsWriteError(f"Некорректная A1-ячейка: {cell}.")
-    column, row_raw = match.groups()
-    return _column_to_number(column), int(row_raw)
+    return _shared_parse_a1_cell(cell, error_cls=GoogleSheetsWriteError)
 
 
 def _extract_google_error_message(response: httpx.Response) -> str:
@@ -989,10 +995,7 @@ def _column_to_number(column: str) -> int:
         Номер колонки, начиная с 1.
     """
 
-    number = 0
-    for char in column.upper():
-        number = number * 26 + ord(char) - ord("A") + 1
-    return number
+    return _shared_column_to_number(column)
 
 
 def _number_to_column(number: int) -> str:
@@ -1008,13 +1011,7 @@ def _number_to_column(number: int) -> str:
         GoogleSheetsWriteError: Если номер некорректен.
     """
 
-    if number <= 0:
-        raise GoogleSheetsWriteError("Номер колонки должен быть положительным.")
-    chars: list[str] = []
-    while number > 0:
-        number, remainder = divmod(number - 1, 26)
-        chars.append(chr(ord("A") + remainder))
-    return "".join(reversed(chars))
+    return _shared_number_to_column(number, error_cls=GoogleSheetsWriteError)
 
 
 class _HttpxGoogleAuthResponse:

@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Final
 
+from common_time import utc_now_iso as _utc_now_iso
 from models import SheetBinding, SheetBlock
+from sheet_ranges import parse_a1_cell as _parse_a1_cell
 from sheets_client import (
     CellValue,
     GoogleSheetsError,
@@ -404,7 +405,7 @@ class SheetAdminService:
                 sheet_id = metadata.sheet_id
             else:
                 sheet_id = block.sheet_id
-            column_number = _column_number_from_a1(block.start_cell)
+            column_number, _ = _parse_a1_cell(block.start_cell, error_cls=SheetAdminError)
             column_index = column_number - 1
             key = (sheet_id, column_index)
             if key in hidden:
@@ -528,16 +529,6 @@ def spreadsheet_url(spreadsheet_id: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
 
-def _utc_now_iso() -> str:
-    """Возвращает текущую UTC-дату в ISO-формате.
-
-    Returns:
-        ISO-дата с timezone offset.
-    """
-
-    return datetime.now(UTC).replace(microsecond=0).isoformat()
-
-
 def _sheet_by_id(sheets: Sequence[SheetMetadata], sheet_id: int | None) -> SheetMetadata | None:
     """Ищет лист по числовому ID."""
 
@@ -550,22 +541,3 @@ def _sheet_by_title(sheets: Sequence[SheetMetadata], title: str) -> SheetMetadat
     """Ищет лист по названию."""
 
     return next((sheet for sheet in sheets if sheet.title == title), None)
-
-
-def _column_number_from_a1(cell: str) -> int:
-    """Возвращает номер колонки из A1-ячейки, начиная с 1."""
-
-    letters = ""
-    for char in cell.strip():
-        if char.isalpha():
-            letters += char
-        elif char.isdigit():
-            break
-        else:
-            raise SheetAdminError(f"Некорректная A1-ячейка: {cell}.")
-    if not letters:
-        raise SheetAdminError(f"Некорректная A1-ячейка: {cell}.")
-    number = 0
-    for char in letters.upper():
-        number = number * 26 + ord(char) - ord("A") + 1
-    return number

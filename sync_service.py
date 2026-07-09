@@ -12,6 +12,8 @@ from typing import Any, Final
 import httpx
 
 from coc_client import ClashApiUnavailableError, ClashClient
+from common_time import format_dt as _format_dt
+from common_time import utc_now as _utc_now
 from composition_sync import (
     CompositionDataError,
     CompositionSyncResult,
@@ -422,15 +424,3 @@ def _has_sheet_write_started(write_phase: str) -> bool:
     """Проверяет, могла ли Google-таблица уже измениться."""
 
     return write_phase in {WRITE_PHASE_COMPOSITION_WRITTEN, WRITE_PHASE_CWL_WRITTEN}
-
-
-def _utc_now() -> datetime:
-    """Возвращает текущую UTC-дату."""
-
-    return datetime.now(UTC).replace(microsecond=0)
-
-
-def _format_dt(value: datetime) -> str:
-    """Форматирует дату для SQLite."""
-
-    return value.astimezone(UTC).replace(microsecond=0).isoformat()

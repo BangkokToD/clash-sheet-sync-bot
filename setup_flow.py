@@ -17,6 +17,8 @@ from coc_client import (
     ClashClient,
 )
 from column_profiles import new_user_column_key, normalize_column_title, table_title
+from common_time import format_dt as _format_dt
+from common_time import utc_now as _utc_now
 from models import AppConfig, SetupToken, TableType, normalize_tag
 from repositories import (
     AdminChatRepository,
@@ -2895,29 +2897,6 @@ async def _edit_or_send_message(
         )
     except TelegramMessageNotModifiedError:
         return
-
-
-def _utc_now() -> datetime:
-    """Возвращает текущую UTC-дату.
-
-    Returns:
-        Timezone-aware UTC datetime.
-    """
-
-    return datetime.now(UTC).replace(microsecond=0)
-
-
-def _format_dt(value: datetime) -> str:
-    """Форматирует дату для SQLite.
-
-    Args:
-        value: Дата и время.
-
-    Returns:
-        ISO-строка с timezone offset.
-    """
-
-    return value.astimezone(UTC).replace(microsecond=0).isoformat()
 
 
 def _sheet_link_state(user_id: int) -> str:

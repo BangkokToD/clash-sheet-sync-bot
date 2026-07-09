@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
+from common_time import utc_now_iso as _utc_now_iso
 from repositories import TelegramChatRepository
 from telegram_client import TelegramApiError, TelegramClient
 
@@ -117,13 +118,3 @@ class TelegramAccessService:
             checked_at = checked_at.replace(tzinfo=UTC)
         age_seconds = (datetime.now(UTC) - checked_at).total_seconds()
         return 0 <= age_seconds <= self._admin_cache_ttl_seconds
-
-
-def _utc_now_iso() -> str:
-    """Возвращает текущую UTC-дату в ISO-формате.
-
-    Returns:
-        ISO-дата с timezone offset.
-    """
-
-    return datetime.now(UTC).replace(microsecond=0).isoformat()
