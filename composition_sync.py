@@ -179,6 +179,27 @@ class BuiltBlock:
     values: list[list[CellValue]]
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedCompositionSync:
+    """Подготовленная синхронизация состава без записи в Google Sheets.
+
+    Attributes:
+        planned_states: Новые состояния игроков по player tag.
+        built_blocks: Будущие managed-блоки листа `Состав`.
+        active_counts: Количество активных игроков по кланам.
+        exited_count: Количество игроков в блоке вышедших.
+        diff_items: Технические изменения состава.
+        warnings: Предупреждения импорта ручных полей.
+    """
+
+    planned_states: dict[str, PlannedPlayerState]
+    built_blocks: tuple[BuiltBlock, ...]
+    active_counts: tuple[tuple[str, int], ...]
+    exited_count: int
+    diff_items: tuple[CompositionDiffItem, ...]
+    warnings: tuple[str, ...]
+
+
 async def run_composition_sync(
     *,
     runtime_config: RuntimeChatConfig,
@@ -204,6 +225,45 @@ async def run_composition_sync(
     Raises:
         CompositionDataError: Если runtime-конфиг или данные листа некорректны.
         ClashApiUnavailableError: Если CoC API недоступно.
+    """
+
+    prepared = await prepare_composition_sync(
+        runtime_config=runtime_config,
+        clash_client=clash_client,
+        sheets_client=sheets_client,
+        composition_repository=composition_repository,
+        sheet_block_repository=sheet_block_repository,
+        detected_at=detected_at,
+    )
+    await apply_prepared_composition_sync(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        composition_repository=composition_repository,
+        sheet_block_repository=sheet_block_repository,
+        detected_at=detected_at,
+        prepared=prepared,
+    )
+    return CompositionSyncResult(
+        active_counts=prepared.active_counts,
+        exited_count=prepared.exited_count,
+        diff_items=prepared.diff_items,
+        warnings=prepared.warnings,
+    )
+
+
+async def prepare_composition_sync(
+    *,
+    runtime_config: RuntimeChatConfig,
+    clash_client: ClashClient,
+    sheets_client: SheetsClient,
+    composition_repository: CompositionPlayerStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+    detected_at: datetime,
+) -> PreparedCompositionSync:
+    """Готовит данные состава без записи в Google Sheets и SQLite.
+
+    Метод нужен для staged `/sync`: сначала загружаются все CoC/Sheets-данные
+    и строятся будущие состояния, и только потом оркестратор начинает запись.
     """
 
     if not runtime_config.active_clans:
@@ -246,17 +306,41 @@ async def run_composition_sync(
         for clan in runtime_config.active_clans
     )
     exited_count = sum(1 for state in planned_states.values() if state.status == "exited")
+    return PreparedCompositionSync(
+        planned_states=planned_states,
+        built_blocks=built_blocks,
+        active_counts=active_counts,
+        exited_count=exited_count,
+        diff_items=tuple(diff_items),
+        warnings=imported.warnings,
+    )
+
+
+async def apply_prepared_composition_sync(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    composition_repository: CompositionPlayerStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+    detected_at: datetime,
+    prepared: PreparedCompositionSync,
+) -> None:
+    """Записывает подготовленный состав в Google Sheets и SQLite."""
 
     await _rewrite_composition_blocks(
         sheets_client=sheets_client,
         sheet_name=sheet_name,
         previous_blocks=composition_blocks,
-        built_blocks=built_blocks,
+        built_blocks=prepared.built_blocks,
     )
-    await _hide_bot_key_columns(runtime_config=runtime_config, sheets_client=sheets_client, built_blocks=built_blocks)
+    await _hide_bot_key_columns(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        built_blocks=prepared.built_blocks,
+    )
 
     updated_at = _format_dt(detected_at)
-    for planned in planned_states.values():
+    for planned in prepared.planned_states.values():
         await composition_repository.upsert_player_state(
             chat_id=runtime_config.chat_id,
             player_tag=planned.player_tag,
@@ -269,15 +353,8 @@ async def run_composition_sync(
             last_seen_at=planned.last_seen_at,
             updated_at=updated_at,
         )
-    for built_block in built_blocks:
+    for built_block in prepared.built_blocks:
         await sheet_block_repository.upsert_block(block=built_block.block, updated_at=updated_at)
-
-    return CompositionSyncResult(
-        active_counts=active_counts,
-        exited_count=exited_count,
-        diff_items=tuple(diff_items),
-        warnings=imported.warnings,
-    )
 
 
 async def import_current_composition_sheet(

@@ -170,6 +170,14 @@ class CwlImportResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CwlDiffItem:
+    """Одно техническое изменение CWL."""
+
+    kind: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class CwlClanBlock:
     """Будущий CWL-блок одного active clan."""
 
@@ -205,6 +213,7 @@ class CwlPreparedData:
     all_not_in_progress: bool
     not_in_progress_clans: tuple[TrackedClan, ...]
     warnings: tuple[str, ...]
+    diff_items: tuple[CwlDiffItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +238,7 @@ class CwlSheetSyncResult:
     archived_previous_season: bool = False
     not_in_progress_clans: tuple[TrackedClan, ...] = ()
     warnings: tuple[str, ...] = ()
+    diff_items: tuple[CwlDiffItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,13 +308,55 @@ async def run_public_cwl_sync(
     Если сезон изменился, новая версия пишется через staging-лист.
     """
 
-    prepared = await _prepare_cwl_data(
+    prepared = await prepare_public_cwl_sync(
         runtime_config=runtime_config,
         clash_client=clash_client,
         sheets_client=sheets_client,
         cwl_repository=cwl_repository,
         sheet_block_repository=sheet_block_repository,
     )
+    return await apply_public_cwl_sync(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        cwl_repository=cwl_repository,
+        sheet_block_repository=sheet_block_repository,
+        sheet_binding_repository=sheet_binding_repository,
+        sync_run_id=sync_run_id,
+        prepared=prepared,
+    )
+
+
+async def prepare_public_cwl_sync(
+    *,
+    runtime_config: RuntimeChatConfig,
+    clash_client: ClashClient,
+    sheets_client: SheetsClient,
+    cwl_repository: CwlRowStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+) -> CwlPreparedData:
+    """Готовит CWL-данные без записи в Google Sheets и SQLite."""
+
+    return await _prepare_cwl_data(
+        runtime_config=runtime_config,
+        clash_client=clash_client,
+        sheets_client=sheets_client,
+        cwl_repository=cwl_repository,
+        sheet_block_repository=sheet_block_repository,
+    )
+
+
+async def apply_public_cwl_sync(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    cwl_repository: CwlRowStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+    sheet_binding_repository: SheetBindingRepository,
+    sync_run_id: int,
+    prepared: CwlPreparedData,
+) -> CwlSheetSyncResult:
+    """Записывает подготовленный CWL в Google Sheets и SQLite."""
+
     if prepared.all_not_in_progress or prepared.season is None:
         return CwlSheetSyncResult(
             season=None,
@@ -380,7 +432,6 @@ async def run_public_cwl_sync(
         not_in_progress_clans=prepared.not_in_progress_clans,
         warnings=prepared.warnings,
     )
-
 
 async def import_current_cwl_sheet(
     *,
@@ -558,9 +609,20 @@ async def _prepare_cwl_data(
             all_not_in_progress=True,
             not_in_progress_clans=not_in_progress_clans,
             warnings=(),
+            diff_items=(),
         )
 
     season = _resolve_cwl_season(participating_groups)
+    participating_groups = {
+        clan_tag: group
+        for clan_tag, group in participating_groups.items()
+        if _require_str(group, "season", "leaguegroup") == season
+    }
+    not_in_progress_clans = tuple(
+        clan
+        for clan in runtime_config.active_clans
+        if league_groups.get(clan.clan_tag) is None or clan.clan_tag not in participating_groups
+    )
     sheet_name = runtime_config.sheet_binding.active_cwl_sheet_name
     previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
     cwl_blocks = tuple(
@@ -593,6 +655,10 @@ async def _prepare_cwl_data(
         imported=imported,
         existing_rows=existing_rows,
     )
+    diff_items = _build_cwl_diff_items(
+        planned_rows=rows_with_user_values,
+        existing_rows=existing_rows,
+    )
     rows_by_key = {row.row_key: row for row in rows_with_user_values}
     blocks_with_user_values = tuple(
         CwlClanBlock(
@@ -611,6 +677,7 @@ async def _prepare_cwl_data(
         all_not_in_progress=False,
         not_in_progress_clans=not_in_progress_clans,
         warnings=imported.warnings,
+        diff_items=diff_items,
     )
 
 
@@ -802,20 +869,19 @@ async def _load_league_groups(
 
 
 def _resolve_cwl_season(groups: dict[str, JsonObject]) -> str:
-    """Определяет единый CWL-сезон по participating league groups."""
+    """Определяет активный CWL-сезон по participating league groups.
 
-    seasons_by_clan = {
-        clan_tag: _require_str(group, "season", "leaguegroup")
-        for clan_tag, group in groups.items()
+    Если API вернул разные сезоны, используется самый новый сезон, а кланы
+    с более старым сезоном считаются не участвующими в текущей CWL.
+    """
+
+    seasons = {
+        _require_str(group, "season", "leaguegroup")
+        for group in groups.values()
     }
-    seasons = set(seasons_by_clan.values())
-    if len(seasons) != 1:
-        details = ", ".join(
-            f"{clan_tag}: {season}"
-            for clan_tag, season in sorted(seasons_by_clan.items())
-        )
-        raise CwlSeasonMismatchError(f"Участвующие кланы вернули разные сезоны CWL: {details}.")
-    return next(iter(seasons))
+    if not seasons:
+        raise CwlDataError("Не удалось определить CWL-сезон.")
+    return max(seasons)
 
 
 def _collect_unique_war_tags(groups: Sequence[JsonObject]) -> list[str]:
@@ -1407,6 +1473,49 @@ def _lookup_user_values(
             return dict(fallback)
 
     return {}
+
+
+def _build_cwl_diff_items(
+    *,
+    planned_rows: Sequence[CwlPlannedRow],
+    existing_rows: Sequence[CwlRowState],
+) -> tuple[CwlDiffItem, ...]:
+    """Строит технический diff CWL по row_hash."""
+
+    existing_by_key = {row.row_key: row for row in existing_rows}
+    items: list[CwlDiffItem] = []
+    for row in planned_rows:
+        existing = existing_by_key.get(row.row_key)
+        if existing is None:
+            items.append(CwlDiffItem("added", _new_cwl_row_message(row)))
+            continue
+        if existing.row_hash is not None and existing.row_hash != row.row_hash:
+            items.append(CwlDiffItem("updated", _updated_cwl_row_message(row)))
+    return tuple(items)
+
+
+def _new_cwl_row_message(row: CwlPlannedRow) -> str:
+    """Формирует текст новой CWL-строки."""
+
+    technical = row.technical_values
+    if row.marker == NO_ATTACK_MARKER:
+        return f"Без атаки: {technical.attacker_name} | Раунд {technical.round_number}."
+    target = format_town_hall(technical.defender_town_hall) if technical.defender_town_hall is not None else "-"
+    stars = technical.stars if technical.stars is not None else "-"
+    destruction = technical.destruction_percentage if technical.destruction_percentage is not None else "-"
+    return f"Атака: {technical.attacker_name} → {target} | {stars}⭐ {destruction}%."
+
+
+def _updated_cwl_row_message(row: CwlPlannedRow) -> str:
+    """Формирует текст обновления CWL-строки."""
+
+    technical = row.technical_values
+    if row.marker == NO_ATTACK_MARKER:
+        return f"Без атаки обновлено: {technical.attacker_name} | Раунд {technical.round_number}."
+    target = format_town_hall(technical.defender_town_hall) if technical.defender_town_hall is not None else "-"
+    stars = technical.stars if technical.stars is not None else "-"
+    destruction = technical.destruction_percentage if technical.destruction_percentage is not None else "-"
+    return f"Атака обновлена: {technical.attacker_name} → {target} | {stars}⭐ {destruction}%."
 
 
 def _physical_columns(column_profiles: Sequence[ColumnProfile]) -> tuple[ColumnProfile, ...]:

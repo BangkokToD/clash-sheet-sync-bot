@@ -14,6 +14,7 @@ from migrations import apply_migrations
 from models import AppConfig
 from setup_flow import SetupFlow, TelegramChatInfo
 from storage import Database, StorageError
+from sync_service import SyncChatInfo, SyncService
 from telegram_access import TelegramAccessService
 from telegram_client import (
     POLLING_TIMEOUT_SECONDS,
@@ -192,11 +193,16 @@ class BotApp:
             return
 
         if command.name == "/sync":
-            await flow.send_sync_boundary_message(chat=chat)
+            await self._sync_service().handle_sync_command(
+                chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
+                user_id=user_id,
+            )
             return
 
         if command.name == "/status":
-            await flow.send_status_boundary_message(chat=chat)
+            await self._sync_service().handle_status_command(
+                chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
+            )
             return
 
     async def _handle_callback_query(self, callback_query: JsonObject) -> None:
@@ -250,6 +256,15 @@ class BotApp:
             connection=self._connection,
             access=access,
             bot_username=self._bot_username,
+        )
+
+    def _sync_service(self) -> SyncService:
+        """Создаёт sync-service поверх текущего SQLite-подключения."""
+
+        return SyncService(
+            config=self._config,
+            telegram=self._telegram,
+            connection=self._connection,
         )
 
 

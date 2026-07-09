@@ -115,6 +115,33 @@ class CwlRowState:
     row_hash: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class SyncStatusSummary:
+    """Сводка последнего sync для `/status`.
+
+    Attributes:
+        chat_id: ID Telegram-чата.
+        status: Статус настройки чата.
+        last_sync_started_at: Дата последнего принятого `/sync` или `None`.
+        last_sync_finished_at: Дата завершения последнего `/sync` или `None`.
+        last_sync_status: Статус последнего `/sync` или `None`.
+        last_sync_error: Ошибка последнего `/sync` или `None`.
+        active_clans_count: Количество active clans.
+        active_cwl_season: Активный CWL-сезон или `None`.
+        spreadsheet_url: Ссылка на таблицу или `None`.
+    """
+
+    chat_id: int
+    status: TelegramChatStatus
+    last_sync_started_at: str | None
+    last_sync_finished_at: str | None
+    last_sync_status: str | None
+    last_sync_error: str | None
+    active_clans_count: int
+    active_cwl_season: str | None
+    spreadsheet_url: str | None
+
+
 class RuntimeConfigRepository:
     """Repository для чтения runtime-настроек чата.
 
@@ -970,6 +997,92 @@ class TelegramChatRepository:
             (status, now, chat_id),
         )
 
+    async def mark_sync_started(self, *, chat_id: int, started_at: str) -> None:
+        """Фиксирует момент принятия `/sync` для rate limit."""
+
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET last_sync_started_at = ?, updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (started_at, started_at, chat_id),
+        )
+
+    async def mark_sync_finished(
+        self,
+        *,
+        chat_id: int,
+        finished_at: str,
+        status: str,
+        error: str | None,
+    ) -> None:
+        """Фиксирует результат последнего `/sync` для `/status`."""
+
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET last_sync_finished_at = ?,
+                last_sync_status = ?,
+                last_sync_error = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (finished_at, status, error, finished_at, chat_id),
+        )
+
+    async def get_last_sync_started_at(self, chat_id: int) -> str | None:
+        """Читает дату последнего принятого `/sync`."""
+
+        row = await fetch_one(
+            self._connection,
+            "SELECT last_sync_started_at FROM telegram_chats WHERE chat_id = ?",
+            (chat_id,),
+        )
+        if row is None:
+            return None
+        return as_optional_str(row["last_sync_started_at"], "last_sync_started_at")
+
+    async def get_sync_status_summary(self, chat_id: int) -> SyncStatusSummary | None:
+        """Собирает данные для `/status`."""
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT
+                c.chat_id,
+                c.status,
+                c.last_sync_started_at,
+                c.last_sync_finished_at,
+                c.last_sync_status,
+                c.last_sync_error,
+                b.spreadsheet_url,
+                b.active_cwl_season,
+                COUNT(tc.clan_tag) AS active_clans_count
+            FROM telegram_chats AS c
+            LEFT JOIN sheet_bindings AS b
+                ON b.chat_id = c.chat_id AND b.is_active = 1
+            LEFT JOIN tracked_clans AS tc
+                ON tc.chat_id = c.chat_id AND tc.is_active = 1
+            WHERE c.chat_id = ?
+            GROUP BY c.chat_id
+            """,
+            (chat_id,),
+        )
+        if row is None:
+            return None
+        return SyncStatusSummary(
+            chat_id=as_int(row["chat_id"], "chat_id"),
+            status=as_chat_status(row["status"]),
+            last_sync_started_at=as_optional_str(row["last_sync_started_at"], "last_sync_started_at"),
+            last_sync_finished_at=as_optional_str(row["last_sync_finished_at"], "last_sync_finished_at"),
+            last_sync_status=as_optional_str(row["last_sync_status"], "last_sync_status"),
+            last_sync_error=as_optional_str(row["last_sync_error"], "last_sync_error"),
+            active_clans_count=as_int(row["active_clans_count"], "active_clans_count"),
+            active_cwl_season=as_optional_str(row["active_cwl_season"], "active_cwl_season"),
+            spreadsheet_url=as_optional_str(row["spreadsheet_url"], "spreadsheet_url"),
+        )
+
     async def find_pending_sheet_link_setup(
         self,
         *,
@@ -1508,6 +1621,59 @@ class SyncRunRepository:
         if cursor.lastrowid is None:
             raise RepositoryError("SQLite не вернул id созданного sync_runs.")
         return cursor.lastrowid
+
+    async def has_successful_sync(self, chat_id: int) -> bool:
+        """Проверяет, был ли успешный sync у чата."""
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT 1
+            FROM sync_runs
+            WHERE chat_id = ? AND status = 'success'
+            LIMIT 1
+            """,
+            (chat_id,),
+        )
+        return row is not None
+
+    async def finish_sync_run(
+        self,
+        *,
+        sync_run_id: int,
+        status: SyncRunStatus,
+        finished_at: str,
+        error_stage: str | None = None,
+        error_clan_tag: str | None = None,
+        error_war_tag: str | None = None,
+        error_message: str | None = None,
+        report_json: str | None = None,
+    ) -> None:
+        """Завершает запись `sync_runs`."""
+
+        await self._connection.execute(
+            """
+            UPDATE sync_runs
+            SET status = ?,
+                finished_at = ?,
+                error_stage = ?,
+                error_clan_tag = ?,
+                error_war_tag = ?,
+                error_message = ?,
+                report_json = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                finished_at,
+                error_stage,
+                error_clan_tag,
+                error_war_tag,
+                error_message,
+                report_json,
+                sync_run_id,
+            ),
+        )
 
 
 async def fetch_one(
