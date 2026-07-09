@@ -373,8 +373,14 @@ async def apply_prepared_composition_sync(
             last_seen_at=planned.last_seen_at,
             updated_at=updated_at,
         )
-    for built_block in prepared.built_blocks:
-        await sheet_block_repository.upsert_block(block=built_block.block, updated_at=updated_at)
+
+    await sheet_block_repository.replace_blocks_by_prefixes(
+        chat_id=runtime_config.chat_id,
+        sheet_name=sheet_name,
+        block_key_prefixes=(ACTIVE_BLOCK_PREFIX, EXITED_BLOCK_KEY),
+        blocks=tuple(built_block.block for built_block in prepared.built_blocks),
+        updated_at=updated_at,
+    )
 
 
 async def import_current_composition_sheet(
