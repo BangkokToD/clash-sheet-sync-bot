@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from html import escape
 from typing import Final
 
 from composition_sync import CompositionSyncResult
+from composition_sync import CompositionDiffItem
 from cwl_sync import CwlSheetSyncResult
+from cwl_sync import CwlDiffItem
 from repositories import SyncStatusSummary
 
 TABLE_LINK_TEXT: Final = "Таблица"
+MAX_TELEGRAM_MESSAGE_LENGTH: Final = 3500
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,38 +61,90 @@ def build_success_report(
             ),
         )
 
-    lines = ["Обновление завершено."]
-    diff_lines: list[str] = []
-
-    if composition_result.diff_items:
-        diff_lines.append("")
-        diff_lines.append("Состав:")
-        diff_lines.extend(_composition_item_to_text(item.message) for item in composition_result.diff_items)
-
+    lines = ["Обновление завершено.", ""]
+    lines.extend(_composition_summary_lines(composition_result))
     if cwl_result is not None:
-        diff_lines.extend(_cwl_result_lines(cwl_result))
+        lines.extend(["", *_cwl_summary_lines(cwl_result)])
 
     warnings = [*composition_result.warnings]
     if cwl_result is not None:
         warnings.extend(cwl_result.warnings)
-
-    visible_diff_lines, truncated = _limit_diff_lines(diff_lines, report_max_items)
-    if visible_diff_lines:
-        lines.extend(visible_diff_lines)
-    else:
-        lines.extend(["", "Изменений нет."])
-
-    if truncated:
-        lines.append(f"Показаны первые {report_max_items} изменений. Полный результат смотри в таблице.")
-
     if warnings:
-        lines.extend(["", "Предупреждения:"])
-        lines.extend(f"- {escape(warning)}" for warning in warnings[:report_max_items])
-        if len(warnings) > report_max_items:
-            lines.append(f"Показаны первые {report_max_items} предупреждений.")
+        lines.extend(
+            [
+                "",
+                f"Предупреждения импорта: {len(warnings)}.",
+                "Если число повторяется после следующего /sync, проверьте таблицу через диагностику.",
+            ],
+        )
 
     lines.extend(["", _table_link(spreadsheet_url)])
-    return SyncReportPayload(text="\n".join(lines))
+    return SyncReportPayload(text=_fit_telegram_length("\n".join(lines), spreadsheet_url))
+
+
+def _composition_summary_lines(composition_result: CompositionSyncResult) -> list[str]:
+    """Строит краткую сводку состава без перечисления игроков."""
+
+    counts = _count_items_by_kind(composition_result.diff_items)
+    active_total = sum(count for _, count in composition_result.active_counts)
+    total_players = active_total + composition_result.exited_count
+    lines = [
+        "Состав:",
+        f"Всего игроков: {total_players}.",
+        f"Активных: {active_total}. Вышедших: {composition_result.exited_count}.",
+    ]
+    if not composition_result.diff_items:
+        lines.append("Изменений нет.")
+        return lines
+    lines.append(
+        "Изменения: "
+        f"новых {counts.get('added', 0)}, "
+        f"вышло {counts.get('exited', 0)}, "
+        f"вернулось {counts.get('returned', 0)}, "
+        f"переходов {counts.get('moved', 0)}, "
+        f"обновлено {counts.get('updated', 0)}."
+    )
+    return lines
+
+
+def _cwl_summary_lines(cwl_result: CwlSheetSyncResult) -> list[str]:
+    """Строит краткую сводку CWL без перечисления атак."""
+
+    lines = ["CWL:"]
+    if cwl_result.all_not_in_progress:
+        lines.append("CWL сейчас не проводится. Лист CWL не менялся.")
+        return lines
+
+    counts = _count_items_by_kind(cwl_result.diff_items)
+    season = escape(cwl_result.season or "-")
+    lines.append(f"Сезон: {season}.")
+    lines.append(f"Всего строк: {cwl_result.rows_count}.")
+    lines.append(
+        "Изменения: "
+        f"новых {counts.get('added', 0)}, "
+        f"обновлено {counts.get('updated', 0)}."
+    )
+    if cwl_result.archived_previous_season:
+        lines.append("Сезон сменился, старый CWL архивирован.")
+    if cwl_result.not_in_progress_clans:
+        lines.append(f"Кланов без CWL: {len(cwl_result.not_in_progress_clans)}.")
+    return lines
+
+
+def _count_items_by_kind(items: tuple[CompositionDiffItem, ...] | tuple[CwlDiffItem, ...]) -> Counter[str]:
+    """Считает diff items по kind."""
+
+    return Counter(item.kind for item in items)
+
+
+def _fit_telegram_length(text: str, spreadsheet_url: str) -> str:
+    """Жёстко ограничивает длину Telegram-отчёта."""
+
+    if len(text) <= MAX_TELEGRAM_MESSAGE_LENGTH:
+        return text
+    suffix = "\n\nОтчёт сокращён. Полный результат смотри в таблице.\n" + _table_link(spreadsheet_url)
+    limit = MAX_TELEGRAM_MESSAGE_LENGTH - len(suffix)
+    return f"{text[:max(limit, 0)].rstrip()}...{suffix}"
 
 
 def build_error_report(*, reason: str, spreadsheet_url: str | None = None) -> SyncReportPayload:

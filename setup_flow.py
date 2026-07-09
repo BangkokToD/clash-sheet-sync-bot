@@ -64,8 +64,6 @@ CALLBACK_CONFIRM_UNLINK_SHEET_PREFIX: Final = "sheet:unlink_confirm:"
 CALLBACK_DIAGNOSE_SHEET_PREFIX: Final = "sheet:diagnose:"
 CALLBACK_FIX_SHEET_PREFIX: Final = "sheet:fix:"
 CALLBACK_CREATE_TRANSFER_PREFIX: Final = "transfer:create:"
-CALLBACK_DISABLE_GROUP_PREFIX: Final = "group:disable:"
-CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX: Final = "group:disable_confirm:"
 CALLBACK_CHECK_SHEET_PREFIX: Final = "sheet:check:"
 CALLBACK_CLAN_ADD_PREFIX: Final = "clans:add:"
 CALLBACK_CLAN_CONFIRM_PREFIX: Final = "clans:confirm:"
@@ -93,7 +91,6 @@ SETTINGS_SECTIONS: Final = {
     "clans": "Кланы",
     "composition_columns": "Колонки состава",
     "cwl_columns": "Колонки CWL",
-    "disable_group": "Отключить группу",
 }
 
 
@@ -829,12 +826,6 @@ class SetupFlow:
         if callback_data.startswith(CALLBACK_CREATE_TRANSFER_PREFIX):
             await self._create_transfer_token(callback_data, callback_query_id, chat_id, user_id)
             return
-        if callback_data.startswith(CALLBACK_DISABLE_GROUP_PREFIX):
-            await self._show_disable_group_warning(callback_data, callback_query_id, chat_id, message_id, user_id)
-            return
-        if callback_data.startswith(CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX):
-            await self._confirm_disable_group(callback_data, callback_query_id, chat_id, message_id, user_id)
-            return
         if callback_data.startswith(CALLBACK_CHECK_SHEET_PREFIX):
             await self._check_sheet_access(
                 callback_data=callback_data,
@@ -1058,13 +1049,6 @@ class SetupFlow:
             await self._show_columns_section(
                 group_chat_id=group_chat_id,
                 table_type=COLUMN_SECTION_TABLE_TYPES[section_key],
-                chat_id=chat_id,
-                message_id=message_id,
-            )
-            return
-        if section_key == "disable_group":
-            await self._show_disable_group_screen(
-                group_chat_id=group_chat_id,
                 chat_id=chat_id,
                 message_id=message_id,
             )
@@ -1401,77 +1385,6 @@ class SetupFlow:
                 "Команду должен отправить Telegram-администратор старой и новой группы."
             ),
             parse_mode="HTML",
-        )
-
-    async def _show_disable_group_screen(self, *, group_chat_id: int, chat_id: int, message_id: int) -> None:
-        """Показывает экран отключения группы."""
-
-        await _edit_or_send_message(
-            telegram=self._telegram,
-            chat_id=chat_id,
-            message_id=message_id,
-            text=(
-                "Отключить группу?\n\n"
-                "Бот перестанет считать группу настроенной. Active binding будет деактивирован. "
-                "Google Sheets не будет изменён."
-            ),
-            reply_markup=disable_group_keyboard(group_chat_id),
-        )
-
-    async def _show_disable_group_warning(
-        self,
-        callback_data: str,
-        callback_query_id: str,
-        chat_id: int,
-        message_id: int,
-        user_id: int,
-    ) -> None:
-        """Показывает подтверждение отключения группы."""
-
-        group_chat_id = await self._parse_callback_group_id(
-            callback_data=callback_data,
-            callback_query_id=callback_query_id,
-            prefix=CALLBACK_DISABLE_GROUP_PREFIX,
-        )
-        if group_chat_id is None:
-            return
-        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
-            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
-            return
-        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
-        await self._show_disable_group_screen(group_chat_id=group_chat_id, chat_id=chat_id, message_id=message_id)
-
-    async def _confirm_disable_group(
-        self,
-        callback_data: str,
-        callback_query_id: str,
-        chat_id: int,
-        message_id: int,
-        user_id: int,
-    ) -> None:
-        """Отключает группу без изменения Google Sheets."""
-
-        group_chat_id = await self._parse_callback_group_id(
-            callback_data=callback_data,
-            callback_query_id=callback_query_id,
-            prefix=CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX,
-        )
-        if group_chat_id is None:
-            return
-        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
-            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
-            return
-        now = _format_dt(_utc_now())
-        async with transaction(self._connection):
-            await self._sheet_bindings.deactivate_binding(chat_id=group_chat_id, now=now)
-            await self._telegram_chats.disable_chat(chat_id=group_chat_id, now=now)
-        await self._telegram.answer_callback_query(callback_query_id, "Группа отключена.")
-        await _edit_or_send_message(
-            telegram=self._telegram,
-            chat_id=chat_id,
-            message_id=message_id,
-            text="Группа отключена. Google Sheets не изменялся.",
-            reply_markup=known_groups_keyboard([]),
         )
 
     async def _start_sheet_binding(
@@ -1970,7 +1883,7 @@ class SetupFlow:
         lines.append("")
         if editable_columns:
             for column in editable_columns:
-                marker = "👁" if column.visible else "🙈"
+                marker = "✅" if column.visible else "❌"
                 lines.append(f"{marker} {column.title}")
         else:
             lines.append("Настраиваемых колонок пока нет.")
@@ -2394,17 +2307,6 @@ def diagnostic_keyboard(group_chat_id: int, has_fixable_issues: bool) -> JsonObj
     return {"inline_keyboard": keyboard}
 
 
-def disable_group_keyboard(group_chat_id: int) -> JsonObject:
-    """Создаёт клавиатуру отключения группы."""
-
-    return {
-        "inline_keyboard": [
-            [{"text": "Отключить группу", "callback_data": f"{CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX}{group_chat_id}"}],
-            [{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}],
-        ],
-    }
-
-
 def check_sheet_access_keyboard(group_chat_id: int) -> JsonObject:
     """Создаёт клавиатуру проверки доступа к таблице.
 
@@ -2447,19 +2349,20 @@ def clans_section_keyboard(group_chat_id: int, clans: list) -> JsonObject:
     keyboard: list[list[dict[str, str]]] = [
         [{"text": "Добавить клан", "callback_data": f"{CALLBACK_CLAN_ADD_PREFIX}{group_chat_id}"}],
     ]
-    for clan in clans:
+    total = len(clans)
+    for index, clan in enumerate(clans):
         tag_payload = _tag_payload(clan.clan_tag)
+        up_callback = f"{CALLBACK_CLAN_MOVE_UP_PREFIX}{group_chat_id}:{tag_payload}"
+        down_callback = f"{CALLBACK_CLAN_MOVE_DOWN_PREFIX}{group_chat_id}:{tag_payload}"
         keyboard.append(
             [
                 {"text": clan.clan_name, "callback_data": "noop"},
-                {
-                    "text": "↑",
-                    "callback_data": f"{CALLBACK_CLAN_MOVE_UP_PREFIX}{group_chat_id}:{tag_payload}",
-                },
-                {
-                    "text": "↓",
-                    "callback_data": f"{CALLBACK_CLAN_MOVE_DOWN_PREFIX}{group_chat_id}:{tag_payload}",
-                },
+                *_move_buttons(
+                    index=index,
+                    total=total,
+                    up_callback=up_callback,
+                    down_callback=down_callback,
+                ),
                 {
                     "text": "Удалить",
                     "callback_data": f"{CALLBACK_CLAN_REMOVE_PREFIX}{group_chat_id}:{tag_payload}",
@@ -2520,31 +2423,53 @@ def columns_section_keyboard(group_chat_id: int, table_type: TableType, columns:
             },
         ],
     ]
-    for column in columns:
-        if column.kind == "service":
-            continue
-        action_text = "Удалить" if column.kind == "user" else ("Скрыть" if column.visible else "Показать")
+    editable_columns = [column for column in columns if column.kind != "service"]
+    total = len(editable_columns)
+
+    for index, column in enumerate(editable_columns):
+        action_text = "Удалить" if column.kind == "user" else ("✅" if column.visible else "❌")
         action_callback = (
             f"{CALLBACK_COLUMN_DELETE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
             if column.kind == "user"
             else f"{CALLBACK_COLUMN_TOGGLE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
         )
+        up_callback = f"{CALLBACK_COLUMN_MOVE_UP_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+        down_callback = f"{CALLBACK_COLUMN_MOVE_DOWN_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
         keyboard.append(
             [
                 {"text": column.title, "callback_data": "noop"},
-                {
-                    "text": "↑",
-                    "callback_data": f"{CALLBACK_COLUMN_MOVE_UP_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
-                },
-                {
-                    "text": "↓",
-                    "callback_data": f"{CALLBACK_COLUMN_MOVE_DOWN_PREFIX}{group_chat_id}:{table_type}:{column.column_key}",
-                },
+                *_move_buttons(
+                    index=index,
+                    total=total,
+                    up_callback=up_callback,
+                    down_callback=down_callback,
+                ),
                 {"text": action_text, "callback_data": action_callback},
             ],
         )
     keyboard.append([{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}])
     return {"inline_keyboard": keyboard}
+
+
+def _move_buttons(
+    *,
+    index: int,
+    total: int,
+    up_callback: str,
+    down_callback: str,
+) -> list[dict[str, str]]:
+    """Создаёт кнопки изменения порядка для inline-списков."""
+
+    if total <= 1:
+        return [{"text": "·", "callback_data": "noop"}, {"text": "·", "callback_data": "noop"}]
+    if index == 0:
+        return [{"text": "·", "callback_data": "noop"}, {"text": "↓", "callback_data": down_callback}]
+    if index == total - 1:
+        return [{"text": "↑", "callback_data": up_callback}, {"text": "·", "callback_data": "noop"}]
+    return [
+        {"text": "↑", "callback_data": up_callback},
+        {"text": "↓", "callback_data": down_callback},
+    ]
 
 
 def _tag_payload(clan_tag: str) -> str:

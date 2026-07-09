@@ -25,6 +25,14 @@ ACTIVE_EXCLUDED_COLUMN_KEYS: Final = {"exited_at"}
 DEFAULT_ACTIVE_START_CELL: Final = "A1"
 TITLE_ROWS_COUNT: Final = 2
 
+GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
+DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
+WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
+BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
+LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
+BORDER_RGB: Final = {"red": 0.70, "green": 0.76, "blue": 0.73}
+
+JsonObject = dict[str, Any]
 JsonDict = dict[str, str]
 
 
@@ -340,6 +348,11 @@ async def apply_prepared_composition_sync(
         previous_blocks=composition_blocks,
         built_blocks=prepared.built_blocks,
     )
+    await _format_composition_sheet(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        built_blocks=prepared.built_blocks,
+    )
     await _hide_bot_key_columns(
         runtime_config=runtime_config,
         sheets_client=sheets_client,
@@ -447,7 +460,7 @@ def build_composition_blocks(
     for clan in runtime_config.active_clans:
         states = _sorted_active_states(planned_states.values(), clan.clan_tag)
         values = _build_block_values(
-            title=clan.clan_name,
+            title=f"{clan.clan_name} | {clan.clan_tag}",
             columns=active_columns,
             states=states,
             is_exited=False,
@@ -848,7 +861,7 @@ def _build_block_values(
     """Строит значения одного блока состава."""
 
     values: list[list[CellValue]] = [
-        [title, *["" for _ in range(len(columns) - 1)]],
+        _title_row(title, len(columns)),
         [column.title for column in columns],
     ]
     for row_number, state in enumerate(states, start=1):
@@ -945,6 +958,81 @@ async def _rewrite_composition_blocks(
         )
     await sheets_client.batch_update_values(updates)
 
+
+async def _format_composition_sheet(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    built_blocks: Sequence[BuiltBlock],
+) -> None:
+    """Форматирует управляемые блоки листа `Состав` как CWL-таблицы."""
+
+    if not built_blocks:
+        return
+    sheet_id = runtime_config.sheet_binding.composition_sheet_id
+    if sheet_id is None:
+        metadata = await sheets_client.get_sheet_metadata(runtime_config.sheet_binding.composition_sheet_name)
+        sheet_id = metadata.sheet_id
+    requests = _build_composition_format_requests(sheet_id=sheet_id, built_blocks=built_blocks)
+    await sheets_client.batch_update_spreadsheet(requests)
+
+
+def _build_composition_format_requests(
+    *,
+    sheet_id: int,
+    built_blocks: Sequence[BuiltBlock],
+) -> list[JsonObject]:
+    """Строит batchUpdate requests для форматирования состава."""
+
+    requests: list[JsonObject] = []
+    for built_block in built_blocks:
+        block = built_block.block
+        block_range = _grid_range_from_start_cell(
+            sheet_id=sheet_id,
+            start_cell=block.start_cell,
+            rows_count=block.rows_count,
+            columns_count=block.columns_count,
+        )
+        requests.append(
+            _repeat_cell_request(
+                block_range,
+                _base_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        requests.append(_update_borders_request(block_range))
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_for_block_row(sheet_id, block, row_offset=0),
+                _title_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_for_block_row(sheet_id, block, row_offset=1),
+                _header_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        data_rows_count = max(block.rows_count - TITLE_ROWS_COUNT, 0)
+        for data_row_offset in range(data_rows_count):
+            if data_row_offset % 2 == 0:
+                continue
+            requests.append(
+                _repeat_cell_request(
+                    _grid_range_for_block_row(
+                        sheet_id,
+                        block,
+                        row_offset=TITLE_ROWS_COUNT + data_row_offset,
+                    ),
+                    {"userEnteredFormat": {"backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}}},
+                    "userEnteredFormat.backgroundColorStyle",
+                ),
+            )
+    return requests
+
+
 async def _hide_bot_key_columns(
     *,
     runtime_config: RuntimeChatConfig,
@@ -971,6 +1059,127 @@ async def _hide_bot_key_columns(
             end_index=column_index + 1,
             hidden=True,
         )
+
+
+def _title_row(title: str, width: int) -> list[CellValue]:
+    """Создаёт строку заголовка с видимым title после hidden key column."""
+
+    if width <= 1:
+        return [title]
+    return ["", title, *["" for _ in range(width - 2)]]
+
+
+def _base_cell_format() -> JsonObject:
+    """Возвращает базовый формат managed range."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _title_cell_format() -> JsonObject:
+    """Возвращает формат строки названия блока."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": DARK_GREEN_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
+                "bold": True,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _header_cell_format() -> JsonObject:
+    """Возвращает формат строки заголовков."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": GREEN_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
+                "bold": True,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _repeat_cell_request(grid_range: JsonObject, cell: JsonObject, fields: str) -> JsonObject:
+    """Создаёт repeatCell request."""
+
+    return {"repeatCell": {"range": grid_range, "cell": cell, "fields": fields}}
+
+
+def _update_borders_request(grid_range: JsonObject) -> JsonObject:
+    """Создаёт updateBorders request."""
+
+    border = {
+        "style": "SOLID",
+        "width": 1,
+        "colorStyle": {"rgbColor": BORDER_RGB},
+    }
+    return {
+        "updateBorders": {
+            "range": grid_range,
+            "top": border,
+            "bottom": border,
+            "left": border,
+            "right": border,
+            "innerHorizontal": border,
+            "innerVertical": border,
+        },
+    }
+
+
+def _grid_range_for_block_row(sheet_id: int, block: SheetBlock, *, row_offset: int) -> JsonObject:
+    """Строит GridRange строки managed-блока."""
+
+    return _grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=_offset_cell(block.start_cell, row_offset=row_offset, column_offset=0),
+        rows_count=1,
+        columns_count=block.columns_count,
+    )
+
+
+def _grid_range_from_start_cell(
+    *,
+    sheet_id: int,
+    start_cell: str,
+    rows_count: int,
+    columns_count: int,
+) -> JsonObject:
+    """Строит GridRange по start cell и размеру."""
+
+    start_column_number, start_row = _parse_a1_cell(start_cell)
+    return {
+        "sheetId": sheet_id,
+        "startRowIndex": start_row - 1,
+        "endRowIndex": start_row - 1 + rows_count,
+        "startColumnIndex": start_column_number - 1,
+        "endColumnIndex": start_column_number - 1 + columns_count,
+    }
+
+
+def _offset_cell(start_cell: str, *, row_offset: int, column_offset: int) -> str:
+    """Сдвигает A1-ячейку."""
+
+    start_column_number, start_row = _parse_a1_cell(start_cell)
+    return f"{_number_to_column(start_column_number + column_offset)}{start_row + row_offset}"
+
 
 def _table_type_from_block_key(block_key: str) -> TableType | None:
     if block_key.startswith(ACTIVE_BLOCK_PREFIX) or block_key == EXITED_BLOCK_KEY:

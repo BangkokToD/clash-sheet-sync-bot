@@ -449,6 +449,8 @@ async def import_current_cwl_sheet(
 
     if blocks:
         for block in blocks:
+            if block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX):
+                continue
             values = await sheets_client.read_values(
                 sheet_name,
                 range_from_start_cell(
@@ -1237,19 +1239,30 @@ def _find_table_headers(
     runtime_config: RuntimeChatConfig,
     block_key: str | None,
 ) -> tuple[CwlTableHeader, ...]:
-    """Ищет таблицы CWL в values."""
+    """Ищет таблицы CWL в values.
+
+    В строке заголовка обычно есть и `__bot_key`, и `Раунд`. Оба признака
+    указывают на одну и ту же таблицу, поэтому найденные заголовки нужно
+    дедуплицировать по строке и стартовой колонке. Иначе импорт обходит один
+    CWL-блок дважды и создаёт ложные warnings о дублях `row_key`.
+    """
 
     profiles = _profiles(runtime_config.column_profiles)
     headers: list[CwlTableHeader] = []
+    seen_positions: set[tuple[int, int]] = set()
     for row_index, row in enumerate(rows):
         for column_index, cell in enumerate(row):
             normalized = cell.strip()
             if normalized != BOT_KEY_TITLE and normalized not in SYSTEM_HEADER_ALIASES["round"]:
                 continue
             start_column_index = column_index if normalized == BOT_KEY_TITLE else max(column_index - 1, 0)
+            position = (row_index, start_column_index)
+            if position in seen_positions:
+                continue
             system_indexes = _system_indexes_from_header(profiles, row, start_column_index)
             if not _looks_like_cwl_header(system_indexes):
                 continue
+            seen_positions.add(position)
             width = max(_last_non_empty_index(row) - start_column_index + 1, 1)
             headers.append(
                 CwlTableHeader(

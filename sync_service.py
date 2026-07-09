@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -34,13 +35,15 @@ from repositories import (
     TelegramChatRepository,
 )
 from sheets_client import GoogleAccessTokenProvider, GoogleSheetsError, SheetsClient
-from telegram_client import TelegramClient
+from telegram_client import TelegramApiError, TelegramClient
 
 CHAT_SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 SHEET_SYNC_LOCKS: dict[str, asyncio.Lock] = {}
 GLOBAL_SEMAPHORE: asyncio.Semaphore | None = None
 GLOBAL_SEMAPHORE_LIMIT: int | None = None
 SYNC_HTTP_TIMEOUT_SECONDS: Final = 90.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,12 +257,15 @@ class SyncService:
                 error=None,
             )
             await self._connection.commit()
-            await self._telegram.send_message(
-                chat_id=runtime_chat_id,
-                text=report.text,
-                parse_mode=report.parse_mode,
-                disable_web_page_preview=report.disable_web_page_preview,
-            )
+            try:
+                await self._telegram.send_message(
+                    chat_id=runtime_chat_id,
+                    text=report.text,
+                    parse_mode=report.parse_mode,
+                    disable_web_page_preview=report.disable_web_page_preview,
+                )
+            except TelegramApiError as exc:
+                logger.warning("sync finished, but telegram report delivery failed: %s", exc)
         except (ClashApiUnavailableError, GoogleSheetsError, CompositionDataError, CwlDataError) as exc:
             await self._connection.rollback()
             await self._finish_error(
