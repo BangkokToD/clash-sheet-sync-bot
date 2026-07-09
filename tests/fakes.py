@@ -366,6 +366,7 @@ class RecordingSheetBlockRepository:
 class FakeTelegram:
     """Fake Telegram client для setup-flow tests."""
 
+    send_error: Exception | None = None
     raise_not_modified_on_edit: bool = False
     sent_messages: list[dict[str, Any]] = field(default_factory=list)
     edit_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -392,6 +393,8 @@ class FakeTelegram:
                 "disable_web_page_preview": disable_web_page_preview,
             },
         )
+        if self.send_error is not None:
+            raise self.send_error
 
     async def edit_message_text(
         self,
