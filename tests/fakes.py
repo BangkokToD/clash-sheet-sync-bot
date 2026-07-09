@@ -92,7 +92,7 @@ def make_app_config(
 def make_column_profile(
     *,
     chat_id: int = -1001,
-    table_type: str = "composition",
+    table_type: str = "composition_active",
     column_key: str,
     title: str,
     visible: bool,
@@ -117,7 +117,7 @@ def make_column_profile(
 
 
 def make_composition_column_profiles(chat_id: int = -1001) -> tuple[ColumnProfile, ...]:
-    """Создаёт стандартный профиль колонок состава с одной user-колонкой."""
+    """Создаёт стандартные профили колонок active/exited состава."""
 
     return (
         make_column_profile(
@@ -176,6 +176,67 @@ def make_composition_column_profiles(chat_id: int = -1001) -> tuple[ColumnProfil
         ),
         make_column_profile(
             chat_id=chat_id,
+            table_type="composition_exited",
+            column_key="bot_key",
+            title="__bot_key",
+            visible=False,
+            kind="service",
+            value_type="string",
+            sort_order=0,
+        ),
+        make_column_profile(
+            chat_id=chat_id,
+            table_type="composition_exited",
+            column_key="number",
+            title="№",
+            visible=True,
+            kind="system",
+            value_type="integer",
+            sort_order=10,
+        ),
+        make_column_profile(
+            chat_id=chat_id,
+            table_type="composition_exited",
+            column_key="tag",
+            title="Тег",
+            visible=True,
+            kind="system",
+            value_type="string",
+            sort_order=20,
+        ),
+        make_column_profile(
+            chat_id=chat_id,
+            table_type="composition_exited",
+            column_key="town_hall",
+            title="Ратуша",
+            visible=True,
+            kind="system",
+            value_type="integer",
+            sort_order=30,
+        ),
+        make_column_profile(
+            chat_id=chat_id,
+            table_type="composition_exited",
+            column_key="nickname",
+            title="Никнейм",
+            visible=True,
+            kind="system",
+            value_type="string",
+            sort_order=40,
+        ),
+        make_column_profile(
+            chat_id=chat_id,
+            table_type="composition_exited",
+            column_key="note",
+            title="Заметка",
+            visible=True,
+            kind="user",
+            value_type="string",
+            sort_order=45,
+        ),
+        make_column_profile(
+            chat_id=chat_id,
+            table_type="composition_exited",
             column_key="exited_at",
             title="Дата выхода",
             visible=True,

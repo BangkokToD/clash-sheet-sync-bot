@@ -150,7 +150,7 @@ async def _insert_column_profile(
     connection: aiosqlite.Connection,
     *,
     chat_id: int,
-    table_type: str = "composition",
+    table_type: str = "composition_active",
     column_key: str = "bot_key",
     title: str = "__bot_key",
     visible: bool = False,
@@ -412,7 +412,18 @@ async def test_runtime_config_repository_builds_ready_chat_config(
     await _insert_column_profile(
         migrated_connection,
         chat_id=chat_id,
-        table_type="composition",
+        table_type="composition_active",
+        column_key="bot_key",
+        title="__bot_key",
+        visible=False,
+        kind="service",
+        value_type="string",
+        sort_order=0,
+    )
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=chat_id,
+        table_type="composition_exited",
         column_key="bot_key",
         title="__bot_key",
         visible=False,
@@ -444,6 +455,7 @@ async def test_runtime_config_repository_builds_ready_chat_config(
     assert runtime_config.timezone == "Europe/Kyiv"
     assert [clan.clan_tag for clan in runtime_config.active_clans] == ["#AAA111", "#BBB222"]
     assert {profile.table_type for profile in runtime_config.column_profiles} == {
-        "composition",
+        "composition_active",
+        "composition_exited",
         "cwl",
     }

@@ -20,8 +20,8 @@ from sheets_client import CellValue, SheetValues, SheetsClient, range_from_start
 COMPOSITION_PLAYER_KEY_PREFIX: Final = "composition_player:"
 ACTIVE_BLOCK_PREFIX: Final = "composition_active:"
 EXITED_BLOCK_KEY: Final = "composition_exited"
-COMPOSITION_TABLE: Final[TableType] = "composition"
-ACTIVE_EXCLUDED_COLUMN_KEYS: Final = {"exited_at"}
+COMPOSITION_ACTIVE_TABLE: Final[TableType] = "composition_active"
+COMPOSITION_EXITED_TABLE: Final[TableType] = "composition_exited"
 DEFAULT_ACTIVE_START_CELL: Final = "A1"
 TITLE_ROWS_COUNT: Final = 2
 
@@ -453,11 +453,8 @@ def build_composition_blocks(
         Блоки значений и metadata для `sheet_blocks`.
     """
 
-    composition_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_TABLE)
-    active_columns = tuple(
-        column for column in composition_columns if column.column_key not in ACTIVE_EXCLUDED_COLUMN_KEYS
-    )
-    exited_columns = composition_columns
+    active_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_ACTIVE_TABLE)
+    exited_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_EXITED_TABLE)
     active_width = len(active_columns)
     exited_start_column = active_width + 2
     built_blocks: list[BuiltBlock] = []
@@ -1188,8 +1185,10 @@ def _offset_cell(start_cell: str, *, row_offset: int, column_offset: int) -> str
 
 
 def _table_type_from_block_key(block_key: str) -> TableType | None:
-    if block_key.startswith(ACTIVE_BLOCK_PREFIX) or block_key == EXITED_BLOCK_KEY:
-        return COMPOSITION_TABLE
+    if block_key.startswith(ACTIVE_BLOCK_PREFIX):
+        return COMPOSITION_ACTIVE_TABLE
+    if block_key == EXITED_BLOCK_KEY:
+        return COMPOSITION_EXITED_TABLE
     return None
 
 

@@ -83,13 +83,15 @@ AWAITING_CLAN_TAG_STATE_PREFIX: Final = "awaiting_clan_tag:"
 AWAITING_USER_COLUMN_TITLE_STATE_PREFIX: Final = "awaiting_user_column_title:"
 AWAITING_COLUMN_RENAME_STATE_PREFIX: Final = "awaiting_column_rename:"
 COLUMN_SECTION_TABLE_TYPES: Final[dict[str, TableType]] = {
-    "composition_columns": "composition",
+    "composition_active_columns": "composition_active",
+    "composition_exited_columns": "composition_exited",
     "cwl_columns": "cwl",
 }
 SETTINGS_SECTIONS: Final = {
     "table": "Таблица",
     "clans": "Кланы",
-    "composition_columns": "Колонки состава",
+    "composition_active_columns": "Колонки активного состава",
+    "composition_exited_columns": "Колонки вышедших",
     "cwl_columns": "Колонки CWL",
 }
 
@@ -2496,7 +2498,7 @@ def _parse_column_section_callback(callback_data: str, prefix: str) -> tuple[int
         chat_id = int(raw_chat_id)
     except ValueError:
         return None
-    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"}:
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
         return None
     return chat_id, raw_table_type  # type: ignore[return-value]
 
@@ -2519,7 +2521,7 @@ def _parse_column_callback(callback_data: str, prefix: str) -> tuple[int, TableT
         chat_id = int(raw_chat_id)
     except ValueError:
         return None
-    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"} or column_key == "":
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"} or column_key == "":
         return None
     return chat_id, raw_table_type, column_key  # type: ignore[return-value]
 
@@ -2558,7 +2560,7 @@ def _table_type_from_state(setup_state: str, *, prefix: str, user_id: int) -> Ta
     if not setup_state.startswith(expected_prefix):
         return None
     raw_table_type = setup_state.removeprefix(expected_prefix)
-    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"}:
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
         return None
     return raw_table_type  # type: ignore[return-value]
 
@@ -2579,7 +2581,7 @@ def _rename_state_payload(setup_state: str, user_id: int) -> tuple[TableType, st
         return None
     payload = setup_state.removeprefix(expected_prefix)
     raw_table_type, _, column_key = payload.partition(":")
-    if raw_table_type not in {"composition", "composition_active", "composition_exited", "cwl"} or column_key == "":
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl"} or column_key == "":
         return None
     return raw_table_type, column_key  # type: ignore[return-value]
 
