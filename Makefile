@@ -3,7 +3,7 @@
 check: py_compile test
 
 py_compile:
-	python -m py_compile *.py
+	git ls-files '*.py' | xargs python -m py_compile
 
 test:
 	python -m pytest -q
