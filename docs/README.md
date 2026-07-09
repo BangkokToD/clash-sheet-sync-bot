@@ -934,3 +934,9 @@ git check-ignore .env credentials.json bot.db bot.db-shm bot.db-wal
 * `git diff --check` без ошибок;
 * секреты и runtime DB игнорируются;
 * реальные токены не попали в diff.
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
