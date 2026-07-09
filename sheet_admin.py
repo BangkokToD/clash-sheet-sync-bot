@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
 
+from models import SheetBinding, SheetBlock
 from sheets_client import (
     CellValue,
     GoogleSheetsError,
     SheetMetadata,
     SheetsClient,
+    range_from_start_cell,
 )
 
 SPREADSHEET_URL_RE: Final = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
@@ -22,6 +25,43 @@ DEFAULT_CWL_SHEET_NAME: Final = "CWL"
 DEFAULT_BOT_STATE_SHEET_NAME: Final = "_bot_state"
 MANAGED_BY_VALUE: Final = "clash-sheet-sync-bot"
 BOT_STATE_SCHEMA_VERSION: Final = "1"
+
+DIAGNOSTIC_WRITE_RANGE: Final = "A20:B20"
+
+
+@dataclass(frozen=True, slots=True)
+class TableDiagnosticIssue:
+    """Одна проблема диагностики таблицы.
+
+    Attributes:
+        level: Уровень: ok, warning или error.
+        message: Человекочитаемый текст.
+        fixable: Может ли auto-fix исправить проблему.
+    """
+
+    level: str
+    message: str
+    fixable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TableDiagnosticResult:
+    """Результат диагностики привязанной таблицы."""
+
+    issues: tuple[TableDiagnosticIssue, ...]
+    staging_sheets: tuple[str, ...]
+
+    @property
+    def has_errors(self) -> bool:
+        """Проверяет наличие ошибок."""
+
+        return any(issue.level == "error" for issue in self.issues)
+
+    @property
+    def has_fixable_issues(self) -> bool:
+        """Проверяет наличие исправимых проблем."""
+
+        return any(issue.fixable for issue in self.issues)
 
 
 class SheetAdminError(RuntimeError):
@@ -117,6 +157,7 @@ class SheetAdminService:
             chat_id=chat_id,
             composition_sheet=composition_sheet,
             cwl_sheet=cwl_sheet,
+            active_cwl_season=None,
             bot_state_sheet=bot_state_sheet,
             timezone=timezone,
         )
@@ -150,6 +191,225 @@ class SheetAdminService:
             hidden=True,
         )
 
+    async def diagnose_binding(
+        self,
+        *,
+        binding: SheetBinding,
+        blocks: Sequence[SheetBlock],
+    ) -> TableDiagnosticResult:
+        """Проверяет привязанную таблицу без изменения пользовательских листов.
+
+        Диагностика может выполнять безопасные write/batchUpdate операции только
+        на `_bot_state`, потому что это служебный лист бота.
+        """
+
+        issues: list[TableDiagnosticIssue] = []
+        metadata = await self._sheets_client.get_spreadsheet_metadata()
+        sheets_by_title = {sheet.title: sheet for sheet in metadata.sheets}
+        composition_sheet = _sheet_by_id(metadata.sheets, binding.composition_sheet_id)
+        if composition_sheet is None:
+            composition_sheet = sheets_by_title.get(binding.composition_sheet_name)
+        if composition_sheet is None:
+            issues.append(TableDiagnosticIssue("error", "Лист Состав отсутствует.", True))
+        else:
+            issues.append(TableDiagnosticIssue("ok", f"Лист Состав найден: {composition_sheet.title}."))
+
+        if binding.active_cwl_sheet_id is None:
+            issues.append(TableDiagnosticIssue("error", "active_cwl_sheet_id отсутствует в SQLite.", True))
+        cwl_sheet = _sheet_by_id(metadata.sheets, binding.active_cwl_sheet_id)
+        if cwl_sheet is None:
+            cwl_sheet = sheets_by_title.get(binding.active_cwl_sheet_name)
+        if cwl_sheet is None:
+            issues.append(TableDiagnosticIssue("error", "Активный лист CWL отсутствует.", True))
+        else:
+            issues.append(TableDiagnosticIssue("ok", f"Активный лист CWL найден: {cwl_sheet.title}."))
+
+        bot_state_sheet = _sheet_by_id(metadata.sheets, binding.bot_state_sheet_id)
+        if bot_state_sheet is None:
+            bot_state_sheet = sheets_by_title.get(binding.bot_state_sheet_name)
+        if bot_state_sheet is None:
+            issues.append(TableDiagnosticIssue("error", "Лист _bot_state отсутствует.", True))
+        else:
+            issues.append(TableDiagnosticIssue("ok", "Лист _bot_state найден."))
+            bot_state = await self._read_bot_state(bot_state_sheet.title)
+            state_sheet_id = bot_state.get("google_sheet_id")
+            if state_sheet_id != binding.google_sheet_id:
+                issues.append(
+                    TableDiagnosticIssue(
+                        "error",
+                        "google_sheet_id в SQLite и _bot_state не совпадает.",
+                        False,
+                    ),
+                )
+            else:
+                issues.append(TableDiagnosticIssue("ok", "google_sheet_id в _bot_state совпадает."))
+            await self._sheets_client.write_values(
+                sheet_name=bot_state_sheet.title,
+                range_a1=DIAGNOSTIC_WRITE_RANGE,
+                values=[
+                    ["diagnostic_checked_at", _utc_now_iso()],
+                ],
+            )
+            issues.append(TableDiagnosticIssue("ok", "values write доступен."))
+            await self._sheets_client.hide_sheet(bot_state_sheet.sheet_id, hidden=True)
+            issues.append(TableDiagnosticIssue("ok", "spreadsheets.batchUpdate доступен."))
+
+        issues.extend(await self._diagnose_bot_key_blocks(blocks))
+        staging_sheets = tuple(
+            sheet.title
+            for sheet in metadata.sheets
+            if sheet.title.startswith("CWL - staging - ")
+        )
+        if staging_sheets:
+            issues.append(
+                TableDiagnosticIssue(
+                    "warning",
+                    "Найдены staging-листы после прошлых ошибок: " + ", ".join(staging_sheets) + ".",
+                    False,
+                ),
+            )
+        return TableDiagnosticResult(issues=tuple(issues), staging_sheets=staging_sheets)
+
+    async def auto_fix_binding(
+        self,
+        *,
+        binding: SheetBinding,
+        blocks: Sequence[SheetBlock],
+    ) -> SheetSetupResult:
+        """Восстанавливает обязательные листы, `_bot_state` и скрытые ключи."""
+
+        self._validate_service_account_email()
+        metadata = await self._sheets_client.get_spreadsheet_metadata()
+        composition_sheet = _sheet_by_id(metadata.sheets, binding.composition_sheet_id)
+        if composition_sheet is None:
+            composition_sheet = _sheet_by_title(metadata.sheets, binding.composition_sheet_name)
+        if composition_sheet is None:
+            composition_sheet = await self._sheets_client.add_sheet(binding.composition_sheet_name)
+
+        metadata = await self._sheets_client.get_spreadsheet_metadata()
+        cwl_sheet = _sheet_by_id(metadata.sheets, binding.active_cwl_sheet_id)
+        if cwl_sheet is None:
+            cwl_sheet = _sheet_by_title(metadata.sheets, binding.active_cwl_sheet_name)
+        if cwl_sheet is None:
+            cwl_sheet = await self._sheets_client.add_sheet(binding.active_cwl_sheet_name)
+
+        metadata = await self._sheets_client.get_spreadsheet_metadata()
+        bot_state_sheet = _sheet_by_id(metadata.sheets, binding.bot_state_sheet_id)
+        if bot_state_sheet is None:
+            bot_state_sheet = _sheet_by_title(metadata.sheets, binding.bot_state_sheet_name)
+        if bot_state_sheet is None:
+            bot_state_sheet = await self._sheets_client.add_sheet(binding.bot_state_sheet_name)
+
+        await self._write_bot_state(
+            chat_id=binding.chat_id,
+            composition_sheet=composition_sheet,
+            cwl_sheet=cwl_sheet,
+            active_cwl_season=binding.active_cwl_season,
+            bot_state_sheet=bot_state_sheet,
+            timezone=binding.timezone,
+        )
+        await self._sheets_client.hide_sheet(bot_state_sheet.sheet_id, hidden=True)
+        await self._hide_bot_key_columns_for_blocks(blocks)
+        return SheetSetupResult(
+            spreadsheet_id=self._spreadsheet_id,
+            spreadsheet_url=spreadsheet_url(self._spreadsheet_id),
+            composition_sheet_name=composition_sheet.title,
+            composition_sheet_id=composition_sheet.sheet_id,
+            active_cwl_sheet_name=cwl_sheet.title,
+            active_cwl_sheet_id=cwl_sheet.sheet_id,
+            active_cwl_season=binding.active_cwl_season,
+            bot_state_sheet_name=bot_state_sheet.title,
+            bot_state_sheet_id=bot_state_sheet.sheet_id,
+        )
+
+    async def _read_bot_state(self, sheet_name: str) -> dict[str, str]:
+        """Читает `_bot_state` в словарь key -> value."""
+
+        values = await self._sheets_client.read_values(sheet_name, "A1:B30")
+        result: dict[str, str] = {}
+        for row in values:
+            if len(row) < 2:
+                continue
+            key = str(row[0]).strip()
+            if key:
+                result[key] = str(row[1]).strip()
+        return result
+
+    async def _diagnose_bot_key_blocks(
+        self,
+        blocks: Sequence[SheetBlock],
+    ) -> tuple[TableDiagnosticIssue, ...]:
+        """Проверяет наличие `__bot_key` в управляемых табличных блоках."""
+
+        table_blocks = [
+            block
+            for block in blocks
+            if not block.block_key.startswith("cwl_message:")
+        ]
+        if not table_blocks:
+            return (
+                TableDiagnosticIssue(
+                    "warning",
+                    "Управляемые блоки ещё не создавались. Запустите /sync.",
+                    False,
+                ),
+            )
+
+        issues: list[TableDiagnosticIssue] = []
+        for block in table_blocks:
+            if block.rows_count < 2 or block.columns_count < 1:
+                issues.append(
+                    TableDiagnosticIssue(
+                        "error",
+                        f"Блок {block.block_key} слишком мал для заголовка __bot_key.",
+                        False,
+                    ),
+                )
+                continue
+            values = await self._sheets_client.read_values(
+                block.sheet_name,
+                range_from_start_cell(
+                    start_cell=block.start_cell,
+                    rows_count=2,
+                    columns_count=1,
+                ),
+            )
+            header_value = ""
+            if len(values) >= 2 and values[1]:
+                header_value = str(values[1][0]).strip()
+            if header_value != "__bot_key":
+                issues.append(
+                    TableDiagnosticIssue(
+                        "error",
+                        f"В блоке {block.block_key} не найден __bot_key в первой физической колонке.",
+                        True,
+                    ),
+                )
+        if not issues:
+            issues.append(TableDiagnosticIssue("ok", "__bot_key найден в управляемых блоках."))
+        return tuple(issues)
+
+    async def _hide_bot_key_columns_for_blocks(self, blocks: Sequence[SheetBlock]) -> None:
+        """Скрывает первые физические колонки всех известных managed-блоков."""
+
+        hidden: set[tuple[int, int]] = set()
+        for block in blocks:
+            if block.sheet_id is None:
+                try:
+                    metadata = await self._sheets_client.get_sheet_metadata(block.sheet_name)
+                except GoogleSheetsError:
+                    continue
+                sheet_id = metadata.sheet_id
+            else:
+                sheet_id = block.sheet_id
+            column_number = _column_number_from_a1(block.start_cell)
+            column_index = column_number - 1
+            key = (sheet_id, column_index)
+            if key in hidden:
+                continue
+            hidden.add(key)
+            await self.hide_bot_key_column(sheet_id=sheet_id, column_index=column_index)
+
     async def _ensure_sheet(
         self,
         *,
@@ -177,6 +437,7 @@ class SheetAdminService:
         chat_id: int,
         composition_sheet: SheetMetadata,
         cwl_sheet: SheetMetadata,
+        active_cwl_season: str | None,
         bot_state_sheet: SheetMetadata,
         timezone: str,
     ) -> None:
@@ -199,7 +460,7 @@ class SheetAdminService:
             ["composition_sheet_id", composition_sheet.sheet_id],
             ["active_cwl_sheet_name", cwl_sheet.title],
             ["active_cwl_sheet_id", cwl_sheet.sheet_id],
-            ["active_cwl_season", ""],
+            ["active_cwl_season", active_cwl_season or ""],
             ["bot_state_sheet_name", bot_state_sheet.title],
             ["bot_state_sheet_id", bot_state_sheet.sheet_id],
             ["timezone", timezone],
@@ -273,3 +534,35 @@ def _utc_now_iso() -> str:
     """
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def _sheet_by_id(sheets: Sequence[SheetMetadata], sheet_id: int | None) -> SheetMetadata | None:
+    """Ищет лист по числовому ID."""
+
+    if sheet_id is None:
+        return None
+    return next((sheet for sheet in sheets if sheet.sheet_id == sheet_id), None)
+
+
+def _sheet_by_title(sheets: Sequence[SheetMetadata], title: str) -> SheetMetadata | None:
+    """Ищет лист по названию."""
+
+    return next((sheet for sheet in sheets if sheet.title == title), None)
+
+
+def _column_number_from_a1(cell: str) -> int:
+    """Возвращает номер колонки из A1-ячейки, начиная с 1."""
+
+    letters = ""
+    for char in cell.strip():
+        if char.isalpha():
+            letters += char
+        elif char.isdigit():
+            break
+        else:
+            raise SheetAdminError(f"Некорректная A1-ячейка: {cell}.")
+    if not letters:
+        raise SheetAdminError(f"Некорректная A1-ячейка: {cell}.")
+    number = 0
+    for char in letters.upper():
+        number = number * 26 + ord(char) - ord("A") + 1
+    return number

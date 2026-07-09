@@ -327,6 +327,13 @@ async def apply_prepared_composition_sync(
 ) -> None:
     """Записывает подготовленный состав в Google Sheets и SQLite."""
 
+    sheet_name = runtime_config.sheet_binding.composition_sheet_name
+    previous_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
+    composition_blocks = tuple(
+        block
+        for block in previous_blocks
+        if block.block_key.startswith(ACTIVE_BLOCK_PREFIX) or block.block_key == EXITED_BLOCK_KEY
+    )
     await _rewrite_composition_blocks(
         sheets_client=sheets_client,
         sheet_name=sheet_name,

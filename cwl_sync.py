@@ -431,6 +431,7 @@ async def apply_public_cwl_sync(
         archived_previous_season=season_changed,
         not_in_progress_clans=prepared.not_in_progress_clans,
         warnings=prepared.warnings,
+        diff_items=prepared.diff_items,
     )
 
 async def import_current_cwl_sheet(

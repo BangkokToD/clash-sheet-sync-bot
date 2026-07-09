@@ -192,6 +192,10 @@ class BotApp:
                 await flow.send_group_settings_pointer(chat=chat, user_id=user_id)
             return
 
+        if command.name == "/accept_transfer":
+            await flow.accept_transfer(chat=chat, user_id=user_id, raw_token=command.args)
+            return
+
         if command.name == "/sync":
             await self._sync_service().handle_sync_command(
                 chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),

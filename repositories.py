@@ -115,6 +115,29 @@ class CwlRowState:
     row_hash: str | None
 
 
+
+
+@dataclass(frozen=True, slots=True)
+class TransferToken:
+    """Одноразовый токен переноса таблицы на другой чат.
+
+    Attributes:
+        token: Секретная часть команды `/accept_transfer`.
+        source_chat_id: ID исходного Telegram-чата.
+        created_by_user_id: Telegram user ID создателя токена.
+        expires_at: ISO-дата истечения токена.
+        used_at: ISO-дата использования или `None`.
+        created_at: ISO-дата создания.
+    """
+
+    token: str
+    source_chat_id: int
+    created_by_user_id: int
+    expires_at: str
+    used_at: str | None
+    created_at: str
+
+
 @dataclass(frozen=True, slots=True)
 class SyncStatusSummary:
     """Сводка последнего sync для `/status`.
@@ -997,6 +1020,18 @@ class TelegramChatRepository:
             (status, now, chat_id),
         )
 
+    async def disable_chat(self, *, chat_id: int, now: str) -> None:
+        """Отключает Telegram-группу без удаления исторических данных."""
+
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET status = 'disabled', setup_state = NULL, updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (now, chat_id),
+        )
+
     async def mark_sync_started(self, *, chat_id: int, started_at: str) -> None:
         """Фиксирует момент принятия `/sync` для rate limit."""
 
@@ -1276,6 +1311,92 @@ class SheetBindingRepository:
             (active_cwl_sheet_name, active_cwl_sheet_id, active_cwl_season, now, chat_id),
         )
 
+
+
+    async def update_sheet_ids(
+        self,
+        *,
+        chat_id: int,
+        composition_sheet_name: str,
+        composition_sheet_id: int,
+        active_cwl_sheet_name: str,
+        active_cwl_sheet_id: int,
+        active_cwl_season: str | None,
+        bot_state_sheet_name: str,
+        bot_state_sheet_id: int,
+        now: str,
+    ) -> None:
+        """Обновляет sheet IDs после диагностики/auto-fix."""
+
+        await self._connection.execute(
+            """
+            UPDATE sheet_bindings
+            SET composition_sheet_name = ?,
+                composition_sheet_id = ?,
+                active_cwl_sheet_name = ?,
+                active_cwl_sheet_id = ?,
+                active_cwl_season = ?,
+                bot_state_sheet_name = ?,
+                bot_state_sheet_id = ?,
+                updated_at = ?
+            WHERE chat_id = ? AND is_active = 1
+            """,
+            (
+                composition_sheet_name,
+                composition_sheet_id,
+                active_cwl_sheet_name,
+                active_cwl_sheet_id,
+                active_cwl_season,
+                bot_state_sheet_name,
+                bot_state_sheet_id,
+                now,
+                chat_id,
+            ),
+        )
+
+    async def deactivate_binding(self, *, chat_id: int, now: str) -> None:
+        """Деактивирует привязку таблицы без изменения Google Sheets."""
+
+        await self._connection.execute(
+            """
+            UPDATE sheet_bindings
+            SET is_active = 0, updated_at = ?
+            WHERE chat_id = ? AND is_active = 1
+            """,
+            (now, chat_id),
+        )
+
+    async def has_active_binding(self, chat_id: int) -> bool:
+        """Проверяет, есть ли у чата активная привязка таблицы."""
+
+        row = await fetch_one(
+            self._connection,
+            "SELECT 1 FROM sheet_bindings WHERE chat_id = ? AND is_active = 1 LIMIT 1",
+            (chat_id,),
+        )
+        return row is not None
+
+    async def transfer_binding_to_chat(
+        self,
+        *,
+        source_chat_id: int,
+        target_chat_id: int,
+        now: str,
+    ) -> None:
+        """Переносит активную привязку таблицы на другой Telegram-чат."""
+
+        await self._connection.execute(
+            "DELETE FROM sheet_bindings WHERE chat_id = ? AND is_active = 0",
+            (target_chat_id,),
+        )
+        await self._connection.execute(
+            """
+            UPDATE sheet_bindings
+            SET chat_id = ?, updated_at = ?
+            WHERE chat_id = ? AND is_active = 1
+            """,
+            (target_chat_id, now, source_chat_id),
+        )
 
 class SheetBlockRepository:
     """Repository последних управляемых прямоугольников Google Sheets.
@@ -1590,6 +1711,119 @@ class CwlRowStateRepository:
         )
 
 
+
+
+class TransferTokenRepository:
+    """Repository токенов переноса таблицы."""
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def create_transfer_token(
+        self,
+        *,
+        token: str,
+        source_chat_id: int,
+        created_by_user_id: int,
+        expires_at: str,
+        created_at: str,
+    ) -> None:
+        """Создаёт одноразовый transfer token."""
+
+        await self._connection.execute(
+            """
+            INSERT INTO transfer_tokens(
+                token, source_chat_id, created_by_user_id, expires_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (token, source_chat_id, created_by_user_id, expires_at, created_at),
+        )
+
+    async def get_transfer_token(self, token: str) -> TransferToken | None:
+        """Читает transfer token по секретному значению."""
+
+        row = await fetch_one(
+            self._connection,
+            """
+            SELECT token, source_chat_id, created_by_user_id, expires_at, used_at, created_at
+            FROM transfer_tokens
+            WHERE token = ?
+            """,
+            (token,),
+        )
+        if row is None:
+            return None
+        return TransferToken(
+            token=as_str(row["token"], "token"),
+            source_chat_id=as_int(row["source_chat_id"], "source_chat_id"),
+            created_by_user_id=as_int(row["created_by_user_id"], "created_by_user_id"),
+            expires_at=as_str(row["expires_at"], "expires_at"),
+            used_at=as_optional_str(row["used_at"], "used_at"),
+            created_at=as_str(row["created_at"], "created_at"),
+        )
+
+    async def mark_transfer_token_used(self, *, token: str, used_at: str) -> bool:
+        """Помечает transfer token использованным."""
+
+        cursor = await self._connection.execute(
+            """
+            UPDATE transfer_tokens
+            SET used_at = ?
+            WHERE token = ? AND used_at IS NULL
+            """,
+            (used_at, token),
+        )
+        return cursor.rowcount == 1
+
+
+class ChatLifecycleRepository:
+    """Repository массовых lifecycle-операций над настройками чата."""
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def move_runtime_state(
+        self,
+        *,
+        source_chat_id: int,
+        target_chat_id: int,
+        now: str,
+    ) -> None:
+        """Переносит кланы, профили, state и blocks на новый chat_id."""
+
+        for table_name in (
+            "tracked_clans",
+            "column_profiles",
+            "composition_player_state",
+            "cwl_row_state",
+            "sheet_blocks",
+        ):
+            await self._connection.execute(
+                f"DELETE FROM {table_name} WHERE chat_id = ?",
+                (target_chat_id,),
+            )
+            await self._connection.execute(
+                f"UPDATE {table_name} SET chat_id = ? WHERE chat_id = ?",
+                (target_chat_id, source_chat_id),
+            )
+
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET status = 'disabled', setup_state = NULL, updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (now, source_chat_id),
+        )
+        await self._connection.execute(
+            """
+            UPDATE telegram_chats
+            SET status = 'ready', setup_state = NULL, updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (now, target_chat_id),
+        )
 
 class SyncRunRepository:
     """Repository для истории запусков `/sync`.

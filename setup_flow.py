@@ -20,14 +20,23 @@ from column_profiles import new_user_column_key, normalize_column_title, table_t
 from models import AppConfig, SetupToken, TableType, normalize_tag
 from repositories import (
     AdminChatRepository,
+    ChatLifecycleRepository,
     RuntimeConfigRepository,
     ClanSettingsRepository,
     ColumnProfileRepository,
     SheetBindingRepository,
+    SheetBlockRepository,
     SetupTokenRepository,
     TelegramChatRepository,
+    TransferTokenRepository,
 )
-from sheet_admin import SheetAdminError, SheetAdminService, extract_spreadsheet_id
+from sheet_admin import (
+    SheetAdminError,
+    SheetAdminService,
+    TableDiagnosticIssue,
+    TableDiagnosticResult,
+    extract_spreadsheet_id,
+)
 from storage import transaction
 from telegram_access import TelegramAccessService
 from telegram_client import (
@@ -49,6 +58,14 @@ CALLBACK_HELP: Final = "setup:help"
 CALLBACK_SETTINGS_PREFIX: Final = "settings:open:"
 CALLBACK_SETTINGS_SECTION_PREFIX: Final = "settings:section:"
 CALLBACK_BIND_SHEET_PREFIX: Final = "sheet:bind:"
+CALLBACK_CHANGE_SHEET_PREFIX: Final = "sheet:change:"
+CALLBACK_UNLINK_SHEET_PREFIX: Final = "sheet:unlink:"
+CALLBACK_CONFIRM_UNLINK_SHEET_PREFIX: Final = "sheet:unlink_confirm:"
+CALLBACK_DIAGNOSE_SHEET_PREFIX: Final = "sheet:diagnose:"
+CALLBACK_FIX_SHEET_PREFIX: Final = "sheet:fix:"
+CALLBACK_CREATE_TRANSFER_PREFIX: Final = "transfer:create:"
+CALLBACK_DISABLE_GROUP_PREFIX: Final = "group:disable:"
+CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX: Final = "group:disable_confirm:"
 CALLBACK_CHECK_SHEET_PREFIX: Final = "sheet:check:"
 CALLBACK_CLAN_ADD_PREFIX: Final = "clans:add:"
 CALLBACK_CLAN_CONFIRM_PREFIX: Final = "clans:confirm:"
@@ -76,6 +93,7 @@ SETTINGS_SECTIONS: Final = {
     "clans": "Кланы",
     "composition_columns": "Колонки состава",
     "cwl_columns": "Колонки CWL",
+    "disable_group": "Отключить группу",
 }
 
 
@@ -123,6 +141,9 @@ class SetupFlow:
         self._telegram_chats = TelegramChatRepository(connection)
         self._admin_chats = AdminChatRepository(connection)
         self._sheet_bindings = SheetBindingRepository(connection)
+        self._blocks = SheetBlockRepository(connection)
+        self._transfers = TransferTokenRepository(connection)
+        self._lifecycle = ChatLifecycleRepository(connection)
         self._clans = ClanSettingsRepository(connection)
         self._columns = ColumnProfileRepository(connection)
         self._runtime = RuntimeConfigRepository(connection)
@@ -547,6 +568,108 @@ class SetupFlow:
 
         await self._telegram.send_message(chat_id=chat.chat_id, text=group_text)
 
+    async def accept_transfer(
+        self,
+        *,
+        chat: TelegramChatInfo,
+        user_id: int,
+        raw_token: str | None,
+    ) -> None:
+        """Принимает перенос таблицы в новой Telegram-группе."""
+
+        if chat.type not in {"group", "supergroup"}:
+            await self._telegram.send_message(
+                chat_id=chat.chat_id,
+                text="Команда /accept_transfer работает только в Telegram-группе.",
+            )
+            return
+
+        token_value = (raw_token or "").strip()
+        if token_value == "":
+            await self._telegram.send_message(
+                chat_id=chat.chat_id,
+                text="Используйте команду вида /accept_transfer <token>.",
+            )
+            return
+
+        transfer_token = await self._transfers.get_transfer_token(token_value)
+        token_error = _validate_transfer_token(transfer_token, token_value)
+        if token_error is not None:
+            await self._telegram.send_message(chat_id=chat.chat_id, text=token_error)
+            return
+
+        assert transfer_token is not None
+        target_admin = await self._access.is_admin(
+            chat_id=chat.chat_id,
+            user_id=user_id,
+            force_refresh=True,
+        )
+        if not target_admin.is_admin:
+            await self._telegram.send_message(
+                chat_id=chat.chat_id,
+                text="Принять перенос может только Telegram-администратор новой группы.",
+            )
+            return
+
+        source_admin = await self._access.is_admin(
+            chat_id=transfer_token.source_chat_id,
+            user_id=user_id,
+            force_refresh=True,
+        )
+        if not source_admin.is_admin:
+            await self._telegram.send_message(
+                chat_id=chat.chat_id,
+                text="Пользователь должен быть администратором старой группы.",
+            )
+            return
+
+        if await self._sheet_bindings.has_active_binding(chat.chat_id):
+            await self._telegram.send_message(
+                chat_id=chat.chat_id,
+                text="У этой группы уже есть активная таблица.",
+            )
+            return
+
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            token_marked = await self._transfers.mark_transfer_token_used(
+                token=token_value,
+                used_at=now,
+            )
+            if not token_marked:
+                await self._telegram.send_message(
+                    chat_id=chat.chat_id,
+                    text="Transfer token уже использован. Создайте новый токен.",
+                )
+                return
+            await self._telegram_chats.upsert_known_chat(
+                chat_id=chat.chat_id,
+                title=chat.title,
+                chat_type=chat.type,
+                now=now,
+            )
+            await self._telegram_chats.upsert_admin_link(
+                chat_id=chat.chat_id,
+                user_id=user_id,
+                linked_at=now,
+                last_admin_check_at=now,
+            )
+            await self._sheet_bindings.transfer_binding_to_chat(
+                source_chat_id=transfer_token.source_chat_id,
+                target_chat_id=chat.chat_id,
+                now=now,
+            )
+            await self._lifecycle.move_runtime_state(
+                source_chat_id=transfer_token.source_chat_id,
+                target_chat_id=chat.chat_id,
+                now=now,
+            )
+
+        await self._telegram.send_message(
+            chat_id=chat.chat_id,
+            text="Таблица и настройки перенесены в эту группу. Можно запускать /sync.",
+        )
+
     async def send_private_settings(self, chat_id: int, user_id: int) -> None:
         """Показывает список известных групп пользователя в личке.
 
@@ -687,6 +810,30 @@ class SetupFlow:
                 chat_id=chat_id,
                 user_id=user_id,
             )
+            return
+        if callback_data.startswith(CALLBACK_CHANGE_SHEET_PREFIX):
+            await self._show_change_sheet_warning(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_UNLINK_SHEET_PREFIX):
+            await self._show_unlink_sheet_warning(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_CONFIRM_UNLINK_SHEET_PREFIX):
+            await self._confirm_unlink_sheet(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_DIAGNOSE_SHEET_PREFIX):
+            await self._diagnose_sheet(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_FIX_SHEET_PREFIX):
+            await self._fix_sheet(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_CREATE_TRANSFER_PREFIX):
+            await self._create_transfer_token(callback_data, callback_query_id, chat_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_DISABLE_GROUP_PREFIX):
+            await self._show_disable_group_warning(callback_data, callback_query_id, chat_id, message_id, user_id)
+            return
+        if callback_data.startswith(CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX):
+            await self._confirm_disable_group(callback_data, callback_query_id, chat_id, message_id, user_id)
             return
         if callback_data.startswith(CALLBACK_CHECK_SHEET_PREFIX):
             await self._check_sheet_access(
@@ -915,6 +1062,13 @@ class SetupFlow:
                 message_id=message_id,
             )
             return
+        if section_key == "disable_group":
+            await self._show_disable_group_screen(
+                group_chat_id=group_chat_id,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return
 
         title = SETTINGS_SECTIONS.get(section_key, "Раздел")
         text = f"Раздел «{title}» будет реализован в следующем шаге разработки."
@@ -983,7 +1137,7 @@ class SetupFlow:
                 "на существующую Google-таблицу.\n\n"
                 f"Service account: {service_account_email}"
             )
-            action_text = "Привязать таблицу"
+            reply_markup = sheet_section_keyboard(group_chat_id, has_binding=False)
         else:
             text = (
                 "Раздел «Таблица».\n\n"
@@ -992,16 +1146,332 @@ class SetupFlow:
                 f"Лист состава: {binding.composition_sheet_name}\n"
                 f"Лист CWL: {binding.active_cwl_sheet_name}\n"
                 f"Service account: {service_account_email}\n\n"
-                "Чтобы заменить таблицу, нажмите кнопку ниже и отправьте новую ссылку."
+                "Доступны диагностика, смена таблицы, отвязка и перенос в другую группу."
             )
-            action_text = "Заменить таблицу"
+            reply_markup = sheet_section_keyboard(group_chat_id, has_binding=True)
 
         await _edit_or_send_message(
             telegram=self._telegram,
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=sheet_section_keyboard(group_chat_id, action_text),
+            reply_markup=reply_markup,
+        )
+
+    async def _show_change_sheet_warning(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Показывает предупреждение перед сменой таблицы."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_CHANGE_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                "Старая таблица больше не будет обновляться.\n"
+                "Настройки кланов и колонок сохранятся.\n\n"
+                "Продолжить?"
+            ),
+            reply_markup=confirm_change_sheet_keyboard(group_chat_id),
+        )
+
+    async def _show_unlink_sheet_warning(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Показывает подтверждение отвязки таблицы."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_UNLINK_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                "Отвязать таблицу от группы?\n\n"
+                "После отвязки /sync станет недоступен. Кланы, колонки и state останутся в SQLite. "
+                "Google Sheets не будет изменён."
+            ),
+            reply_markup=confirm_unlink_sheet_keyboard(group_chat_id),
+        )
+
+    async def _confirm_unlink_sheet(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Деактивирует текущую привязку таблицы."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_CONFIRM_UNLINK_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._sheet_bindings.deactivate_binding(chat_id=group_chat_id, now=now)
+            await self._telegram_chats.set_setup_state(chat_id=group_chat_id, setup_state=None, now=now)
+            await self._telegram_chats.set_status(chat_id=group_chat_id, status="waiting_for_sheet", now=now)
+        await self._telegram.answer_callback_query(callback_query_id, "Таблица отвязана.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Таблица отвязана. Кланы и профили колонок сохранены.",
+            reply_markup=settings_menu_keyboard(group_chat_id),
+        )
+
+    async def _diagnose_sheet(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Запускает диагностику привязанной таблицы."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_DIAGNOSE_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        binding = await self._runtime.get_active_sheet_binding(group_chat_id)
+        if binding is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Таблица не привязана.", show_alert=True)
+            return
+        await self._telegram.answer_callback_query(callback_query_id, "Проверяю таблицу.")
+        try:
+            result = await self._run_table_diagnostics(binding=binding)
+        except (GoogleSheetsAuthError, SheetAdminError) as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return
+        if await self._runtime.is_google_sheet_bound_elsewhere(
+            binding.google_sheet_id,
+            current_chat_id=group_chat_id,
+        ):
+            result = TableDiagnosticResult(
+                issues=(
+                    *result.issues,
+                    _diagnostic_issue("error", "Эта таблица привязана к другой active group.", False),
+                ),
+                staging_sheets=result.staging_sheets,
+            )
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=_diagnostic_text(result),
+            reply_markup=diagnostic_keyboard(group_chat_id, result.has_fixable_issues),
+        )
+
+    async def _fix_sheet(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Выполняет auto-fix привязанной таблицы."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_FIX_SHEET_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        binding = await self._runtime.get_active_sheet_binding(group_chat_id)
+        if binding is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Таблица не привязана.", show_alert=True)
+            return
+        await self._telegram.answer_callback_query(callback_query_id, "Исправляю.")
+        try:
+            setup_result = await self._run_table_autofix(binding=binding)
+        except (GoogleSheetsAuthError, SheetAdminError) as exc:
+            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._sheet_bindings.update_sheet_ids(
+                chat_id=group_chat_id,
+                composition_sheet_name=setup_result.composition_sheet_name,
+                composition_sheet_id=setup_result.composition_sheet_id,
+                active_cwl_sheet_name=setup_result.active_cwl_sheet_name,
+                active_cwl_sheet_id=setup_result.active_cwl_sheet_id,
+                active_cwl_season=setup_result.active_cwl_season,
+                bot_state_sheet_name=setup_result.bot_state_sheet_name,
+                bot_state_sheet_id=setup_result.bot_state_sheet_id,
+                now=now,
+            )
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Auto-fix выполнен. Запустите диагностику повторно.",
+            reply_markup=diagnostic_keyboard(group_chat_id, has_fixable_issues=False),
+        )
+
+    async def _create_transfer_token(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        user_id: int,
+    ) -> None:
+        """Создаёт transfer token для переноса таблицы в другую группу."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_CREATE_TRANSFER_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        if await self._runtime.get_active_sheet_binding(group_chat_id) is None:
+            await self._telegram.answer_callback_query(callback_query_id, "Таблица не привязана.", show_alert=True)
+            return
+        now = _utc_now()
+        expires_at = now + timedelta(seconds=self._config.transfer_token_ttl_seconds)
+        token = secrets.token_urlsafe(18)
+        async with transaction(self._connection):
+            await self._transfers.create_transfer_token(
+                token=token,
+                source_chat_id=group_chat_id,
+                created_by_user_id=user_id,
+                expires_at=_format_dt(expires_at),
+                created_at=_format_dt(now),
+            )
+        command = f"/accept_transfer {token}"
+        await self._telegram.answer_callback_query(callback_query_id, "Токен создан.")
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=(
+                "Добавьте бота в новую группу и отправьте там команду:\n\n"
+                f"<code>{escape(command)}</code>\n\n"
+                "Команду должен отправить Telegram-администратор старой и новой группы."
+            ),
+            parse_mode="HTML",
+        )
+
+    async def _show_disable_group_screen(self, *, group_chat_id: int, chat_id: int, message_id: int) -> None:
+        """Показывает экран отключения группы."""
+
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                "Отключить группу?\n\n"
+                "Бот перестанет считать группу настроенной. Active binding будет деактивирован. "
+                "Google Sheets не будет изменён."
+            ),
+            reply_markup=disable_group_keyboard(group_chat_id),
+        )
+
+    async def _show_disable_group_warning(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Показывает подтверждение отключения группы."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_DISABLE_GROUP_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+        await self._show_disable_group_screen(group_chat_id=group_chat_id, chat_id=chat_id, message_id=message_id)
+
+    async def _confirm_disable_group(
+        self,
+        callback_data: str,
+        callback_query_id: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> None:
+        """Отключает группу без изменения Google Sheets."""
+
+        group_chat_id = await self._parse_callback_group_id(
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            prefix=CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX,
+        )
+        if group_chat_id is None:
+            return
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            await self._telegram.answer_callback_query(callback_query_id, "Нет доступа.", show_alert=True)
+            return
+        now = _format_dt(_utc_now())
+        async with transaction(self._connection):
+            await self._sheet_bindings.deactivate_binding(chat_id=group_chat_id, now=now)
+            await self._telegram_chats.disable_chat(chat_id=group_chat_id, now=now)
+        await self._telegram.answer_callback_query(callback_query_id, "Группа отключена.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Группа отключена. Google Sheets не изменялся.",
+            reply_markup=known_groups_keyboard([]),
         )
 
     async def _start_sheet_binding(
@@ -1029,7 +1499,7 @@ class SetupFlow:
         if group_chat_id is None:
             return
 
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(
                 callback_query_id,
                 "Нет доступа к настройкам этой группы.",
@@ -1077,7 +1547,7 @@ class SetupFlow:
         if group_chat_id is None:
             return
 
-        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+        if not await self._has_sensitive_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
             await self._telegram.answer_callback_query(
                 callback_query_id,
                 "Нет доступа к настройкам этой группы.",
@@ -1238,6 +1708,50 @@ class SetupFlow:
             chat_id=group_chat_id,
             user_id=user_id,
         )
+
+    async def _has_sensitive_group_settings_access(self, *, group_chat_id: int, user_id: int) -> bool:
+        """Проверяет доступ к чувствительным действиям без admin-cache."""
+
+        if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
+            return False
+        admin_result = await self._access.is_admin(
+            chat_id=group_chat_id,
+            user_id=user_id,
+            force_refresh=True,
+        )
+        return admin_result.is_admin
+
+    async def _run_table_diagnostics(self, *, binding) -> TableDiagnosticResult:
+        """Запускает низкоуровневую диагностику Google Sheets."""
+
+        token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        blocks = await self._blocks.list_blocks(binding.chat_id)
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            sheets_client = SheetsClient(binding.google_sheet_id, token_provider, http_client)
+            admin = SheetAdminService(
+                sheets_client=sheets_client,
+                spreadsheet_id=binding.google_sheet_id,
+                service_account_email=token_provider.client_email,
+                expected_service_account_email=self._config.google_service_account_email,
+            )
+            return await admin.diagnose_binding(binding=binding, blocks=blocks)
+
+    async def _run_table_autofix(self, *, binding):
+        """Запускает auto-fix Google Sheets и возвращает новые sheet IDs."""
+
+        token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        blocks = await self._blocks.list_blocks(binding.chat_id)
+        async with httpx.AsyncClient(timeout=timeout) as http_client:
+            sheets_client = SheetsClient(binding.google_sheet_id, token_provider, http_client)
+            admin = SheetAdminService(
+                sheets_client=sheets_client,
+                spreadsheet_id=binding.google_sheet_id,
+                service_account_email=token_provider.client_email,
+                expected_service_account_email=self._config.google_service_account_email,
+            )
+            return await admin.auto_fix_binding(binding=binding, blocks=blocks)
 
     async def _lookup_clan(self, clan_tag: str):
         """Проверяет клан через Clash of Clans API.
@@ -1795,30 +2309,98 @@ def settings_menu_keyboard(group_chat_id: int) -> JsonObject:
 
 
 
-def sheet_section_keyboard(group_chat_id: int, action_text: str) -> JsonObject:
-    """Создаёт клавиатуру раздела таблицы.
+def sheet_section_keyboard(group_chat_id: int, *, has_binding: bool) -> JsonObject:
+    """Создаёт клавиатуру раздела таблицы."""
 
-    Args:
-        group_chat_id: ID Telegram-группы.
-
-    Returns:
-        Telegram inline keyboard.
-    """
-
-    return {
-        "inline_keyboard": [
+    keyboard: list[list[dict[str, str]]] = []
+    if has_binding:
+        keyboard.extend(
+            [
+                [
+                    {
+                        "text": "Проверить таблицу",
+                        "callback_data": f"{CALLBACK_DIAGNOSE_SHEET_PREFIX}{group_chat_id}",
+                    },
+                ],
+                [
+                    {
+                        "text": "Сменить таблицу",
+                        "callback_data": f"{CALLBACK_CHANGE_SHEET_PREFIX}{group_chat_id}",
+                    },
+                ],
+                [
+                    {
+                        "text": "Отвязать таблицу",
+                        "callback_data": f"{CALLBACK_UNLINK_SHEET_PREFIX}{group_chat_id}",
+                    },
+                ],
+                [
+                    {
+                        "text": "Перенести в другую группу",
+                        "callback_data": f"{CALLBACK_CREATE_TRANSFER_PREFIX}{group_chat_id}",
+                    },
+                ],
+            ],
+        )
+    else:
+        keyboard.append(
             [
                 {
-                    "text": action_text,
+                    "text": "Привязать таблицу",
                     "callback_data": f"{CALLBACK_BIND_SHEET_PREFIX}{group_chat_id}",
                 },
             ],
-            [
-                {
-                    "text": "Назад",
-                    "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}",
-                },
-            ],
+        )
+    keyboard.append(
+        [
+            {
+                "text": "Назад",
+                "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}",
+            },
+        ],
+    )
+    return {"inline_keyboard": keyboard}
+
+
+def confirm_change_sheet_keyboard(group_chat_id: int) -> JsonObject:
+    """Создаёт клавиатуру подтверждения смены таблицы."""
+
+    return {
+        "inline_keyboard": [
+            [{"text": "Продолжить", "callback_data": f"{CALLBACK_BIND_SHEET_PREFIX}{group_chat_id}"}],
+            [{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_SECTION_PREFIX}{group_chat_id}:table"}],
+        ],
+    }
+
+
+def confirm_unlink_sheet_keyboard(group_chat_id: int) -> JsonObject:
+    """Создаёт клавиатуру подтверждения отвязки таблицы."""
+
+    return {
+        "inline_keyboard": [
+            [{"text": "Отвязать таблицу", "callback_data": f"{CALLBACK_CONFIRM_UNLINK_SHEET_PREFIX}{group_chat_id}"}],
+            [{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_SECTION_PREFIX}{group_chat_id}:table"}],
+        ],
+    }
+
+
+def diagnostic_keyboard(group_chat_id: int, has_fixable_issues: bool) -> JsonObject:
+    """Создаёт клавиатуру результата диагностики."""
+
+    keyboard: list[list[dict[str, str]]] = []
+    if has_fixable_issues:
+        keyboard.append([{"text": "Исправить", "callback_data": f"{CALLBACK_FIX_SHEET_PREFIX}{group_chat_id}"}])
+    keyboard.append([{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_SECTION_PREFIX}{group_chat_id}:table"}])
+    return {"inline_keyboard": keyboard}
+
+
+def disable_group_keyboard(group_chat_id: int) -> JsonObject:
+    """Создаёт клавиатуру отключения группы."""
+
+    return {
+        "inline_keyboard": [
+            [{"text": "Отключить группу", "callback_data": f"{CALLBACK_CONFIRM_DISABLE_GROUP_PREFIX}{group_chat_id}"}],
+            [{"text": "Назад", "callback_data": f"{CALLBACK_SETTINGS_PREFIX}{group_chat_id}"}],
         ],
     }
 
@@ -2147,6 +2729,48 @@ def _validate_setup_token(
     if expires_at <= _utc_now():
         return "Токен подключения истёк. Создайте новый токен в личном чате."
     return None
+
+
+def _validate_transfer_token(transfer_token, raw_token: str) -> str | None:
+    """Проверяет transfer token."""
+
+    if transfer_token is None or transfer_token.token != raw_token:
+        return "Transfer token не найден. Создайте новый токен в настройках старой группы."
+    if transfer_token.used_at is not None:
+        return "Transfer token уже использован. Создайте новый токен."
+    try:
+        expires_at = datetime.fromisoformat(transfer_token.expires_at)
+    except ValueError:
+        return "Transfer token повреждён. Создайте новый токен."
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= _utc_now():
+        return "Transfer token истёк. Создайте новый токен."
+    return None
+
+
+def _diagnostic_issue(level: str, message: str, fixable: bool) -> TableDiagnosticIssue:
+    """Создаёт diagnostic issue."""
+
+    return TableDiagnosticIssue(level=level, message=message, fixable=fixable)
+
+
+def _diagnostic_text(result: TableDiagnosticResult) -> str:
+    """Формирует текст результата диагностики таблицы."""
+
+    lines = ["Диагностика таблицы.", ""]
+    for issue in result.issues:
+        if issue.level == "ok":
+            marker = "✅"
+        elif issue.level == "warning":
+            marker = "⚠️"
+        else:
+            marker = "❌"
+        suffix = " [можно исправить]" if issue.fixable else ""
+        lines.append(f"{marker} {issue.message}{suffix}")
+    if result.has_fixable_issues:
+        lines.extend(["", "Есть исправимые проблемы. Нажмите «Исправить»."])
+    return "\n".join(lines)
 
 
 async def _edit_or_send_message(
