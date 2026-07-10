@@ -83,6 +83,7 @@ from clash_sheet_sync_bot.sheets.admin import (
 from clash_sheet_sync_bot.sheets.client import (
     GoogleAccessTokenProvider,
     GoogleSheetsAuthError,
+    GoogleSheetsError,
     SheetsClient,
 )
 from clash_sheet_sync_bot.sheets.column_profiles import (
@@ -1326,12 +1327,12 @@ class SetupFlow:
         )
         try:
             result = await self._run_table_diagnostics(binding=binding)
-        except (GoogleSheetsAuthError, SheetAdminError) as exc:
+        except (GoogleSheetsError, SheetAdminError) as exc:
             await _edit_or_send_message(
                 telegram=self._telegram,
                 chat_id=chat_id,
                 message_id=message_id,
-                text=str(exc),
+                text=self._sheet_error_text(exc),
                 reply_markup=diagnostic_keyboard(group_chat_id, has_fixable_issues=False),
             )
             return
@@ -1395,12 +1396,12 @@ class SetupFlow:
         )
         try:
             setup_result = await self._run_table_autofix(binding=binding)
-        except (GoogleSheetsAuthError, SheetAdminError) as exc:
+        except (GoogleSheetsError, SheetAdminError) as exc:
             await _edit_or_send_message(
                 telegram=self._telegram,
                 chat_id=chat_id,
                 message_id=message_id,
-                text=str(exc),
+                text=self._sheet_error_text(exc),
                 reply_markup=diagnostic_keyboard(group_chat_id, has_fixable_issues=False),
             )
             return
@@ -1591,12 +1592,12 @@ class SetupFlow:
         )
         try:
             setup_result = await self._initialize_sheet(group_chat_id, spreadsheet_id)
-        except (GoogleSheetsAuthError, SheetAdminError) as exc:
+        except (GoogleSheetsError, SheetAdminError) as exc:
             await _edit_or_send_message(
                 telegram=self._telegram,
                 chat_id=chat_id,
                 message_id=message_id,
-                text=str(exc),
+                text=self._sheet_error_text(exc),
                 reply_markup=check_sheet_access_keyboard(group_chat_id),
             )
             return
@@ -1648,6 +1649,27 @@ class SetupFlow:
             ),
             reply_markup=settings_menu_keyboard(group_chat_id),
         )
+
+    def _sheet_error_text(self, exc: Exception) -> str:
+        """Формирует человекочитаемый текст ошибки Google Sheets для setup-flow."""
+
+        if _is_google_sheets_permission_error(exc):
+            email = self._service_account_email_for_message()
+            return (
+                "Нет доступа к Google-таблице.\n\n"
+                "Добавьте этот service account в таблицу с правами «Редактор»:\n\n"
+                f"{email}\n\n"
+                "После выдачи доступа нажмите «Проверить доступ» ещё раз."
+            )
+        return str(exc)
+
+    def _service_account_email_for_message(self) -> str:
+        """Возвращает service account email для сообщения об ошибке доступа."""
+
+        try:
+            return GoogleAccessTokenProvider(self._config.google_service_account_file).client_email
+        except GoogleSheetsError:
+            return "service account email из предыдущего сообщения"
 
     async def _initialize_sheet(self, group_chat_id: int, spreadsheet_id: str):
         """Инициализирует Google Sheets для новой привязки.
@@ -2320,6 +2342,20 @@ class SetupFlow:
         active_clans = await self._clans.count_active_clans(group_chat_id)
         status = "ready" if active_clans > 0 else "waiting_for_clans"
         await self._telegram_chats.set_status(chat_id=group_chat_id, status=status, now=now)
+
+
+def _is_google_sheets_permission_error(exc: Exception) -> bool:
+    """Проверяет, похожа ли ошибка Google Sheets на отсутствие доступа."""
+
+    if not isinstance(exc, GoogleSheetsError):
+        return False
+    message = str(exc).casefold()
+    return (
+        "http 403" in message
+        or "does not have permission" in message
+        or "permission" in message
+        or "forbidden" in message
+    )
 
 
 def _tag_from_payload(value: str) -> str:

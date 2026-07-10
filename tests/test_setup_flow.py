@@ -14,6 +14,7 @@ from clash_sheet_sync_bot.setup.flow import (
     SetupFlow,
     _edit_or_send_message,
 )
+from clash_sheet_sync_bot.sheets.client import GoogleSheetsWriteError
 
 NOW = "2026-07-09T12:00:00+00:00"
 
@@ -478,3 +479,24 @@ async def test_column_rename_text_completion_rejects_duplicate_title(
 
     assert row is not None
     assert row["title"] == "Discord"
+
+
+@pytest.mark.asyncio
+async def test_sheet_permission_error_text_is_human(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет, что 403 Google Sheets не показывается пользователю сырой ошибкой."""
+
+    flow = _setup_flow(migrated_connection)
+
+    text = flow._sheet_error_text(
+        GoogleSheetsWriteError(
+            "Google Sheets API HTTP 403: The caller does not have permission",
+        ),
+    )
+
+    assert "Нет доступа к Google-таблице." in text
+    assert "Редактор" in text
+    assert "Проверить доступ" in text
+    assert "Google Sheets API HTTP 403" not in text
+    assert "The caller does not have permission" not in text
