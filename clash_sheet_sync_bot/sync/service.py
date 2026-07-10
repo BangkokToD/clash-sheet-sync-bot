@@ -12,8 +12,7 @@ from typing import Any, Final
 import httpx
 
 from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError, ClashClient
-from clash_sheet_sync_bot.common.time import format_dt as _format_dt
-from clash_sheet_sync_bot.common.time import utc_now as _utc_now
+from clash_sheet_sync_bot.common.time import format_dt as _format_dt, utc_now as _utc_now
 from clash_sheet_sync_bot.config import AppConfig
 from clash_sheet_sync_bot.repositories import (
     CompositionPlayerStateRepository,
@@ -154,7 +153,15 @@ class SyncService:
             async with sheet_lock:
                 semaphore = _global_semaphore(self._config.max_concurrent_syncs)
                 async with semaphore:
-                    await self._run_sync(runtime_chat_id=chat.chat_id, user_id=user_id)
+                    progress_message_id = await self._telegram.send_message(
+                        chat_id=chat.chat_id,
+                        text="Подождите, идёт синхронизация...",
+                    )
+                    await self._run_sync(
+                        runtime_chat_id=chat.chat_id,
+                        user_id=user_id,
+                        progress_message_id=progress_message_id,
+                    )
 
     async def handle_status_command(self, *, chat: SyncChatInfo) -> None:
         """Обрабатывает команду `/status`."""
@@ -182,7 +189,13 @@ class SyncService:
             disable_web_page_preview=payload.disable_web_page_preview,
         )
 
-    async def _run_sync(self, *, runtime_chat_id: int, user_id: int) -> None:
+    async def _run_sync(
+        self,
+        *,
+        runtime_chat_id: int,
+        user_id: int,
+        progress_message_id: int | None = None,
+    ) -> None:
         """Выполняет staged `/sync` после прохождения проверок и locks."""
 
         started_at_dt = _utc_now()
@@ -205,6 +218,7 @@ class SyncService:
                 error_stage=write_phase,
                 reason="RuntimeChatConfig не найден.",
                 spreadsheet_url=None,
+                progress_message_id=progress_message_id,
             )
             return
 
@@ -293,8 +307,9 @@ class SyncService:
             await self._connection.commit()
             write_phase = WRITE_PHASE_SQLITE_COMMITTED
             try:
-                await self._telegram.send_message(
+                await self._send_or_edit_progress_message(
                     chat_id=runtime_chat_id,
+                    message_id=progress_message_id,
                     text=report.text,
                     parse_mode=report.parse_mode,
                     disable_web_page_preview=report.disable_web_page_preview,
@@ -315,6 +330,7 @@ class SyncService:
                 error_stage=write_phase,
                 reason=reason,
                 spreadsheet_url=spreadsheet_url,
+                progress_message_id=progress_message_id,
             )
         except Exception:
             await self._connection.rollback()
@@ -326,6 +342,7 @@ class SyncService:
                 error_stage=write_phase,
                 reason=reason,
                 spreadsheet_url=spreadsheet_url,
+                progress_message_id=progress_message_id,
             )
 
     async def _finish_error(
@@ -336,6 +353,7 @@ class SyncService:
         error_stage: str | None,
         reason: str,
         spreadsheet_url: str | None,
+        progress_message_id: int | None = None,
     ) -> None:
         """Сохраняет ошибку sync и отправляет Telegram-отчёт."""
 
@@ -356,11 +374,43 @@ class SyncService:
             error=reason,
         )
         await self._connection.commit()
-        await self._telegram.send_message(
+        await self._send_or_edit_progress_message(
             chat_id=chat_id,
+            message_id=progress_message_id,
             text=report.text,
             parse_mode=report.parse_mode,
             disable_web_page_preview=report.disable_web_page_preview,
+        )
+
+    async def _send_or_edit_progress_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int | None,
+        text: str,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> None:
+        """Редактирует progress-message в результат или отправляет новое сообщение."""
+
+        if message_id is not None:
+            try:
+                await self._telegram.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                )
+                return
+            except TelegramApiError as exc:
+                logger.warning("failed to edit progress message: %s", exc)
+
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_web_page_preview,
         )
 
     async def _mark_rate_limited(self, *, chat_id: int, user_id: int) -> None:

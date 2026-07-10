@@ -16,8 +16,7 @@ from clash_sheet_sync_bot.coc.client import (
     ClashClanNotFoundError,
     ClashClient,
 )
-from clash_sheet_sync_bot.common.time import format_dt as _format_dt
-from clash_sheet_sync_bot.common.time import utc_now as _utc_now
+from clash_sheet_sync_bot.common.time import format_dt as _format_dt, utc_now as _utc_now
 from clash_sheet_sync_bot.models import AppConfig, SetupToken, TableType, normalize_tag
 from clash_sheet_sync_bot.repositories import (
     AdminChatRepository,
@@ -1289,10 +1288,22 @@ class SetupFlow:
             )
             return
         await self._telegram.answer_callback_query(callback_query_id, "Проверяю таблицу.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Подождите, идёт проверка таблицы...",
+        )
         try:
             result = await self._run_table_diagnostics(binding=binding)
         except (GoogleSheetsAuthError, SheetAdminError) as exc:
-            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            await _edit_or_send_message(
+                telegram=self._telegram,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=str(exc),
+                reply_markup=diagnostic_keyboard(group_chat_id, has_fixable_issues=False),
+            )
             return
         if await self._runtime.is_google_sheet_bound_elsewhere(
             binding.google_sheet_id,
@@ -1346,10 +1357,22 @@ class SetupFlow:
             )
             return
         await self._telegram.answer_callback_query(callback_query_id, "Исправляю.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Подождите, идёт исправление таблицы...",
+        )
         try:
             setup_result = await self._run_table_autofix(binding=binding)
         except (GoogleSheetsAuthError, SheetAdminError) as exc:
-            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            await _edit_or_send_message(
+                telegram=self._telegram,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=str(exc),
+                reply_markup=diagnostic_keyboard(group_chat_id, has_fixable_issues=False),
+            )
             return
         now = _format_dt(_utc_now())
         async with transaction(self._connection):
@@ -1530,10 +1553,22 @@ class SetupFlow:
             return
 
         await self._telegram.answer_callback_query(callback_query_id, "Проверяю доступ.")
+        await _edit_or_send_message(
+            telegram=self._telegram,
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Подождите, идёт проверка доступа к таблице...",
+        )
         try:
             setup_result = await self._initialize_sheet(group_chat_id, spreadsheet_id)
         except (GoogleSheetsAuthError, SheetAdminError) as exc:
-            await self._telegram.send_message(chat_id=chat_id, text=str(exc))
+            await _edit_or_send_message(
+                telegram=self._telegram,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=str(exc),
+                reply_markup=check_sheet_access_keyboard(group_chat_id),
+            )
             return
 
         now = _format_dt(_utc_now())

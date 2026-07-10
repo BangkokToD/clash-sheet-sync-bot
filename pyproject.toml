@@ -10,3 +10,5 @@ ignore = [
     "RUF002",
     "RUF003",
 ]
+[tool.ruff.lint.isort]
+combine-as-imports = true

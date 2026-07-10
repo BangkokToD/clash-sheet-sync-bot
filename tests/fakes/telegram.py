@@ -28,12 +28,14 @@ class FakeTelegram:
         *,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
-    ) -> None:
+    ) -> int:
         """Запоминает отправленное сообщение."""
 
+        message_id = len(self.sent_messages) + 1
         self.sent_messages.append(
             {
                 "chat_id": chat_id,
+                "message_id": message_id,
                 "text": text,
                 "reply_markup": reply_markup,
                 "parse_mode": parse_mode,
@@ -42,6 +44,7 @@ class FakeTelegram:
         )
         if self.send_error is not None:
             raise self.send_error
+        return message_id
 
     async def edit_message_text(
         self,
@@ -67,6 +70,10 @@ class FakeTelegram:
         if self.raise_not_modified_on_edit:
             raise TelegramMessageNotModifiedError("Telegram message is not modified.")
         self.edited_messages.append(payload)
+        for sent_message in self.sent_messages:
+            if sent_message.get("message_id") == message_id:
+                sent_message.update(payload)
+                break
 
     async def answer_callback_query(
         self,

@@ -105,7 +105,7 @@ class TelegramClient:
         *,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
-    ) -> None:
+    ) -> int | None:
         """Отправляет сообщение в Telegram.
 
         Args:
@@ -123,7 +123,12 @@ class TelegramClient:
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
         )
-        await self._request("sendMessage", payload)
+        result = await self._request("sendMessage", payload)
+        if isinstance(result, dict):
+            message_id = result.get("message_id")
+            if isinstance(message_id, int):
+                return message_id
+        return None
 
     async def edit_message_text(
         self,
