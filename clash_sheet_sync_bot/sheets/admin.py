@@ -316,7 +316,12 @@ class SheetAdminService:
             timezone=binding.timezone,
         )
         await self._sheets_client.hide_sheet(bot_state_sheet.sheet_id, hidden=True)
-        await self._hide_bot_key_columns_for_blocks(blocks)
+
+        metadata = await self._sheets_client.get_spreadsheet_metadata()
+        await self._hide_bot_key_columns_for_blocks(
+            blocks,
+            known_sheets=metadata.sheets,
+        )
         return SheetSetupResult(
             spreadsheet_id=self._spreadsheet_id,
             spreadsheet_url=spreadsheet_url(self._spreadsheet_id),
@@ -369,14 +374,24 @@ class SheetAdminService:
                     ),
                 )
                 continue
-            values = await self._sheets_client.read_values(
-                block.sheet_name,
-                range_from_start_cell(
-                    start_cell=block.start_cell,
-                    rows_count=2,
-                    columns_count=1,
-                ),
-            )
+            try:
+                values = await self._sheets_client.read_values(
+                    block.sheet_name,
+                    range_from_start_cell(
+                        start_cell=block.start_cell,
+                        rows_count=2,
+                        columns_count=1,
+                    ),
+                )
+            except GoogleSheetsError:
+                issues.append(
+                    TableDiagnosticIssue(
+                        "warning",
+                        f"Блок {block.block_key} ссылается на недоступный лист {block.sheet_name}.",
+                        True,
+                    ),
+                )
+                continue
             header_value = ""
             if len(values) >= 2 and values[1]:
                 header_value = str(values[1][0]).strip()
@@ -392,26 +407,34 @@ class SheetAdminService:
             issues.append(TableDiagnosticIssue("ok", "__bot_key найден в управляемых блоках."))
         return tuple(issues)
 
-    async def _hide_bot_key_columns_for_blocks(self, blocks: Sequence[SheetBlock]) -> None:
-        """Скрывает первые физические колонки всех известных managed-блоков."""
+    async def _hide_bot_key_columns_for_blocks(
+        self,
+        blocks: Sequence[SheetBlock],
+        *,
+        known_sheets: Sequence[SheetMetadata],
+    ) -> None:
+        """Скрывает первые физические колонки, игнорируя stale sheet_id блоков."""
+
+        sheets_by_id = {sheet.sheet_id: sheet for sheet in known_sheets}
+        sheets_by_title = {sheet.title: sheet for sheet in known_sheets}
 
         hidden: set[tuple[int, int]] = set()
         for block in blocks:
-            if block.sheet_id is None:
-                try:
-                    metadata = await self._sheets_client.get_sheet_metadata(block.sheet_name)
-                except GoogleSheetsError:
-                    continue
-                sheet_id = metadata.sheet_id
-            else:
-                sheet_id = block.sheet_id
+            sheet = None
+            if block.sheet_id is not None:
+                sheet = sheets_by_id.get(block.sheet_id)
+            if sheet is None:
+                sheet = sheets_by_title.get(block.sheet_name)
+            if sheet is None:
+                continue
+
             column_number, _ = _parse_a1_cell(block.start_cell, error_cls=SheetAdminError)
             column_index = column_number - 1
-            key = (sheet_id, column_index)
+            key = (sheet.sheet_id, column_index)
             if key in hidden:
                 continue
             hidden.add(key)
-            await self.hide_bot_key_column(sheet_id=sheet_id, column_index=column_index)
+            await self.hide_bot_key_column(sheet_id=sheet.sheet_id, column_index=column_index)
 
     async def _ensure_sheet(
         self,
