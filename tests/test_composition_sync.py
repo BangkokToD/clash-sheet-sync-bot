@@ -196,6 +196,56 @@ def test_plan_player_states_prefers_imported_user_values() -> None:
     assert planned["#P1"].user_values == {"note": "from sheet"}
 
 
+def test_plan_player_states_preserves_user_values_missing_from_current_profile() -> None:
+    """Проверяет, что смена active/exited профиля не стирает отсутствующие колонки."""
+
+    runtime_config = make_runtime_config()
+    previous = make_composition_state(
+        player_tag="#P1",
+        status="exited",
+        clan_tag=None,
+        nickname="Player",
+        exited_at="2026-07-01T00:00:00+00:00",
+        user_values={
+            "active_username": "@player",
+            "exited_reason": "ушёл временно",
+        },
+    )
+    imported = CompositionImportResult(
+        players={
+            "#P1": ImportedPlayerValues(
+                player_tag="#P1",
+                is_exited=True,
+                clan_tag=None,
+                town_hall=15,
+                nickname="Player",
+                exited_at="2026-07-01T00:00:00+00:00",
+                user_values={
+                    "exited_reason": "вернётся",
+                },
+            ),
+        },
+        warnings=(),
+        saw_exited_block=True,
+    )
+
+    planned, _ = _plan_player_states(
+        runtime_config=runtime_config,
+        existing_state=(previous,),
+        imported=imported,
+        current_members={
+            "#P1": _member(player_tag="#P1", nickname="Player"),
+        },
+        detected_at=DETECTED_AT,
+    )
+
+    assert planned["#P1"].status == "active"
+    assert planned["#P1"].user_values == {
+        "active_username": "@player",
+        "exited_reason": "вернётся",
+    }
+
+
 def test_build_composition_blocks_creates_active_and_exited_blocks() -> None:
     """Проверяет построение active blocks и exited block."""
 

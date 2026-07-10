@@ -1300,11 +1300,19 @@ def _user_values_for(
     previous: CompositionPlayerState | None,
     imported: CompositionImportResult,
 ) -> JsonDict:
-    if player_tag in imported.players:
-        return dict(imported.players[player_tag].user_values)
-    if previous is not None:
-        return dict(previous.user_values)
-    return {}
+    """Возвращает user-values игрока, сохраняя значения колонок из других профилей.
+
+    Импорт из текущего Google Sheets блока содержит только колонки текущего
+    table_type. Поэтому при переходах active -> exited -> active нельзя заменять
+    весь user_values_json только импортированными ключами: иначе значения из
+    колонок, отсутствующих в текущем блоке, будут потеряны.
+    """
+
+    result = dict(previous.user_values) if previous is not None else {}
+    imported_player = imported.players.get(player_tag)
+    if imported_player is not None:
+        result.update(imported_player.user_values)
+    return result
 
 
 def _technical_changed(previous: CompositionPlayerState, member: CurrentClanMember) -> bool:
