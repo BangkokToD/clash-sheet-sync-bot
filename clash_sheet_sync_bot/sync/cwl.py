@@ -379,6 +379,7 @@ async def prepare_public_cwl_sync(
         cwl_repository=cwl_repository,
         sheet_block_repository=sheet_block_repository,
         cwl_war_concurrency_limit=cwl_war_concurrency_limit,
+        composition_player_states=composition_player_states,
     )
 
 
