@@ -390,18 +390,31 @@ class SetupFlow:
         now = _format_dt(_utc_now())
         async with transaction(self._connection):
             await self._columns.ensure_default_profiles(chat_id=pending.chat_id, now=now)
-            await self._columns.create_user_column(
+            title_exists = await self._columns.title_exists(
                 chat_id=pending.chat_id,
                 table_type=table_type,
-                column_key=new_user_column_key(),
                 title=title,
-                now=now,
             )
-            await self._telegram_chats.set_setup_state(
-                chat_id=pending.chat_id,
-                setup_state=None,
-                now=now,
+            if not title_exists:
+                await self._columns.create_user_column(
+                    chat_id=pending.chat_id,
+                    table_type=table_type,
+                    column_key=new_user_column_key(),
+                    title=title,
+                    now=now,
+                )
+                await self._telegram_chats.set_setup_state(
+                    chat_id=pending.chat_id,
+                    setup_state=None,
+                    now=now,
+                )
+
+        if title_exists:
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Колонка с таким названием уже есть в этом разделе.",
             )
+            return True
 
         await self._send_columns_section_message(
             group_chat_id=pending.chat_id,
@@ -452,18 +465,34 @@ class SetupFlow:
 
         now = _format_dt(_utc_now())
         async with transaction(self._connection):
-            updated = await self._columns.rename_column(
+            await self._columns.ensure_default_profiles(chat_id=pending.chat_id, now=now)
+            title_exists = await self._columns.title_exists(
                 chat_id=pending.chat_id,
                 table_type=table_type,
-                column_key=column_key,
                 title=title,
-                now=now,
+                excluding_column_key=column_key,
             )
-            await self._telegram_chats.set_setup_state(
-                chat_id=pending.chat_id,
-                setup_state=None,
-                now=now,
+            updated = False
+            if not title_exists:
+                updated = await self._columns.rename_column(
+                    chat_id=pending.chat_id,
+                    table_type=table_type,
+                    column_key=column_key,
+                    title=title,
+                    now=now,
+                )
+                await self._telegram_chats.set_setup_state(
+                    chat_id=pending.chat_id,
+                    setup_state=None,
+                    now=now,
+                )
+
+        if title_exists:
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Колонка с таким названием уже есть в этом разделе.",
             )
+            return True
 
         if updated:
             await self._send_columns_section_message(

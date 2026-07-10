@@ -135,6 +135,12 @@ def normalize_column_title(value: str) -> str:
     return title
 
 
+def column_title_identity(value: str) -> str:
+    """Возвращает identity названия колонки для поиска дублей и связей."""
+
+    return normalize_column_title(value).casefold()
+
+
 def new_user_column_key() -> str:
     """Создаёт стабильный ключ новой пользовательской колонки.
 

@@ -38,7 +38,11 @@ from clash_sheet_sync_bot.sheets.client import (
     SheetValues,
     range_from_start_cell,
 )
-from clash_sheet_sync_bot.sheets.column_profiles import BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE
+from clash_sheet_sync_bot.sheets.column_profiles import (
+    BOT_KEY_COLUMN_KEY,
+    BOT_KEY_TITLE,
+    column_title_identity,
+)
 from clash_sheet_sync_bot.sheets.ranges import (
     column_to_number as _shared_column_to_number,
     grid_range_from_start_cell as _shared_grid_range_from_start_cell,
@@ -46,6 +50,7 @@ from clash_sheet_sync_bot.sheets.ranges import (
     offset_cell as _shared_offset_cell,
     parse_a1_cell as _shared_parse_a1_cell,
 )
+from clash_sheet_sync_bot.sync.composition import PlannedPlayerState
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +332,7 @@ async def run_public_cwl_sync(
     sheet_binding_repository: SheetBindingRepository,
     sync_run_id: int,
     cwl_war_concurrency_limit: int,
+    composition_player_states: Sequence[PlannedPlayerState] = (),
 ) -> CwlSheetSyncResult:
     """Обновляет публичный CWL-лист и `cwl_row_state`.
 
@@ -341,6 +347,7 @@ async def run_public_cwl_sync(
         cwl_repository=cwl_repository,
         sheet_block_repository=sheet_block_repository,
         cwl_war_concurrency_limit=cwl_war_concurrency_limit,
+        composition_player_states=composition_player_states,
     )
     return await apply_public_cwl_sync(
         runtime_config=runtime_config,
@@ -361,6 +368,7 @@ async def prepare_public_cwl_sync(
     cwl_repository: CwlRowStateRepository,
     sheet_block_repository: SheetBlockRepository,
     cwl_war_concurrency_limit: int,
+    composition_player_states: Sequence[PlannedPlayerState] = (),
 ) -> CwlPreparedData:
     """Готовит CWL-данные без записи в Google Sheets и SQLite."""
 
@@ -620,6 +628,7 @@ async def _prepare_cwl_data(
     cwl_repository: CwlRowStateRepository,
     sheet_block_repository: SheetBlockRepository,
     cwl_war_concurrency_limit: int,
+    composition_player_states: Sequence[PlannedPlayerState] = (),
 ) -> CwlPreparedData:
     """Загружает CoC/Sheets/SQLite и готовит CWL rows."""
 
@@ -681,6 +690,12 @@ async def _prepare_cwl_data(
         planned_rows=planned_rows,
         imported=imported,
         existing_rows=existing_rows,
+        composition_user_values_by_player=_composition_user_values_by_player(
+            composition_player_states,
+        ),
+        cwl_composition_user_column_links=_cwl_composition_user_column_links(
+            runtime_config.column_profiles,
+        ),
     )
     diff_items = _build_cwl_diff_items(
         planned_rows=rows_with_user_values,
@@ -1477,12 +1492,16 @@ def _apply_user_values(
     planned_rows: Sequence[CwlPlannedRow],
     imported: CwlImportResult,
     existing_rows: Sequence[CwlRowState],
+    composition_user_values_by_player: dict[str, JsonValues] | None = None,
+    cwl_composition_user_column_links: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[CwlPlannedRow, ...]:
-    """Переносит user fields из текущего листа и SQLite state в planned rows."""
+    """Переносит user fields из CWL state и пустые значения из состава."""
 
     existing_by_key = {row.row_key: row.user_values for row in existing_rows}
     used_no_attack_keys: set[str] = set()
     result: list[CwlPlannedRow] = []
+    composition_user_values_by_player = composition_user_values_by_player or {}
+    cwl_composition_user_column_links = cwl_composition_user_column_links or {}
 
     for row in planned_rows:
         user_values = _lookup_user_values(
@@ -1490,6 +1509,12 @@ def _apply_user_values(
             imported=imported.rows_by_key,
             existing=existing_by_key,
             used_no_attack_keys=used_no_attack_keys,
+        )
+        user_values = _fill_empty_cwl_user_values_from_composition(
+            row=row,
+            user_values=user_values,
+            composition_user_values_by_player=composition_user_values_by_player,
+            cwl_composition_user_column_links=cwl_composition_user_column_links,
         )
         result.append(
             CwlPlannedRow(
@@ -1534,6 +1559,104 @@ def _lookup_user_values(
             return dict(fallback)
 
     return {}
+
+
+def _fill_empty_cwl_user_values_from_composition(
+    *,
+    row: CwlPlannedRow,
+    user_values: JsonValues,
+    composition_user_values_by_player: dict[str, JsonValues],
+    cwl_composition_user_column_links: dict[str, tuple[str, ...]],
+) -> JsonValues:
+    """Подставляет пустые CWL user-values из состава по совпадающему title."""
+
+    if not cwl_composition_user_column_links:
+        return dict(user_values)
+
+    result = dict(user_values)
+    composition_values = composition_user_values_by_player.get(row.attacker_tag, {})
+    if not composition_values:
+        return result
+
+    for cwl_column_key, composition_column_keys in cwl_composition_user_column_links.items():
+        if _is_non_empty_user_value(result.get(cwl_column_key)):
+            continue
+        for composition_column_key in composition_column_keys:
+            composition_value = composition_values.get(composition_column_key)
+            if _is_non_empty_user_value(composition_value):
+                result[cwl_column_key] = composition_value
+                break
+
+    return result
+
+
+def _is_non_empty_user_value(value: str | None) -> bool:
+    """Проверяет, считается ли user-value заполненным."""
+
+    return value is not None and value.strip() != ""
+
+
+def _composition_user_values_by_player(
+    states: Sequence[PlannedPlayerState],
+) -> dict[str, JsonValues]:
+    """Индексирует composition user-values по player tag."""
+
+    return {state.player_tag: dict(state.user_values) for state in states}
+
+
+def _cwl_composition_user_column_links(
+    column_profiles: Sequence[ColumnProfile],
+) -> dict[str, tuple[str, ...]]:
+    """Связывает CWL user columns с composition user columns по title."""
+
+    composition_title_to_keys: dict[str, list[str]] = {}
+    composition_table_order: dict[TableType, int] = {
+        "composition_active": 0,
+        "composition_exited": 1,
+        "composition": 2,
+        "cwl": 3,
+    }
+    composition_profiles = sorted(
+        (
+            profile
+            for profile in column_profiles
+            if profile.table_type in {"composition_active", "composition_exited", "composition"}
+            and profile.kind == "user"
+            and profile.visible
+            and profile.is_active
+        ),
+        key=lambda profile: (
+            composition_table_order.get(profile.table_type, 99),
+            profile.sort_order,
+            profile.column_key,
+        ),
+    )
+    for profile in composition_profiles:
+        composition_title_to_keys.setdefault(
+            column_title_identity(profile.title),
+            [],
+        ).append(profile.column_key)
+
+    result: dict[str, tuple[str, ...]] = {}
+    cwl_profiles = sorted(
+        (
+            profile
+            for profile in column_profiles
+            if profile.table_type == CWL_TABLE
+            and profile.kind == "user"
+            and profile.visible
+            and profile.is_active
+        ),
+        key=lambda profile: (profile.sort_order, profile.column_key),
+    )
+    for profile in cwl_profiles:
+        composition_column_keys = composition_title_to_keys.get(
+            column_title_identity(profile.title)
+        )
+        if composition_column_keys:
+            result[profile.column_key] = tuple(composition_column_keys)
+
+    return result
 
 
 def _build_cwl_diff_items(

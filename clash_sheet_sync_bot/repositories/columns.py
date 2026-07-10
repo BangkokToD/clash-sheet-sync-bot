@@ -5,7 +5,11 @@ from __future__ import annotations
 import aiosqlite
 
 from clash_sheet_sync_bot.models import ColumnProfile, TableType
-from clash_sheet_sync_bot.sheets.column_profiles import all_default_columns, default_columns
+from clash_sheet_sync_bot.sheets.column_profiles import (
+    all_default_columns,
+    column_title_identity,
+    default_columns,
+)
 
 from .base import (
     as_bool_int,
@@ -178,6 +182,24 @@ class ColumnProfileRepository:
             (title, now, chat_id, table_type, column_key),
         )
         return cursor.rowcount == 1
+
+    async def title_exists(
+        self,
+        *,
+        chat_id: int,
+        table_type: TableType,
+        title: str,
+        excluding_column_key: str | None = None,
+    ) -> bool:
+        """Проверяет, есть ли активная колонка с таким названием в table_type."""
+
+        target_title = column_title_identity(title)
+        columns = await self.list_columns(chat_id=chat_id, table_type=table_type)
+        return any(
+            column_title_identity(column.title) == target_title
+            and column.column_key != excluding_column_key
+            for column in columns
+        )
 
     async def create_user_column(
         self,

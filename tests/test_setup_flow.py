@@ -369,3 +369,112 @@ async def test_sensitive_callback_uses_force_refresh_admin_check(
 
     assert row is not None
     assert row["setup_state"] == f"{AWAITING_CLAN_TAG_STATE_PREFIX}{user_id}"
+
+
+@pytest.mark.asyncio
+async def test_user_column_text_completion_rejects_duplicate_title(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет запрет создания двух колонок с одинаковым title в одном table_type."""
+
+    user_id = 1001
+    group_chat_id = -1006
+    telegram = FakeTelegram()
+    access = RecordingAccessService(is_admin_result=True)
+
+    await _insert_chat(
+        migrated_connection,
+        chat_id=group_chat_id,
+        setup_state=f"{AWAITING_USER_COLUMN_TITLE_STATE_PREFIX}{user_id}:cwl",
+    )
+    await _insert_admin_link(migrated_connection, chat_id=group_chat_id, user_id=user_id)
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=group_chat_id,
+        table_type="cwl",
+        column_key="username",
+        title="Юзернейм",
+        kind="user",
+        sort_order=100,
+    )
+    await migrated_connection.commit()
+
+    flow = _setup_flow(migrated_connection, telegram=telegram, access=access)
+
+    await flow.handle_private_text(chat_id=user_id, user_id=user_id, text=" юзернейм ")
+
+    assert (
+        telegram.sent_messages[-1]["text"] == "Колонка с таким названием уже есть в этом разделе."
+    )
+
+    cursor = await migrated_connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM column_profiles
+        WHERE chat_id = ? AND table_type = 'cwl' AND title = 'Юзернейм'
+        """,
+        (group_chat_id,),
+    )
+    row = await cursor.fetchone()
+
+    assert row is not None
+    assert row["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_column_rename_text_completion_rejects_duplicate_title(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет запрет переименования колонки в существующий title."""
+
+    user_id = 1001
+    group_chat_id = -1007
+    telegram = FakeTelegram()
+    access = RecordingAccessService(is_admin_result=True)
+
+    await _insert_chat(
+        migrated_connection,
+        chat_id=group_chat_id,
+        setup_state=f"{AWAITING_COLUMN_RENAME_STATE_PREFIX}{user_id}:cwl:second",
+    )
+    await _insert_admin_link(migrated_connection, chat_id=group_chat_id, user_id=user_id)
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=group_chat_id,
+        table_type="cwl",
+        column_key="first",
+        title="Юзернейм",
+        kind="user",
+        sort_order=100,
+    )
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=group_chat_id,
+        table_type="cwl",
+        column_key="second",
+        title="Discord",
+        kind="user",
+        sort_order=110,
+    )
+    await migrated_connection.commit()
+
+    flow = _setup_flow(migrated_connection, telegram=telegram, access=access)
+
+    await flow.handle_private_text(chat_id=user_id, user_id=user_id, text="юзернейм")
+
+    assert (
+        telegram.sent_messages[-1]["text"] == "Колонка с таким названием уже есть в этом разделе."
+    )
+
+    cursor = await migrated_connection.execute(
+        """
+        SELECT title
+        FROM column_profiles
+        WHERE chat_id = ? AND table_type = 'cwl' AND column_key = 'second'
+        """,
+        (group_chat_id,),
+    )
+    row = await cursor.fetchone()
+
+    assert row is not None
+    assert row["title"] == "Discord"

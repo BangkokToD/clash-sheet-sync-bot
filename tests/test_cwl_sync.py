@@ -8,10 +8,15 @@ from typing import Any
 import pytest
 
 from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError
-from clash_sheet_sync_bot.models import TrackedClan
+from clash_sheet_sync_bot.models import ColumnProfile, TrackedClan
 from clash_sheet_sync_bot.sync.cwl import (
     CwlDataError,
+    CwlImportResult,
+    CwlPlannedRow,
     CwlSeasonMismatchError,
+    CwlTechnicalValues,
+    _apply_user_values,
+    _cwl_composition_user_column_links,
     _load_cwl_wars,
     _resolve_cwl_season,
     make_cwl_row_key,
@@ -149,3 +154,164 @@ async def test_load_cwl_wars_rejects_non_positive_concurrency_limit() -> None:
             war_tags=("#WAR1",),
             concurrency_limit=0,
         )
+
+
+def _column_profile(
+    *,
+    table_type: str,
+    column_key: str,
+    title: str,
+    sort_order: int,
+) -> ColumnProfile:
+    """Создаёт user ColumnProfile для CWL inheritance tests."""
+
+    return ColumnProfile(
+        chat_id=-1001,
+        table_type=table_type,  # type: ignore[arg-type]
+        column_key=column_key,
+        title=title,
+        visible=True,
+        kind="user",
+        value_type="string",
+        sort_order=sort_order,
+    )
+
+
+def _planned_cwl_row(*, user_values: dict[str, str] | None = None) -> CwlPlannedRow:
+    """Создаёт planned CWL row для user-values tests."""
+
+    row_key = make_cwl_row_key(
+        season="2026-07",
+        clan_tag="#AAA111",
+        round_number=1,
+        attacker_tag="#P1",
+        marker="NO_ATTACK",
+    )
+    return CwlPlannedRow(
+        row_key=row_key,
+        season="2026-07",
+        clan_tag="#AAA111",
+        round_number=1,
+        attacker_tag="#P1",
+        marker="NO_ATTACK",
+        technical_values=CwlTechnicalValues(
+            round_number=1,
+            attacker_tag="#P1",
+            attacker_name="Player",
+            attacker_town_hall=15,
+            defender_town_hall=None,
+            stars=None,
+            destruction_percentage=None,
+            marker="NO_ATTACK",
+            attacker_map_position=1,
+            defender_map_position=None,
+        ),
+        no_attack_key=row_key,
+        user_values=user_values or {},
+    )
+
+
+def test_cwl_composition_user_column_links_match_by_title() -> None:
+    """Проверяет связь user-колонок CWL и состава по совпадающему названию."""
+
+    profiles = (
+        _column_profile(
+            table_type="composition_active",
+            column_key="composition_username",
+            title="Юзернейм",
+            sort_order=100,
+        ),
+        _column_profile(
+            table_type="cwl",
+            column_key="cwl_username",
+            title="Юзернейм",
+            sort_order=100,
+        ),
+        _column_profile(
+            table_type="cwl",
+            column_key="cwl_note",
+            title="Заметка CWL",
+            sort_order=110,
+        ),
+    )
+
+    assert _cwl_composition_user_column_links(profiles) == {
+        "cwl_username": ("composition_username",),
+    }
+
+
+def test_apply_user_values_fills_empty_cwl_value_from_composition() -> None:
+    """Проверяет, что пустое CWL user-value подтягивается из состава."""
+
+    row = _planned_cwl_row()
+    result = _apply_user_values(
+        planned_rows=(row,),
+        imported=CwlImportResult(rows_by_key={}, warnings=()),
+        existing_rows=(),
+        composition_user_values_by_player={
+            "#P1": {
+                "composition_username": "@player",
+            },
+        },
+        cwl_composition_user_column_links={
+            "cwl_username": ("composition_username",),
+        },
+    )
+
+    assert result[0].user_values == {"cwl_username": "@player"}
+
+
+def test_apply_user_values_does_not_overwrite_existing_cwl_value_from_composition() -> None:
+    """Проверяет, что заполненное CWL user-value важнее значения из состава."""
+
+    row = _planned_cwl_row()
+    result = _apply_user_values(
+        planned_rows=(row,),
+        imported=CwlImportResult(
+            rows_by_key={
+                row.row_key: {
+                    "cwl_username": "@manual-cwl",
+                },
+            },
+            warnings=(),
+        ),
+        existing_rows=(),
+        composition_user_values_by_player={
+            "#P1": {
+                "composition_username": "@from-composition",
+            },
+        },
+        cwl_composition_user_column_links={
+            "cwl_username": ("composition_username",),
+        },
+    )
+
+    assert result[0].user_values == {"cwl_username": "@manual-cwl"}
+
+
+def test_apply_user_values_treats_blank_cwl_value_as_empty_for_composition_inheritance() -> None:
+    """Проверяет, что пустая строка в CWL заменяется значением из состава."""
+
+    row = _planned_cwl_row()
+    result = _apply_user_values(
+        planned_rows=(row,),
+        imported=CwlImportResult(
+            rows_by_key={
+                row.row_key: {
+                    "cwl_username": "   ",
+                },
+            },
+            warnings=(),
+        ),
+        existing_rows=(),
+        composition_user_values_by_player={
+            "#P1": {
+                "composition_username": "@from-composition",
+            },
+        },
+        cwl_composition_user_column_links={
+            "cwl_username": ("composition_username",),
+        },
+    )
+
+    assert result[0].user_values == {"cwl_username": "@from-composition"}
