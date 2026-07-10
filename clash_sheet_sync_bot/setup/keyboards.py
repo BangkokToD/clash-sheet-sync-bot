@@ -28,13 +28,13 @@ CALLBACK_CLAN_CONFIRM_PREFIX: Final = "clans:confirm:"
 CALLBACK_CLAN_REMOVE_PREFIX: Final = "clans:remove:"
 CALLBACK_CLAN_MOVE_UP_PREFIX: Final = "clans:up:"
 CALLBACK_CLAN_MOVE_DOWN_PREFIX: Final = "clans:down:"
-CALLBACK_COLUMN_ADD_PREFIX: Final = "columns:add:"
-CALLBACK_COLUMN_TOGGLE_PREFIX: Final = "columns:toggle:"
-CALLBACK_COLUMN_RENAME_PREFIX: Final = "columns:rename:"
-CALLBACK_COLUMN_DELETE_PREFIX: Final = "columns:delete:"
-CALLBACK_COLUMN_MOVE_UP_PREFIX: Final = "columns:up:"
-CALLBACK_COLUMN_MOVE_DOWN_PREFIX: Final = "columns:down:"
-CALLBACK_COLUMN_RESTORE_PREFIX: Final = "columns:restore:"
+CALLBACK_COLUMN_ADD_PREFIX: Final = "ca:"
+CALLBACK_COLUMN_TOGGLE_PREFIX: Final = "ct:"
+CALLBACK_COLUMN_RENAME_PREFIX: Final = "cr:"
+CALLBACK_COLUMN_DELETE_PREFIX: Final = "cd:"
+CALLBACK_COLUMN_MOVE_UP_PREFIX: Final = "cu:"
+CALLBACK_COLUMN_MOVE_DOWN_PREFIX: Final = "cn:"
+CALLBACK_COLUMN_RESTORE_PREFIX: Final = "cs:"
 
 SETTINGS_SECTIONS: Final = {
     "table": "Таблица",
@@ -43,6 +43,32 @@ SETTINGS_SECTIONS: Final = {
     "composition_exited_columns": "Колонки вышедших",
     "cwl_columns": "Колонки CWL",
 }
+
+TABLE_TYPE_CALLBACK_PAYLOADS: Final[dict[TableType, str]] = {
+    "composition_active": "ca",
+    "composition_exited": "ce",
+    "cwl": "c",
+}
+CALLBACK_PAYLOAD_TABLE_TYPES: Final[dict[str, TableType]] = {
+    "ca": "composition_active",
+    "ce": "composition_exited",
+    "c": "cwl",
+    "composition_active": "composition_active",
+    "composition_exited": "composition_exited",
+    "cwl": "cwl",
+}
+
+
+def table_type_payload(table_type: TableType) -> str:
+    """Кодирует table_type в короткий callback payload."""
+
+    return TABLE_TYPE_CALLBACK_PAYLOADS[table_type]
+
+
+def table_type_from_payload(value: str) -> TableType | None:
+    """Декодирует table_type из callback payload."""
+
+    return CALLBACK_PAYLOAD_TABLE_TYPES.get(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,17 +335,18 @@ def columns_section_keyboard(
 ) -> JsonObject:
     """Создаёт клавиатуру управления колонками."""
 
+    table_payload = table_type_payload(table_type)
     keyboard: list[list[dict[str, str]]] = [
         [
             {
                 "text": "Добавить пользовательскую колонку",
-                "callback_data": f"{CALLBACK_COLUMN_ADD_PREFIX}{group_chat_id}:{table_type}",
+                "callback_data": f"{CALLBACK_COLUMN_ADD_PREFIX}{group_chat_id}:{table_payload}",
             },
         ],
         [
             {
                 "text": "Восстановить обязательные",
-                "callback_data": f"{CALLBACK_COLUMN_RESTORE_PREFIX}{group_chat_id}:{table_type}",
+                "callback_data": f"{CALLBACK_COLUMN_RESTORE_PREFIX}{group_chat_id}:{table_payload}",
             },
         ],
     ]
@@ -329,15 +356,15 @@ def columns_section_keyboard(
     for index, column in enumerate(editable_columns):
         action_text = "Удалить" if column.kind == "user" else ("✅" if column.visible else "❌")
         action_callback = (
-            f"{CALLBACK_COLUMN_DELETE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+            f"{CALLBACK_COLUMN_DELETE_PREFIX}{group_chat_id}:{table_payload}:{column.column_key}"
             if column.kind == "user"
-            else f"{CALLBACK_COLUMN_TOGGLE_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+            else f"{CALLBACK_COLUMN_TOGGLE_PREFIX}{group_chat_id}:{table_payload}:{column.column_key}"
         )
         up_callback = (
-            f"{CALLBACK_COLUMN_MOVE_UP_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+            f"{CALLBACK_COLUMN_MOVE_UP_PREFIX}{group_chat_id}:{table_payload}:{column.column_key}"
         )
         down_callback = (
-            f"{CALLBACK_COLUMN_MOVE_DOWN_PREFIX}{group_chat_id}:{table_type}:{column.column_key}"
+            f"{CALLBACK_COLUMN_MOVE_DOWN_PREFIX}{group_chat_id}:{table_payload}:{column.column_key}"
         )
         keyboard.append(
             [

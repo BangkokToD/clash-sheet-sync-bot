@@ -71,6 +71,7 @@ from clash_sheet_sync_bot.setup.keyboards import (
     private_chat_keyboard,
     settings_menu_keyboard,
     sheet_section_keyboard,
+    table_type_from_payload,
 )
 from clash_sheet_sync_bot.sheets.admin import (
     SheetAdminError,
@@ -2341,9 +2342,10 @@ def _parse_column_section_callback(callback_data: str, prefix: str) -> tuple[int
         chat_id = int(raw_chat_id)
     except ValueError:
         return None
-    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
+    table_type = table_type_from_payload(raw_table_type)
+    if table_type is None:
         return None
-    return chat_id, raw_table_type  # type: ignore[return-value]
+    return chat_id, table_type
 
 
 def _parse_column_callback(callback_data: str, prefix: str) -> tuple[int, TableType, str] | None:
@@ -2364,12 +2366,10 @@ def _parse_column_callback(callback_data: str, prefix: str) -> tuple[int, TableT
         chat_id = int(raw_chat_id)
     except ValueError:
         return None
-    if (
-        raw_table_type not in {"composition_active", "composition_exited", "cwl"}
-        or column_key == ""
-    ):
+    table_type = table_type_from_payload(raw_table_type)
+    if table_type is None or column_key == "":
         return None
-    return chat_id, raw_table_type, column_key  # type: ignore[return-value]
+    return chat_id, table_type, column_key
 
 
 def _clan_tag_state(user_id: int) -> str:
