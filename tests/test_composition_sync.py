@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -9,6 +10,7 @@ from fakes import (
     FakeSheetsClient,
     RecordingCompositionRepository,
     RecordingSheetBlockRepository,
+    make_composition_column_profiles,
     make_composition_state,
     make_runtime_config,
     make_sheet_block,
@@ -246,6 +248,29 @@ def test_plan_player_states_preserves_user_values_missing_from_current_profile()
     }
 
 
+def test_build_composition_blocks_places_exited_after_visible_active_columns() -> None:
+    """Проверяет, что блок Вышедшие ставится после видимых active-колонок."""
+
+    profiles = tuple(
+        replace(profile, visible=False)
+        if profile.table_type == "composition_active" and profile.column_key in {"number", "tag"}
+        else profile
+        for profile in make_composition_column_profiles()
+    )
+    runtime_config = make_runtime_config(column_profiles=profiles)
+
+    blocks = build_composition_blocks(
+        runtime_config=runtime_config,
+        planned_states={},
+    )
+
+    active_block = blocks[0]
+    exited_block = blocks[-1]
+
+    assert active_block.block.columns_count == 4
+    assert exited_block.block.start_cell == "F1"
+
+
 def test_build_composition_blocks_creates_active_and_exited_blocks() -> None:
     """Проверяет построение active blocks и exited block."""
 
@@ -404,5 +429,13 @@ async def test_apply_prepared_composition_sync_replaces_sheet_blocks_instead_of_
     ]
 
     assert sheets_client.batch_value_updates
+    first_update = sheets_client.batch_value_updates[0][0]
+    assert first_update.range_a1 == "A1:N3"
+    assert first_update.values == [["" for _ in range(14)] for _ in range(3)]
+
     assert sheets_client.spreadsheet_requests
+    first_format_request = sheets_client.spreadsheet_requests[0][0]
+    assert first_format_request["repeatCell"]["fields"] == "userEnteredFormat"
+
     assert sheets_client.hidden_dimensions
+    assert sheets_client.hidden_dimensions[0]["hidden"] is False

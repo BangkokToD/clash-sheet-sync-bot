@@ -48,6 +48,7 @@ COMPOSITION_ACTIVE_TABLE: Final[TableType] = "composition_active"
 COMPOSITION_EXITED_TABLE: Final[TableType] = "composition_exited"
 DEFAULT_ACTIVE_START_CELL: Final = "A1"
 TITLE_ROWS_COUNT: Final = 2
+COMPOSITION_TABLE_GAP_COLUMNS: Final = 2
 
 GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
 DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
@@ -375,11 +376,13 @@ async def apply_prepared_composition_sync(
     await _format_composition_sheet(
         runtime_config=runtime_config,
         sheets_client=sheets_client,
+        previous_blocks=composition_blocks,
         built_blocks=prepared.built_blocks,
     )
     await _hide_bot_key_columns(
         runtime_config=runtime_config,
         sheets_client=sheets_client,
+        previous_blocks=composition_blocks,
         built_blocks=prepared.built_blocks,
     )
 
@@ -482,7 +485,7 @@ def build_composition_blocks(
     active_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_ACTIVE_TABLE)
     exited_columns = _physical_columns(runtime_config.column_profiles, COMPOSITION_EXITED_TABLE)
     active_width = len(active_columns)
-    exited_start_column = active_width + 2
+    exited_start_column = active_width + COMPOSITION_TABLE_GAP_COLUMNS
     built_blocks: list[BuiltBlock] = []
     row_cursor = 1
 
@@ -988,23 +991,27 @@ async def _rewrite_composition_blocks(
     previous_blocks: Sequence[SheetBlock],
     built_blocks: Sequence[BuiltBlock],
 ) -> None:
-    """Очищает прошлые managed blocks и пишет новые blocks одним values batch."""
+    """Очищает managed layout целиком и пишет новые blocks одним values batch."""
 
     updates: list[SheetValues] = []
-    for block in previous_blocks:
-        if block.rows_count <= 0 or block.columns_count <= 0:
-            continue
+    layout_range = _managed_layout_range(
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
+    if layout_range is not None:
+        rows_count, columns_count = layout_range
         updates.append(
             SheetValues(
                 sheet_name=sheet_name,
                 range_a1=range_from_start_cell(
-                    start_cell=block.start_cell,
-                    rows_count=block.rows_count,
-                    columns_count=block.columns_count,
+                    start_cell="A1",
+                    rows_count=rows_count,
+                    columns_count=columns_count,
                 ),
-                values=[["" for _ in range(block.columns_count)] for _ in range(block.rows_count)],
+                values=[["" for _ in range(columns_count)] for _ in range(rows_count)],
             ),
         )
+
     for built_block in built_blocks:
         updates.append(
             SheetValues(
@@ -1024,9 +1031,10 @@ async def _format_composition_sheet(
     *,
     runtime_config: RuntimeChatConfig,
     sheets_client: SheetsClient,
+    previous_blocks: Sequence[SheetBlock],
     built_blocks: Sequence[BuiltBlock],
 ) -> None:
-    """Форматирует управляемые блоки листа `Состав` как CWL-таблицы."""
+    """Сбрасывает старый layout и форматирует актуальные блоки состава."""
 
     if not built_blocks:
         return
@@ -1036,18 +1044,42 @@ async def _format_composition_sheet(
             runtime_config.sheet_binding.composition_sheet_name
         )
         sheet_id = metadata.sheet_id
-    requests = _build_composition_format_requests(sheet_id=sheet_id, built_blocks=built_blocks)
+    requests = _build_composition_format_requests(
+        sheet_id=sheet_id,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
     await sheets_client.batch_update_spreadsheet(requests)
 
 
 def _build_composition_format_requests(
     *,
     sheet_id: int,
+    previous_blocks: Sequence[SheetBlock],
     built_blocks: Sequence[BuiltBlock],
 ) -> list[JsonObject]:
-    """Строит batchUpdate requests для форматирования состава."""
+    """Строит batchUpdate requests для сброса старого и нанесения нового layout."""
 
     requests: list[JsonObject] = []
+    layout_range = _managed_layout_range(
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
+    if layout_range is not None:
+        rows_count, columns_count = layout_range
+        requests.append(
+            _repeat_cell_request(
+                _grid_range_from_start_cell(
+                    sheet_id=sheet_id,
+                    start_cell="A1",
+                    rows_count=rows_count,
+                    columns_count=columns_count,
+                ),
+                {"userEnteredFormat": {}},
+                "userEnteredFormat",
+            ),
+        )
+
     for built_block in built_blocks:
         block = built_block.block
         block_range = _grid_range_from_start_cell(
@@ -1100,9 +1132,10 @@ async def _hide_bot_key_columns(
     *,
     runtime_config: RuntimeChatConfig,
     sheets_client: SheetsClient,
+    previous_blocks: Sequence[SheetBlock],
     built_blocks: Sequence[BuiltBlock],
 ) -> None:
-    """Скрывает физические колонки `__bot_key` для всех composition blocks."""
+    """Раскрывает старую область и скрывает актуальные `__bot_key` колонки."""
 
     sheet_id = runtime_config.sheet_binding.composition_sheet_id
     if sheet_id is None:
@@ -1110,6 +1143,13 @@ async def _hide_bot_key_columns(
             runtime_config.sheet_binding.composition_sheet_name
         )
         sheet_id = metadata.sheet_id
+    await _unhide_composition_layout_columns(
+        sheets_client=sheets_client,
+        sheet_id=sheet_id,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
+
     hidden_columns: set[int] = set()
     for built_block in built_blocks:
         column_number, _ = _parse_a1_cell(built_block.block.start_cell)
@@ -1124,6 +1164,54 @@ async def _hide_bot_key_columns(
             end_index=column_index + 1,
             hidden=True,
         )
+
+
+async def _unhide_composition_layout_columns(
+    *,
+    sheets_client: SheetsClient,
+    sheet_id: int,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltBlock],
+) -> None:
+    """Раскрывает старую и новую managed-область состава перед скрытием ключей."""
+
+    layout_range = _managed_layout_range(
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
+    if layout_range is None:
+        return
+
+    _, columns_count = layout_range
+    await sheets_client.hide_dimension(
+        sheet_id=sheet_id,
+        dimension="COLUMNS",
+        start_index=0,
+        end_index=columns_count,
+        hidden=False,
+    )
+
+
+def _managed_layout_range(
+    *,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltBlock],
+) -> tuple[int, int] | None:
+    """Возвращает размер прямоугольника A1, покрывающего blocks и gap между ними."""
+
+    blocks = [*previous_blocks, *(built_block.block for built_block in built_blocks)]
+    valid_blocks = [block for block in blocks if block.rows_count > 0 and block.columns_count > 0]
+    if not valid_blocks:
+        return None
+
+    max_row = 1
+    max_column = 1
+    for block in valid_blocks:
+        column_number, row_number = _parse_a1_cell(block.start_cell)
+        max_row = max(max_row, row_number + block.rows_count - 1)
+        max_column = max(max_column, column_number + block.columns_count - 1)
+
+    return max_row, max_column
 
 
 def _title_row(title: str, width: int) -> list[CellValue]:
