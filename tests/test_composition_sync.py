@@ -435,7 +435,11 @@ async def test_apply_prepared_composition_sync_replaces_sheet_blocks_instead_of_
 
     assert sheets_client.spreadsheet_requests
     first_format_request = sheets_client.spreadsheet_requests[0][0]
-    assert first_format_request["repeatCell"]["fields"] == "userEnteredFormat"
+    reset_fields = first_format_request["repeatCell"]["fields"]
+    assert reset_fields == (
+        "userEnteredFormat(backgroundColorStyle,borders,textFormat,verticalAlignment,wrapStrategy)"
+    )
+    assert "horizontalAlignment" not in reset_fields
 
     assert sheets_client.hidden_dimensions
     assert sheets_client.hidden_dimensions[0]["hidden"] is False

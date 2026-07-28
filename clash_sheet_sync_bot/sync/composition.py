@@ -49,6 +49,9 @@ COMPOSITION_EXITED_TABLE: Final[TableType] = "composition_exited"
 DEFAULT_ACTIVE_START_CELL: Final = "A1"
 TITLE_ROWS_COUNT: Final = 2
 COMPOSITION_TABLE_GAP_COLUMNS: Final = 2
+RESET_CELL_FORMAT_FIELDS: Final = (
+    "userEnteredFormat(backgroundColorStyle,borders,textFormat,verticalAlignment,wrapStrategy)"
+)
 
 GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
 DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
@@ -1076,7 +1079,7 @@ def _build_composition_format_requests(
                     columns_count=columns_count,
                 ),
                 {"userEnteredFormat": {}},
-                "userEnteredFormat",
+                RESET_CELL_FORMAT_FIELDS,
             ),
         )
 
