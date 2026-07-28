@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -262,6 +262,25 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE table_type = 'composition_active'
       AND column_key = 'exited_at';
+    """,
+    3: """
+    UPDATE column_profiles
+    SET title = 'ТХ',
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE table_type IN ('composition_active', 'composition_exited')
+      AND column_key = 'town_hall'
+      AND title = 'Ратуша';
+
+    UPDATE column_profiles
+    SET value_type = 'string',
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE (
+        table_type IN ('composition_active', 'composition_exited')
+        AND column_key = 'town_hall'
+    ) OR (
+        table_type = 'cwl'
+        AND column_key IN ('stars', 'destruction_percentage')
+    );
     """,
 }
 

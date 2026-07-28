@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from clash_sheet_sync_bot.coc.client import ClashClient
+from clash_sheet_sync_bot.common.formatting import format_town_hall
 from clash_sheet_sync_bot.common.time import format_dt as _format_dt
 from clash_sheet_sync_bot.models import (
     ColumnProfile,
@@ -59,6 +60,10 @@ WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
 BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
 LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
 BORDER_RGB: Final = {"red": 0.70, "green": 0.76, "blue": 0.73}
+
+SYSTEM_HEADER_ALIASES: Final[dict[str, set[str]]] = {
+    "town_hall": {"Ратуша", "ТХ"},
+}
 
 JsonObject = dict[str, Any]
 JsonDict = dict[str, str]
@@ -877,9 +882,12 @@ def _system_indexes(profiles: Sequence[ColumnProfile], header: Sequence[str]) ->
     for profile in profiles:
         if profile.kind != "system" or not profile.visible:
             continue
-        title_indexes = title_to_indexes.get(profile.title)
-        if title_indexes:
-            indexes[profile.column_key] = title_indexes[0]
+        aliases = (profile.title, *sorted(SYSTEM_HEADER_ALIASES.get(profile.column_key, ())))
+        for title in dict.fromkeys(aliases):
+            title_indexes = title_to_indexes.get(title)
+            if title_indexes:
+                indexes[profile.column_key] = title_indexes[0]
+                break
 
     return indexes
 
@@ -952,7 +960,7 @@ def _state_to_row(
         elif column.column_key == "tag":
             row.append(state.player_tag)
         elif column.column_key == "town_hall":
-            row.append(state.town_hall or "")
+            row.append(format_town_hall(state.town_hall) if state.town_hall is not None else "")
         elif column.column_key == "nickname":
             row.append(state.nickname or "")
         elif column.column_key == "exited_at" and is_exited:
@@ -1462,6 +1470,9 @@ def _optional_int_cell(row: Sequence[str], index: int | None) -> int | None:
     value = _cell_at(row, index).strip()
     if value == "":
         return None
+    normalized = value.upper()
+    if normalized.startswith("TH"):
+        value = normalized.removeprefix("TH").strip()
     try:
         return int(value)
     except ValueError:

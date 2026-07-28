@@ -24,7 +24,9 @@ from clash_sheet_sync_bot.sync.composition import (
     ImportedPlayerValues,
     PlannedPlayerState,
     PreparedCompositionSync,
+    _optional_int_cell,
     _plan_player_states,
+    _system_indexes,
     apply_prepared_composition_sync,
     build_composition_blocks,
 )
@@ -325,12 +327,12 @@ def test_build_composition_blocks_creates_active_and_exited_blocks() -> None:
     exited_block = blocks[-1]
 
     assert active_block.block.start_cell == "A1"
-    assert active_block.values[1] == ["__bot_key", "№", "Тег", "Ратуша", "Никнейм", "Заметка"]
+    assert active_block.values[1] == ["__bot_key", "№", "Тег", "ТХ", "Никнейм", "Заметка"]
     assert active_block.values[2] == [
         "composition_player:#P1",
         1,
         "#P1",
-        16,
+        "TH16",
         "Alpha Player",
         "alpha note",
     ]
@@ -340,7 +342,7 @@ def test_build_composition_blocks_creates_active_and_exited_blocks() -> None:
         "__bot_key",
         "№",
         "Тег",
-        "Ратуша",
+        "ТХ",
         "Никнейм",
         "Заметка",
         "Дата выхода",
@@ -349,11 +351,42 @@ def test_build_composition_blocks_creates_active_and_exited_blocks() -> None:
         "composition_player:#P3",
         1,
         "#P3",
-        14,
+        "TH14",
         "Exited Player",
         "exited note",
         DETECTED_AT_TEXT,
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    (
+        ("14", 14),
+        ("TH14", 14),
+        ("th 15", 15),
+        ("", None),
+        ("—", None),
+    ),
+)
+def test_optional_int_cell_reads_legacy_and_formatted_town_hall(
+    raw_value: str,
+    expected: int | None,
+) -> None:
+    """Проверяет совместимый импорт старого и нового формата ратуши."""
+
+    assert _optional_int_cell([raw_value], 0) == expected
+
+
+def test_system_indexes_accepts_legacy_town_hall_header() -> None:
+    """Проверяет импорт старого заголовка после миграции профиля на ТХ."""
+
+    profiles = tuple(
+        profile
+        for profile in make_composition_column_profiles()
+        if profile.table_type == "composition_active"
+    )
+
+    assert _system_indexes(profiles, ("__bot_key", "Ратуша"))["town_hall"] == 1
 
 
 @pytest.mark.asyncio

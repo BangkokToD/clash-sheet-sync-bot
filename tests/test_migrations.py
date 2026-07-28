@@ -198,10 +198,7 @@ async def test_migration_2_copies_legacy_composition_profile_to_active_and_exite
         value_type="datetime",
     )
 
-    await migrated_connection.execute(
-        "DELETE FROM schema_migrations WHERE version = ?",
-        (SCHEMA_VERSION,),
-    )
+    await migrated_connection.execute("DELETE FROM schema_migrations WHERE version = 2")
     await migrated_connection.commit()
 
     await apply_migrations(migrated_connection)
@@ -234,9 +231,66 @@ async def test_migration_2_copies_legacy_composition_profile_to_active_and_exite
 
     cursor = await migrated_connection.execute(
         "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = ?",
-        (SCHEMA_VERSION,),
+        (2,),
     )
     row = await cursor.fetchone()
 
     assert row is not None
     assert row["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_migration_3_renames_only_default_town_hall_titles(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет новый формат ТХ без перезаписи пользовательского названия."""
+
+    chat_id = -3001
+    await _insert_chat(migrated_connection, chat_id=chat_id)
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=chat_id,
+        table_type="composition_active",
+        column_key="town_hall",
+        title="Ратуша",
+        value_type="integer",
+    )
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=chat_id,
+        table_type="composition_exited",
+        column_key="town_hall",
+        title="Мой уровень",
+        value_type="integer",
+    )
+    await _insert_column_profile(
+        migrated_connection,
+        chat_id=chat_id,
+        table_type="cwl",
+        column_key="stars",
+        title="Звезды",
+        value_type="integer",
+    )
+    await migrated_connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+    await migrated_connection.commit()
+
+    await apply_migrations(migrated_connection)
+    await apply_migrations(migrated_connection)
+
+    cursor = await migrated_connection.execute(
+        """
+        SELECT table_type, column_key, title, value_type
+        FROM column_profiles
+        WHERE chat_id = ?
+        ORDER BY table_type, column_key
+        """,
+        (chat_id,),
+    )
+    rows = await cursor.fetchall()
+    profiles = {
+        (row["table_type"], row["column_key"]): (row["title"], row["value_type"]) for row in rows
+    }
+
+    assert profiles[("composition_active", "town_hall")] == ("ТХ", "string")
+    assert profiles[("composition_exited", "town_hall")] == ("Мой уровень", "string")
+    assert profiles[("cwl", "stars")] == ("Звезды", "string")

@@ -154,10 +154,10 @@ def make_composition_column_profiles(chat_id: int = -1001) -> tuple[ColumnProfil
         make_column_profile(
             chat_id=chat_id,
             column_key="town_hall",
-            title="Ратуша",
+            title="ТХ",
             visible=True,
             kind="system",
-            value_type="integer",
+            value_type="string",
             sort_order=30,
         ),
         make_column_profile(
@@ -212,10 +212,10 @@ def make_composition_column_profiles(chat_id: int = -1001) -> tuple[ColumnProfil
             chat_id=chat_id,
             table_type="composition_exited",
             column_key="town_hall",
-            title="Ратуша",
+            title="ТХ",
             visible=True,
             kind="system",
-            value_type="integer",
+            value_type="string",
             sort_order=30,
         ),
         make_column_profile(

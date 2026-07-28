@@ -11,14 +11,20 @@ from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError
 from clash_sheet_sync_bot.models import ColumnProfile, TrackedClan
 from clash_sheet_sync_bot.repositories import CwlRowState
 from clash_sheet_sync_bot.sheets.client import SheetMetadata, SheetsClient, SpreadsheetMetadata
+from clash_sheet_sync_bot.sheets.column_profiles import default_columns
 from clash_sheet_sync_bot.sync.cwl import (
+    SOFT_PINK_RGB,
+    CwlClanBlock,
     CwlDataError,
     CwlImportResult,
     CwlPlannedRow,
+    CwlPreparedData,
     CwlSeasonMismatchError,
     CwlTechnicalValues,
     _apply_user_values,
+    _build_cwl_format_requests,
     _cwl_composition_user_column_links,
+    _is_missing_attack_display,
     _load_cwl_wars,
     _planned_row_from_state,
     _prepare_saved_cwl_data,
@@ -397,6 +403,149 @@ def _cwl_profiles() -> tuple[ColumnProfile, ...]:
             sort_order=20,
         ),
     )
+
+
+def _default_cwl_profiles() -> tuple[ColumnProfile, ...]:
+    """Создаёт полный дефолтный профиль CWL."""
+
+    return tuple(
+        ColumnProfile(
+            chat_id=-1001,
+            table_type=definition.table_type,
+            column_key=definition.column_key,
+            title=definition.title,
+            visible=definition.visible,
+            kind=definition.kind,
+            value_type=definition.value_type,
+            sort_order=definition.sort_order,
+        )
+        for definition in default_columns("cwl")
+    )
+
+
+def test_cwl_values_include_units_and_highlight_missing_attack_cells() -> None:
+    """Проверяет единицы CWL и розовые ячейки строки без атаки."""
+
+    clan = _tracked_clan(tag="#AAA111", name="Alpha", sort_order=10)
+    no_attack = _planned_cwl_row()
+    attack_row_key = make_cwl_row_key(
+        season="2026-07",
+        clan_tag="#AAA111",
+        round_number=1,
+        attacker_tag="#P2",
+        marker="ATTACK_1",
+    )
+    attacked = CwlPlannedRow(
+        row_key=attack_row_key,
+        season="2026-07",
+        clan_tag="#AAA111",
+        round_number=1,
+        attacker_tag="#P2",
+        marker="ATTACK_1",
+        technical_values=CwlTechnicalValues(
+            round_number=1,
+            attacker_tag="#P2",
+            attacker_name="Attacker",
+            attacker_town_hall=16,
+            defender_town_hall=15,
+            stars=3,
+            destruction_percentage=100,
+            marker="ATTACK_1",
+            attacker_map_position=2,
+            defender_map_position=1,
+        ),
+        no_attack_key=make_cwl_row_key(
+            season="2026-07",
+            clan_tag="#AAA111",
+            round_number=1,
+            attacker_tag="#P2",
+            marker="NO_ATTACK",
+        ),
+    )
+    prepared = CwlPreparedData(
+        season="2026-07",
+        clan_blocks=(
+            CwlClanBlock(
+                clan=clan,
+                rows=(no_attack, attacked),
+                rounds_count=1,
+            ),
+        ),
+        rows=(no_attack, attacked),
+        all_not_in_progress=False,
+        not_in_progress_clans=(),
+        warnings=(),
+    )
+    columns = _default_cwl_profiles()
+    built_blocks = build_cwl_sheet_blocks(
+        runtime_config=make_runtime_config(
+            active_clans=(clan,),
+            column_profiles=columns,
+        ),
+        sheet_name="CWL",
+        sheet_id=222,
+        prepared=prepared,
+        columns=columns,
+    )
+    values = built_blocks[0].values
+    indexes = {column.column_key: index for index, column in enumerate(columns)}
+
+    assert values[2][indexes["attacker_town_hall"]] == "TH15"
+    assert values[2][indexes["defender_town_hall"]] == "—"
+    assert values[2][indexes["stars"]] == "—"
+    assert values[2][indexes["destruction_percentage"]] == "—"
+    assert values[3][indexes["attacker_town_hall"]] == "TH16"
+    assert values[3][indexes["defender_town_hall"]] == "TH15"
+    assert values[3][indexes["stars"]] == "★★★"
+    assert values[3][indexes["destruction_percentage"]] == "100%"
+
+    format_requests = _build_cwl_format_requests(
+        sheet_id=222,
+        matrix_rows_count=6,
+        columns=columns,
+        built_blocks=built_blocks,
+    )
+    pink_ranges = [
+        request["repeatCell"]["range"]
+        for request in format_requests
+        if request.get("repeatCell", {})
+        .get("cell", {})
+        .get("userEnteredFormat", {})
+        .get("backgroundColorStyle", {})
+        .get("rgbColor")
+        == SOFT_PINK_RGB
+    ]
+
+    assert pink_ranges == [
+        {
+            "sheetId": 222,
+            "startRowIndex": 4,
+            "endRowIndex": 5,
+            "startColumnIndex": indexes["defender_town_hall"],
+            "endColumnIndex": indexes["defender_town_hall"] + 1,
+        },
+        {
+            "sheetId": 222,
+            "startRowIndex": 4,
+            "endRowIndex": 5,
+            "startColumnIndex": indexes["stars"],
+            "endColumnIndex": indexes["stars"] + 1,
+        },
+        {
+            "sheetId": 222,
+            "startRowIndex": 4,
+            "endRowIndex": 5,
+            "startColumnIndex": indexes["destruction_percentage"],
+            "endColumnIndex": indexes["destruction_percentage"] + 1,
+        },
+    ]
+
+
+@pytest.mark.parametrize("value", ("", "-", "—"))
+def test_missing_attack_display_accepts_old_and_new_placeholders(value: str) -> None:
+    """Проверяет fallback импорта строки без атаки."""
+
+    assert _is_missing_attack_display(value) is True
 
 
 def test_planned_row_from_state_restores_technical_and_user_values() -> None:

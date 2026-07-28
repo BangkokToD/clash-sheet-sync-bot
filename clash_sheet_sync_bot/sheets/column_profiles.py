@@ -51,14 +51,14 @@ DEFAULT_COLUMN_DEFINITIONS: Final[tuple[ColumnDefinition, ...]] = (
     ),
     ColumnDefinition("composition_active", "number", "№", True, "system", "integer", 10),
     ColumnDefinition("composition_active", "tag", "Тег", True, "system", "string", 20),
-    ColumnDefinition("composition_active", "town_hall", "Ратуша", True, "system", "integer", 30),
+    ColumnDefinition("composition_active", "town_hall", "ТХ", True, "system", "string", 30),
     ColumnDefinition("composition_active", "nickname", "Никнейм", True, "system", "string", 40),
     ColumnDefinition(
         "composition_exited", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0
     ),
     ColumnDefinition("composition_exited", "number", "№", True, "system", "integer", 10),
     ColumnDefinition("composition_exited", "tag", "Тег", True, "system", "string", 20),
-    ColumnDefinition("composition_exited", "town_hall", "Ратуша", True, "system", "integer", 30),
+    ColumnDefinition("composition_exited", "town_hall", "ТХ", True, "system", "string", 30),
     ColumnDefinition("composition_exited", "nickname", "Никнейм", True, "system", "string", 40),
     ColumnDefinition(
         "composition_exited", "exited_at", "Дата выхода", True, "system", "datetime", 50
@@ -69,9 +69,9 @@ DEFAULT_COLUMN_DEFINITIONS: Final[tuple[ColumnDefinition, ...]] = (
     ColumnDefinition("cwl", "attacker_name", "Ник", True, "system", "string", 30),
     ColumnDefinition("cwl", "attacker_town_hall", "ТХ", True, "system", "string", 40),
     ColumnDefinition("cwl", "defender_town_hall", "ТХ соперника", True, "system", "string", 50),
-    ColumnDefinition("cwl", "stars", "Звезды", True, "system", "integer", 60),
+    ColumnDefinition("cwl", "stars", "Звезды", True, "system", "string", 60),
     ColumnDefinition(
-        "cwl", "destruction_percentage", "Процент разрушений", True, "system", "integer", 70
+        "cwl", "destruction_percentage", "Процент разрушений", True, "system", "string", 70
     ),
 )
 

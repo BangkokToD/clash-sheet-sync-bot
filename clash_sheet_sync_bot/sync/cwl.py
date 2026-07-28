@@ -16,6 +16,7 @@ from clash_sheet_sync_bot.coc.client import (
     ClashClient,
     ClashCwlNotInProgressError,
 )
+from clash_sheet_sync_bot.common.formatting import format_town_hall
 from clash_sheet_sync_bot.common.time import utc_now_iso as _utc_now_iso
 from clash_sheet_sync_bot.models import (
     ColumnProfile,
@@ -72,6 +73,10 @@ TITLE_ROWS_COUNT: Final = 2
 DEFAULT_CWL_START_CELL: Final = "A1"
 BOT_STATE_SCHEMA_VERSION: Final = "1"
 MANAGED_BY_VALUE: Final = "clash-sheet-sync-bot"
+MISSING_VALUE_DISPLAY: Final = "—"
+NO_ATTACK_HIGHLIGHT_COLUMN_KEYS: Final = frozenset(
+    {"defender_town_hall", "stars", "destruction_percentage"},
+)
 
 DEFENDER_POSITION_RE: Final = re.compile(r"^\s*(\d+)\b")
 
@@ -90,6 +95,7 @@ DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
 WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
 BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
 LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
+SOFT_PINK_RGB: Final = {"red": 0.98, "green": 0.86, "blue": 0.88}
 BORDER_RGB: Final = {"red": 0.70, "green": 0.76, "blue": 0.73}
 
 JsonObject = dict[str, Any]
@@ -968,7 +974,7 @@ async def _rewrite_active_cwl_sheet(
         sheets_client=sheets_client,
         sheet_id=active_sheet.sheet_id,
         matrix_rows_count=len(matrix),
-        columns_count=len(columns),
+        columns=columns,
         built_blocks=built_blocks,
     )
     await _hide_bot_key_column(sheets_client=sheets_client, sheet_id=active_sheet.sheet_id)
@@ -1015,7 +1021,7 @@ async def _write_cwl_with_staging_archive(
         sheets_client=sheets_client,
         sheet_id=staging.sheet_id,
         matrix_rows_count=len(matrix),
-        columns_count=len(columns),
+        columns=columns,
         built_blocks=staging_blocks,
     )
     await _hide_bot_key_column(sheets_client=sheets_client, sheet_id=staging.sheet_id)
@@ -1663,7 +1669,9 @@ def _fallback_row_key(
     stars_raw = _cell_at(row, header.system_indexes.get("stars", -1)).strip()
     destruction_raw = _cell_at(row, header.system_indexes.get("destruction_percentage", -1)).strip()
 
-    if defender_raw == "" and stars_raw == "" and destruction_raw == "":
+    if all(
+        _is_missing_attack_display(value) for value in (defender_raw, stars_raw, destruction_raw)
+    ):
         marker = NO_ATTACK_MARKER
         old_alias_keys: tuple[str, ...] = ()
     else:
@@ -1998,25 +2006,21 @@ def _cwl_row_to_values(*, row: CwlPlannedRow, columns: Sequence[ColumnProfile]) 
             values.append(
                 format_town_hall(technical.defender_town_hall)
                 if technical.defender_town_hall is not None
-                else ""
+                else MISSING_VALUE_DISPLAY
             )
         elif column.column_key == "stars":
-            values.append(technical.stars if technical.stars is not None else "")
+            values.append(
+                "★" * technical.stars if technical.stars is not None else MISSING_VALUE_DISPLAY
+            )
         elif column.column_key == "destruction_percentage":
             values.append(
-                technical.destruction_percentage
+                f"{technical.destruction_percentage}%"
                 if technical.destruction_percentage is not None
-                else ""
+                else MISSING_VALUE_DISPLAY
             )
         else:
             values.append("")
     return values
-
-
-def format_town_hall(town_hall: int) -> str:
-    """Форматирует ратушу для CWL без номера карты."""
-
-    return f"TH{town_hall}"
 
 
 async def _format_cwl_sheet(
@@ -2024,7 +2028,7 @@ async def _format_cwl_sheet(
     sheets_client: SheetsClient,
     sheet_id: int,
     matrix_rows_count: int,
-    columns_count: int,
+    columns: Sequence[ColumnProfile],
     built_blocks: Sequence[BuiltCwlBlock],
 ) -> None:
     """Форматирует управляемые CWL-блоки."""
@@ -2032,7 +2036,7 @@ async def _format_cwl_sheet(
     requests = _build_cwl_format_requests(
         sheet_id=sheet_id,
         matrix_rows_count=matrix_rows_count,
-        columns_count=columns_count,
+        columns=columns,
         built_blocks=built_blocks,
     )
     await sheets_client.batch_update_spreadsheet(requests)
@@ -2042,12 +2046,13 @@ def _build_cwl_format_requests(
     *,
     sheet_id: int,
     matrix_rows_count: int,
-    columns_count: int,
+    columns: Sequence[ColumnProfile],
     built_blocks: Sequence[BuiltCwlBlock],
 ) -> list[JsonObject]:
     """Строит Google Sheets formatting requests."""
 
     requests: list[JsonObject] = []
+    columns_count = len(columns)
     if matrix_rows_count > 0:
         requests.append(
             _repeat_cell_request(
@@ -2099,21 +2104,28 @@ def _build_cwl_format_requests(
             )
             data_rows_count = max(built_block.block.rows_count - 2, 0)
             for data_row_offset in range(data_rows_count):
-                if data_row_offset % 2 == 0:
-                    continue
-                requests.append(
-                    _repeat_cell_request(
-                        _grid_range_for_block_row(
-                            sheet_id,
-                            built_block.block,
-                            row_offset=2 + data_row_offset,
+                if data_row_offset % 2 != 0:
+                    requests.append(
+                        _repeat_cell_request(
+                            _grid_range_for_block_row(
+                                sheet_id,
+                                built_block.block,
+                                row_offset=2 + data_row_offset,
+                            ),
+                            {
+                                "userEnteredFormat": {
+                                    "backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}
+                                }
+                            },
+                            "userEnteredFormat.backgroundColorStyle",
                         ),
-                        {
-                            "userEnteredFormat": {
-                                "backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB}
-                            }
-                        },
-                        "userEnteredFormat.backgroundColorStyle",
+                    )
+                requests.extend(
+                    _no_attack_highlight_requests(
+                        sheet_id=sheet_id,
+                        block=built_block,
+                        columns=columns,
+                        data_row_offset=data_row_offset,
                     ),
                 )
         else:
@@ -2126,6 +2138,49 @@ def _build_cwl_format_requests(
             )
 
     return requests
+
+
+def _no_attack_highlight_requests(
+    *,
+    sheet_id: int,
+    block: BuiltCwlBlock,
+    columns: Sequence[ColumnProfile],
+    data_row_offset: int,
+) -> list[JsonObject]:
+    """Подсвечивает отсутствующие показатели строки без атаки."""
+
+    column_indexes = tuple(
+        index
+        for index, column in enumerate(columns)
+        if column.column_key in NO_ATTACK_HIGHLIGHT_COLUMN_KEYS
+    )
+    values_row_index = TITLE_ROWS_COUNT + data_row_offset
+    if not column_indexes or values_row_index >= len(block.values):
+        return []
+
+    values = block.values[values_row_index]
+    if not all(
+        index < len(values) and values[index] == MISSING_VALUE_DISPLAY for index in column_indexes
+    ):
+        return []
+
+    return [
+        _repeat_cell_request(
+            _grid_range_for_block_cell(
+                sheet_id,
+                block.block,
+                row_offset=TITLE_ROWS_COUNT + data_row_offset,
+                column_offset=column_index,
+            ),
+            {
+                "userEnteredFormat": {
+                    "backgroundColorStyle": {"rgbColor": SOFT_PINK_RGB},
+                },
+            },
+            "userEnteredFormat.backgroundColorStyle",
+        )
+        for column_index in column_indexes
+    ]
 
 
 async def _hide_bot_key_column(*, sheets_client: SheetsClient, sheet_id: int) -> None:
@@ -2391,6 +2446,12 @@ def _parse_defender_position(value: str) -> int | None:
     return int(match.group(1))
 
 
+def _is_missing_attack_display(value: str) -> bool:
+    """Проверяет пустое значение атаки в старом и новом отображении."""
+
+    return value in {"", "-", MISSING_VALUE_DISPLAY}
+
+
 def _marker_sort_index(marker: str) -> int:
     """Возвращает порядок marker внутри атакующего."""
 
@@ -2538,6 +2599,27 @@ def _grid_range_for_block_row(sheet_id: int, block: SheetBlock, *, row_offset: i
         start_cell=_offset_cell(block.start_cell, row_offset=row_offset, column_offset=0),
         rows_count=1,
         columns_count=block.columns_count,
+    )
+
+
+def _grid_range_for_block_cell(
+    sheet_id: int,
+    block: SheetBlock,
+    *,
+    row_offset: int,
+    column_offset: int,
+) -> JsonObject:
+    """Строит GridRange одной ячейки блока."""
+
+    return _grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=_offset_cell(
+            block.start_cell,
+            row_offset=row_offset,
+            column_offset=column_offset,
+        ),
+        rows_count=1,
+        columns_count=1,
     )
 
 
