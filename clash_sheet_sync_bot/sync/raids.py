@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
 
-from clash_sheet_sync_bot.models import normalize_tag
+from clash_sheet_sync_bot.models import AppConfig, TrackedClan, normalize_tag
+from clash_sheet_sync_bot.repositories.raid_state import RaidPlayerState
 
 CAPITAL_PEAK_DISTRICT_ID: Final = 70_000_000
 CAPITAL_PEAK_NAME: Final = "Capital Peak"
@@ -75,6 +79,171 @@ class RaidTechnicalValues:
     weighted_damage_units: int
     normal_points: Decimal
     coefficient: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class RaidPlannedRow:
+    """Полностью подготовленная строка рейдового листа."""
+
+    row_key: str
+    season_key: str
+    clan_tag: str
+    rank: int
+    technical_values: RaidTechnicalValues
+    user_values: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class RaidClanBlock:
+    """Подготовленный клановый data- или message-block."""
+
+    clan_tag: str
+    clan_name: str
+    rows: tuple[RaidPlannedRow, ...] = ()
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRaidSync:
+    """Результат raid preparation без каких-либо write-операций."""
+
+    season_key: str | None
+    season_state: RaidSeasonState | None
+    blocks: tuple[RaidClanBlock, ...]
+    warnings: tuple[str, ...] = ()
+    diff: tuple[str, ...] = ()
+
+
+async def prepare_public_raid_sync(
+    *,
+    clans: Sequence[TrackedClan],
+    clash_client: Any,
+    config: AppConfig,
+    saved_rows: Sequence[RaidPlayerState] = (),
+    imported_user_values: Mapping[str, Mapping[str, str]] | None = None,
+    composition_user_values: Mapping[str, Mapping[str, str]] | None = None,
+) -> PreparedRaidSync:
+    """Подготавливает общий raid season всех активных кланов до Sheets write."""
+
+    semaphore = asyncio.Semaphore(config.raid_api_concurrency_limit)
+
+    async def load(clan: TrackedClan) -> tuple[str, list[JsonObject]]:
+        async with semaphore:
+            items = await clash_client.get_capital_raid_seasons(
+                clan.clan_tag,
+                limit=config.raid_season_fetch_limit,
+            )
+        return normalize_tag(clan.clan_tag), items
+
+    windows = dict(await asyncio.gather(*(load(clan) for clan in clans)))
+    ongoing_keys = {
+        _season_key(_required_non_empty_str(item, "startTime", "raid season"))
+        for items in windows.values()
+        for item in items
+        if item.get("state") == "ongoing"
+    }
+    if len(ongoing_keys) > 1:
+        raise RaidContractError("Активные кланы вернули разные ongoing raid seasons.")
+    api_keys = {
+        _season_key(_required_non_empty_str(item, "startTime", "raid season"))
+        for items in windows.values()
+        for item in items
+        if item.get("state") in {"ongoing", "ended"}
+    }
+    selected_key = next(iter(ongoing_keys), max(api_keys, default=None))
+    if selected_key is None and saved_rows:
+        selected_key = max(row.season_key for row in saved_rows)
+
+    imported = imported_user_values or {}
+    composition = composition_user_values or {}
+    saved_by_key = {row.row_key: row for row in saved_rows}
+    blocks: list[RaidClanBlock] = []
+    warnings: list[str] = []
+    selected_state: RaidSeasonState | None = None
+
+    for clan in clans:
+        clan_tag = normalize_tag(clan.clan_tag)
+        raw = next(
+            (
+                item
+                for item in windows.get(clan_tag, [])
+                if _season_key(_required_non_empty_str(item, "startTime", "raid season"))
+                == selected_key
+            ),
+            None,
+        )
+        technical_rows: tuple[RaidTechnicalValues, ...] = ()
+        if raw is not None:
+            parsed = parse_raid_season(raw, clan_tag=clan_tag)
+            selected_state = parsed.state
+            technical_rows = aggregate_raid_season(
+                parsed,
+                attacks_target=config.raid_attacks_target,
+                normal_district_attack_norm=config.raid_normal_district_attack_norm,
+                capital_district_attack_norm=config.raid_capital_district_attack_norm,
+            )
+        elif selected_key is not None:
+            stored = [
+                row
+                for row in saved_rows
+                if row.season_key == selected_key and normalize_tag(row.clan_tag) == clan_tag
+            ]
+            technical_rows = tuple(_technical_from_state(row) for row in stored)
+            if stored:
+                selected_state = _stored_state(stored[0].season_state)
+                warnings.append(f"{clan_tag}: использовано сохранённое состояние рейдов.")
+
+        if not technical_rows:
+            blocks.append(
+                RaidClanBlock(
+                    clan_tag=clan_tag,
+                    clan_name=clan.clan_name,
+                    message="Нет данных рейдового уикенда",
+                )
+            )
+            continue
+        planned = [
+            _planned_row(
+                values,
+                season_key=selected_key or "",
+                clan_tag=clan_tag,
+                imported=imported,
+                saved_by_key=saved_by_key,
+                composition=composition,
+            )
+            for values in technical_rows
+        ]
+        planned.sort(
+            key=lambda row: (
+                -row.technical_values.coefficient,
+                -row.technical_values.attacks,
+                row.technical_values.player_name.casefold(),
+                row.technical_values.player_tag,
+            )
+        )
+        ranked = tuple(
+            RaidPlannedRow(
+                row_key=row.row_key,
+                season_key=row.season_key,
+                clan_tag=row.clan_tag,
+                rank=index,
+                technical_values=row.technical_values,
+                user_values=row.user_values,
+            )
+            for index, row in enumerate(planned, start=1)
+        )
+        blocks.append(RaidClanBlock(clan_tag, clan.clan_name, ranked))
+
+    diff = tuple(
+        f"{block.clan_tag}: {len(block.rows)} участников" for block in blocks if block.rows
+    )
+    return PreparedRaidSync(selected_key, selected_state, tuple(blocks), tuple(warnings), diff)
+
+
+def make_raid_row_key(season_key: str, clan_tag: str, player_tag: str) -> str:
+    """Строит стабильный ключ raid row."""
+
+    return f"raid_row:{season_key}|{normalize_tag(clan_tag)}|{normalize_tag(player_tag)}"
 
 
 def classify_raid_district(
@@ -201,6 +370,54 @@ def aggregate_raid_season(
         )
         for member in season.members
     )
+
+
+def _season_key(value: str) -> str:
+    parsed = datetime.strptime(value, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=UTC)
+    return parsed.isoformat()
+
+
+def _planned_row(
+    values: RaidTechnicalValues,
+    *,
+    season_key: str,
+    clan_tag: str,
+    imported: Mapping[str, Mapping[str, str]],
+    saved_by_key: Mapping[str, RaidPlayerState],
+    composition: Mapping[str, Mapping[str, str]],
+) -> RaidPlannedRow:
+    row_key = make_raid_row_key(season_key, clan_tag, values.player_tag)
+    if row_key in imported:
+        user_values = dict(imported[row_key])
+    elif row_key in saved_by_key:
+        user_values = dict(saved_by_key[row_key].user_values)
+    else:
+        user_values = {}
+    for key, value in composition.get(values.player_tag, {}).items():
+        if user_values.get(key, "").strip() == "" and value.strip() != "":
+            user_values[key] = value
+    return RaidPlannedRow(row_key, season_key, clan_tag, 0, values, user_values)
+
+
+def _technical_from_state(state: RaidPlayerState) -> RaidTechnicalValues:
+    data = state.technical_values
+    return RaidTechnicalValues(
+        player_tag=state.player_tag,
+        player_name=str(data["player_name"]),
+        attacks=int(data["attacks"]),
+        attack_limit=int(data["attack_limit"]),
+        bonus_attack_limit=int(data["bonus_attack_limit"]),
+        capital_resources_looted=int(data["capital_resources_looted"]),
+        weighted_damage_units=int(data["weighted_damage_units"]),
+        normal_points=Decimal(str(data["normal_points"])),
+        coefficient=Decimal(str(data["coefficient"])),
+    )
+
+
+def _stored_state(value: str) -> RaidSeasonState:
+    if value not in {"ongoing", "ended"}:
+        raise RaidContractError(f"Некорректный сохранённый raid state: {value}.")
+    return value
 
 
 def _parse_members(raw_members: list[Any]) -> tuple[RaidMember, ...]:

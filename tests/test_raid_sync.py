@@ -20,7 +20,9 @@ from clash_sheet_sync_bot.sync.raids import (
     aggregate_raid_season,
     classify_raid_district,
     parse_raid_season,
+    prepare_public_raid_sync,
 )
+from tests.fakes.factories import make_app_config, make_tracked_clan
 
 JsonObject = dict[str, Any]
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -600,3 +602,52 @@ def test_synthetic_ongoing_overlay_changes_only_state() -> None:
     }
     assert {key for key in ongoing if ongoing[key] != base[key]} == {"state"}
     assert parse_raid_season(ongoing, clan_tag="#CLAN").state == "ongoing"
+
+
+@pytest.mark.asyncio
+async def test_prepare_public_raid_sync_selects_season_ranks_and_merges_values() -> None:
+    """Проверяет чистую preparation одного сезона без Sheets writes."""
+
+    payload = _season(
+        state="ongoing",
+        members=[_member("#TWO", attacks=1, name="Two"), _member("#ONE", attacks=1, name="One")],
+        districts=[_district(123, [_attack("#ONE", 100), _attack("#TWO", 50)])],
+    )
+
+    class FakeClash:
+        async def get_capital_raid_seasons(self, clan_tag: str, *, limit: int) -> list[JsonObject]:
+            assert limit == 5
+            return [payload]
+
+    prepared = await prepare_public_raid_sync(
+        clans=[make_tracked_clan(tag="#CLAN")],
+        clash_client=FakeClash(),
+        config=make_app_config(),
+        composition_user_values={"#ONE": {"note": "composition"}},
+    )
+
+    assert prepared.season_state == "ongoing"
+    rows = prepared.blocks[0].rows
+    assert [row.technical_values.player_tag for row in rows] == ["#ONE", "#TWO"]
+    assert [row.rank for row in rows] == [1, 2]
+    assert rows[0].user_values == {"note": "composition"}
+    assert rows[0].row_key.startswith("raid_row:2026-07-24T07:00:00+00:00|#CLAN|")
+
+
+@pytest.mark.asyncio
+async def test_prepare_public_raid_sync_rejects_different_ongoing_seasons() -> None:
+    """Проверяет общий season contract нескольких кланов."""
+
+    first = _season(members=[], districts=[], state="ongoing")
+    second = dict(first, startTime="20260725T070000.000Z")
+
+    class FakeClash:
+        async def get_capital_raid_seasons(self, clan_tag: str, *, limit: int) -> list[JsonObject]:
+            return [first if clan_tag == "#ONE" else second]
+
+    with pytest.raises(RaidContractError, match="разные ongoing"):
+        await prepare_public_raid_sync(
+            clans=[make_tracked_clan(tag="#ONE"), make_tracked_clan(tag="#TWO")],
+            clash_client=FakeClash(),
+            config=make_app_config(),
+        )
