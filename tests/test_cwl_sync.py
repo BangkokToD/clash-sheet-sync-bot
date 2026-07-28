@@ -9,6 +9,8 @@ import pytest
 
 from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError
 from clash_sheet_sync_bot.models import ColumnProfile, TrackedClan
+from clash_sheet_sync_bot.repositories import CwlRowState
+from clash_sheet_sync_bot.sheets.client import SheetMetadata, SheetsClient, SpreadsheetMetadata
 from clash_sheet_sync_bot.sync.cwl import (
     CwlDataError,
     CwlImportResult,
@@ -18,9 +20,15 @@ from clash_sheet_sync_bot.sync.cwl import (
     _apply_user_values,
     _cwl_composition_user_column_links,
     _load_cwl_wars,
+    _planned_row_from_state,
+    _prepare_saved_cwl_data,
+    _resolve_active_cwl_sheet,
     _resolve_cwl_season,
+    build_cwl_sheet_blocks,
+    build_cwl_sheet_matrix,
     make_cwl_row_key,
 )
+from tests.fakes.factories import make_column_profile, make_runtime_config
 
 JsonObject = dict[str, Any]
 
@@ -315,3 +323,284 @@ def test_apply_user_values_treats_blank_cwl_value_as_empty_for_composition_inher
     )
 
     assert result[0].user_values == {"cwl_username": "@from-composition"}
+
+
+def _saved_cwl_state(
+    *,
+    clan_tag: str = "#AAA111",
+    season: str = "2026-07",
+    user_values: dict[str, str] | None = None,
+) -> CwlRowState:
+    """Создаёт сохранённую строку CWL для межсезонных тестов."""
+
+    row_key = make_cwl_row_key(
+        season=season,
+        clan_tag=clan_tag,
+        round_number=1,
+        attacker_tag="#P1",
+        marker="NO_ATTACK",
+    )
+    technical = CwlTechnicalValues(
+        round_number=1,
+        attacker_tag="#P1",
+        attacker_name="Player",
+        attacker_town_hall=16,
+        defender_town_hall=None,
+        stars=None,
+        destruction_percentage=None,
+        marker="NO_ATTACK",
+        attacker_map_position=1,
+        defender_map_position=None,
+    )
+    return CwlRowState(
+        season=season,
+        row_key=row_key,
+        clan_tag=clan_tag,
+        round_number=1,
+        attacker_tag="#P1",
+        marker="NO_ATTACK",
+        technical_values=technical.to_json(),
+        user_values=user_values or {},
+        row_hash="stored-hash",
+    )
+
+
+def _cwl_profiles() -> tuple[ColumnProfile, ...]:
+    """Создаёт минимальный физический профиль CWL-листа."""
+
+    return (
+        make_column_profile(
+            table_type="cwl",
+            column_key="bot_key",
+            title="__bot_key",
+            visible=False,
+            kind="service",
+            value_type="string",
+            sort_order=0,
+        ),
+        make_column_profile(
+            table_type="cwl",
+            column_key="round",
+            title="Раунд",
+            visible=True,
+            kind="system",
+            value_type="integer",
+            sort_order=10,
+        ),
+        make_column_profile(
+            table_type="cwl",
+            column_key="attacker_name",
+            title="Ник",
+            visible=True,
+            kind="system",
+            value_type="string",
+            sort_order=20,
+        ),
+    )
+
+
+def test_planned_row_from_state_restores_technical_and_user_values() -> None:
+    """Проверяет безопасное восстановление CWL-строки из SQLite."""
+
+    restored = _planned_row_from_state(
+        _saved_cwl_state(user_values={"cwl_note": "Капитан"}),
+    )
+
+    assert restored.season == "2026-07"
+    assert restored.clan_tag == "#AAA111"
+    assert restored.technical_values.attacker_name == "Player"
+    assert restored.user_values == {"cwl_note": "Капитан"}
+
+
+def test_planned_row_from_state_rejects_inconsistent_state() -> None:
+    """Проверяет отказ от повреждённого CWL state."""
+
+    state = _saved_cwl_state()
+    inconsistent = CwlRowState(
+        season=state.season,
+        row_key=state.row_key,
+        clan_tag=state.clan_tag,
+        round_number=2,
+        attacker_tag=state.attacker_tag,
+        marker=state.marker,
+        technical_values=state.technical_values,
+        user_values=state.user_values,
+        row_hash=state.row_hash,
+    )
+
+    with pytest.raises(CwlDataError, match="противоречивые поля"):
+        _planned_row_from_state(inconsistent)
+
+
+class FakeSavedCwlRepository:
+    """Fake CWL repository для межсезонной подготовки."""
+
+    def __init__(self, *, season: str | None, rows: tuple[CwlRowState, ...] = ()) -> None:
+        self.season = season
+        self.rows = rows
+
+    async def get_latest_season(
+        self,
+        *,
+        chat_id: int,
+        clan_tags: tuple[str, ...],
+    ) -> str | None:
+        del chat_id, clan_tags
+        return self.season
+
+    async def list_rows(self, *, chat_id: int, season: str) -> tuple[CwlRowState, ...]:
+        del chat_id
+        assert season == self.season
+        return self.rows
+
+
+class FakeSavedSheetBlockRepository:
+    """Fake sheet-block repository без сохранённых диапазонов."""
+
+    async def list_blocks(self, chat_id: int, sheet_name: str) -> tuple[()]:
+        del chat_id, sheet_name
+        return ()
+
+
+class FakeSavedSheetsClient:
+    """Fake Sheets client с пустым активным CWL-листом."""
+
+    async def read_values(self, sheet_name: str, range_a1: str) -> list[list[str]]:
+        del sheet_name, range_a1
+        return []
+
+
+@pytest.mark.asyncio
+async def test_prepare_saved_cwl_data_restores_latest_season_for_matching_clan() -> None:
+    """Проверяет показ последнего сезона и сообщение клану без истории."""
+
+    clans = (
+        _tracked_clan(tag="#AAA111", name="Alpha", sort_order=10),
+        _tracked_clan(tag="#BBB222", name="Beta", sort_order=20),
+    )
+    runtime_config = make_runtime_config(
+        active_clans=clans,
+        column_profiles=_cwl_profiles(),
+    )
+
+    prepared = await _prepare_saved_cwl_data(
+        runtime_config=runtime_config,
+        sheets_client=FakeSavedSheetsClient(),  # type: ignore[arg-type]
+        cwl_repository=FakeSavedCwlRepository(  # type: ignore[arg-type]
+            season="2026-07",
+            rows=(_saved_cwl_state(),),
+        ),
+        sheet_block_repository=FakeSavedSheetBlockRepository(),  # type: ignore[arg-type]
+        not_in_progress_clans=clans,
+        composition_player_states=(),
+    )
+
+    assert prepared.season == "2026-07"
+    assert prepared.all_not_in_progress is True
+    assert prepared.showing_previous_season is True
+    assert len(prepared.rows) == 1
+    assert prepared.clan_blocks[0].rows == prepared.rows
+    assert prepared.clan_blocks[1].message == "Нет сохранённых данных CWL за сезон 2026-07"
+
+
+@pytest.mark.asyncio
+async def test_prepare_saved_cwl_data_builds_explanation_when_history_is_empty() -> None:
+    """Проверяет понятный лист вместо пустой страницы без истории."""
+
+    clan = _tracked_clan(tag="#AAA111", name="Alpha", sort_order=10)
+    runtime_config = make_runtime_config(
+        active_clans=(clan,),
+        column_profiles=_cwl_profiles(),
+    )
+
+    prepared = await _prepare_saved_cwl_data(
+        runtime_config=runtime_config,
+        sheets_client=FakeSavedSheetsClient(),  # type: ignore[arg-type]
+        cwl_repository=FakeSavedCwlRepository(season=None),  # type: ignore[arg-type]
+        sheet_block_repository=FakeSavedSheetBlockRepository(),  # type: ignore[arg-type]
+        not_in_progress_clans=(clan,),
+        composition_player_states=(),
+    )
+    blocks = build_cwl_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name="CWL",
+        sheet_id=222,
+        prepared=prepared,
+        columns=_cwl_profiles(),
+    )
+    matrix = build_cwl_sheet_matrix(
+        prepared=prepared,
+        columns=_cwl_profiles(),
+        built_blocks=blocks,
+    )
+
+    assert prepared.season is None
+    assert prepared.showing_previous_season is False
+    assert "CWL сейчас не проводится" in matrix[0]
+    assert any("Нет сохранённых данных за предыдущий сезон" in row for row in matrix)
+
+
+class FakeResolverSheetsClient:
+    """Fake Sheets client для восстановления после ротации."""
+
+    async def get_spreadsheet_metadata(self) -> SpreadsheetMetadata:
+        return SpreadsheetMetadata(
+            spreadsheet_id="sheet-id",
+            title="Test",
+            sheets=(
+                SheetMetadata(sheet_id=222, title="CWL 2026-07", index=1),
+                SheetMetadata(sheet_id=444, title="CWL", index=2),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_active_cwl_sheet_prefers_canonical_after_partial_rotation() -> None:
+    """Проверяет, что устаревший ID не возвращает бота в архивный лист."""
+
+    resolved = await _resolve_active_cwl_sheet(
+        make_runtime_config(column_profiles=_cwl_profiles()),
+        FakeResolverSheetsClient(),  # type: ignore[arg-type]
+    )
+
+    assert resolved.sheet_id == 444
+    assert resolved.title == "CWL"
+
+
+@pytest.mark.asyncio
+async def test_rename_sheets_atomically_uses_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Проверяет атомарную смену имён архивного и нового CWL-листов."""
+
+    client = object.__new__(SheetsClient)
+    calls: list[list[JsonObject]] = []
+
+    async def capture(requests: list[JsonObject]) -> JsonObject:
+        calls.append(requests)
+        return {}
+
+    monkeypatch.setattr(client, "batch_update_spreadsheet", capture)
+
+    await client.rename_sheets_atomically(
+        (
+            (222, "CWL 2026-07"),
+            (444, "CWL"),
+        ),
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == [
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": 222, "title": "CWL 2026-07"},
+                "fields": "title",
+            },
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": 444, "title": "CWL"},
+                "fields": "title",
+            },
+        },
+    ]

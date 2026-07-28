@@ -7,6 +7,7 @@ import pytest
 
 from clash_sheet_sync_bot.models import SheetBlock
 from clash_sheet_sync_bot.repositories import (
+    CwlRowStateRepository,
     RuntimeConfigRepository,
     SheetBlockRepository,
     SyncRunRepository,
@@ -343,6 +344,52 @@ async def test_replace_blocks_by_prefixes_replaces_only_matching_blocks(
     assert "composition_active:#NEW" in block_keys
     assert "composition_exited" in block_keys
     assert "cwl:#KEEP" in block_keys
+
+
+@pytest.mark.asyncio
+async def test_cwl_repository_get_latest_season_is_scoped_to_chat_and_active_clans(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет выбор истории только этой группы и запрошенных кланов."""
+
+    await _insert_chat(migrated_connection, chat_id=-211)
+    await _insert_chat(migrated_connection, chat_id=-212)
+    repository = CwlRowStateRepository(migrated_connection)
+
+    async def save(*, chat_id: int, season: str, clan_tag: str) -> None:
+        row_key = f"{season}|{clan_tag}|1|#PLAYER|NO_ATTACK"
+        await repository.upsert_row_state(
+            chat_id=chat_id,
+            season=season,
+            row_key=row_key,
+            clan_tag=clan_tag,
+            round_number=1,
+            attacker_tag="#PLAYER",
+            marker="NO_ATTACK",
+            technical_values={"round": 1},
+            user_values={},
+            row_hash=f"hash-{chat_id}-{season}-{clan_tag}",
+        )
+
+    await save(chat_id=-211, season="2026-05", clan_tag="#ACTIVE")
+    await save(chat_id=-211, season="2026-07", clan_tag="#INACTIVE")
+    await save(chat_id=-212, season="2026-09", clan_tag="#ACTIVE")
+
+    assert (
+        await repository.get_latest_season(
+            chat_id=-211,
+            clan_tags=("#ACTIVE",),
+        )
+        == "2026-05"
+    )
+    assert (
+        await repository.get_latest_season(
+            chat_id=-211,
+            clan_tags=("#MISSING",),
+        )
+        is None
+    )
+    assert await repository.get_latest_season(chat_id=-211, clan_tags=()) is None
 
 
 @pytest.mark.asyncio

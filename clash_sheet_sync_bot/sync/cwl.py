@@ -60,7 +60,7 @@ CWL_MESSAGE_BLOCK_PREFIX: Final = "cwl_message:"
 CWL_WIDE_IMPORT_RANGE: Final = "A1:ZZ1000"
 CWL_ACTIVE_SHEET_NAME: Final = "CWL"
 CWL_STAGING_SHEET_PREFIX: Final = "CWL - staging - "
-CWL_ARCHIVE_SHEET_PREFIX: Final = "CWL - "
+CWL_ARCHIVE_SHEET_PREFIX: Final = "CWL "
 CWL_ELIGIBLE_WAR_STATES: Final = {"warEnded", "inWar"}
 NO_ATTACK_MARKER: Final = "NO_ATTACK"
 ATTACK_MARKER_PREFIX: Final = "ATTACK"
@@ -124,6 +124,23 @@ class CwlTechnicalValues:
     marker: str
     attacker_map_position: int
     defender_map_position: int | None
+
+    @classmethod
+    def from_json(cls, data: JsonObject) -> CwlTechnicalValues:
+        """Восстанавливает технические значения из SQLite state."""
+
+        return cls(
+            round_number=_json_int(data, "round"),
+            attacker_tag=normalize_tag(_json_str(data, "attacker_tag")),
+            attacker_name=_json_str(data, "attacker_name"),
+            attacker_town_hall=_json_int(data, "attacker_town_hall"),
+            defender_town_hall=_json_optional_int(data, "defender_town_hall"),
+            stars=_json_optional_int(data, "stars"),
+            destruction_percentage=_json_optional_int(data, "destruction_percentage"),
+            marker=_json_str(data, "marker"),
+            attacker_map_position=_json_int(data, "attacker_map_position"),
+            defender_map_position=_json_optional_int(data, "defender_map_position"),
+        )
 
     def to_json(self) -> JsonObject:
         """Преобразует technical values в JSON-словарь."""
@@ -242,6 +259,7 @@ class CwlPreparedData:
     not_in_progress_clans: tuple[TrackedClan, ...]
     warnings: tuple[str, ...]
     diff_items: tuple[CwlDiffItem, ...] = ()
+    showing_previous_season: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +285,7 @@ class CwlSheetSyncResult:
     not_in_progress_clans: tuple[TrackedClan, ...] = ()
     warnings: tuple[str, ...] = ()
     diff_items: tuple[CwlDiffItem, ...] = ()
+    showing_previous_season: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +355,8 @@ async def run_public_cwl_sync(
 ) -> CwlSheetSyncResult:
     """Обновляет публичный CWL-лист и `cwl_row_state`.
 
-    Если CWL не проводится у всех активных кланов, лист CWL не меняется.
+    Если CWL не проводится у всех активных кланов, показывает последний
+    сохранённый сезон или понятное сообщение об отсутствии истории.
     Если сезон изменился, новая версия пишется через staging-лист.
     """
 
@@ -395,11 +415,33 @@ async def apply_public_cwl_sync(
 ) -> CwlSheetSyncResult:
     """Записывает подготовленный CWL в Google Sheets и SQLite."""
 
-    if prepared.all_not_in_progress or prepared.season is None:
+    if prepared.all_not_in_progress and prepared.season is None:
+        columns = _physical_columns(runtime_config.column_profiles)
+        active_sheet = await _rewrite_active_cwl_sheet(
+            runtime_config=runtime_config,
+            sheets_client=sheets_client,
+            sheet_block_repository=sheet_block_repository,
+            prepared=prepared,
+            columns=columns,
+        )
+        built_blocks = build_cwl_sheet_blocks(
+            runtime_config=runtime_config,
+            sheet_name=active_sheet.title,
+            sheet_id=active_sheet.sheet_id,
+            prepared=prepared,
+            columns=columns,
+        )
+        await sheet_block_repository.replace_blocks_by_prefixes(
+            chat_id=runtime_config.chat_id,
+            sheet_name=active_sheet.title,
+            block_key_prefixes=(CWL_BLOCK_PREFIX, CWL_MESSAGE_BLOCK_PREFIX),
+            blocks=tuple(block.block for block in built_blocks),
+            updated_at=_utc_now_iso(),
+        )
         return CwlSheetSyncResult(
             season=None,
             rows_count=0,
-            blocks_count=0,
+            blocks_count=len(prepared.clan_blocks),
             all_not_in_progress=True,
             not_in_progress_clans=prepared.not_in_progress_clans,
             warnings=prepared.warnings,
@@ -407,6 +449,11 @@ async def apply_public_cwl_sync(
 
     columns = _physical_columns(runtime_config.column_profiles)
     old_season = runtime_config.sheet_binding.active_cwl_season
+    if old_season is None:
+        old_season = await cwl_repository.get_latest_season(
+            chat_id=runtime_config.chat_id,
+            clan_tags=tuple(clan.clan_tag for clan in runtime_config.active_clans),
+        )
     season_changed = old_season is not None and old_season != prepared.season
 
     if season_changed:
@@ -465,11 +512,12 @@ async def apply_public_cwl_sync(
         season=prepared.season,
         rows_count=len(prepared.rows),
         blocks_count=len(prepared.clan_blocks),
-        all_not_in_progress=False,
+        all_not_in_progress=prepared.all_not_in_progress,
         archived_previous_season=season_changed,
         not_in_progress_clans=prepared.not_in_progress_clans,
         warnings=prepared.warnings,
         diff_items=prepared.diff_items,
+        showing_previous_season=prepared.showing_previous_season,
     )
 
 
@@ -599,12 +647,14 @@ def build_cwl_sheet_matrix(
 ) -> list[list[CellValue]]:
     """Строит полную матрицу активного CWL-листа."""
 
-    if prepared.season is None:
-        raise CwlDataError("Нельзя строить CWL-лист без сезона.")
-
     width = len(columns)
+    title = (
+        f"CWL season: {prepared.season}"
+        if prepared.season is not None
+        else "CWL сейчас не проводится"
+    )
     matrix: list[list[CellValue]] = [
-        _title_row(f"CWL season: {prepared.season}", width),
+        _title_row(title, width),
         _empty_row(width),
     ]
     current_row = 3
@@ -644,14 +694,13 @@ async def _prepare_cwl_data(
         clan for clan in runtime_config.active_clans if league_groups.get(clan.clan_tag) is None
     )
     if not participating_groups:
-        return CwlPreparedData(
-            season=None,
-            clan_blocks=(),
-            rows=(),
-            all_not_in_progress=True,
+        return await _prepare_saved_cwl_data(
+            runtime_config=runtime_config,
+            sheets_client=sheets_client,
+            cwl_repository=cwl_repository,
+            sheet_block_repository=sheet_block_repository,
             not_in_progress_clans=not_in_progress_clans,
-            warnings=(),
-            diff_items=(),
+            composition_player_states=composition_player_states,
         )
 
     season = _resolve_cwl_season(runtime_config.active_clans, participating_groups)
@@ -721,6 +770,159 @@ async def _prepare_cwl_data(
         not_in_progress_clans=not_in_progress_clans,
         warnings=imported.warnings,
         diff_items=diff_items,
+    )
+
+
+async def _prepare_saved_cwl_data(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    cwl_repository: CwlRowStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+    not_in_progress_clans: tuple[TrackedClan, ...],
+    composition_player_states: Sequence[PlannedPlayerState],
+) -> CwlPreparedData:
+    """Готовит последний сохранённый CWL-сезон для межсезонья."""
+
+    active_clan_tags = tuple(clan.clan_tag for clan in runtime_config.active_clans)
+    season = await cwl_repository.get_latest_season(
+        chat_id=runtime_config.chat_id,
+        clan_tags=active_clan_tags,
+    )
+    if season is None:
+        return CwlPreparedData(
+            season=None,
+            clan_blocks=tuple(
+                CwlClanBlock(
+                    clan=clan,
+                    rows=(),
+                    message="Нет сохранённых данных за предыдущий сезон",
+                )
+                for clan in runtime_config.active_clans
+            ),
+            rows=(),
+            all_not_in_progress=True,
+            not_in_progress_clans=not_in_progress_clans,
+            warnings=(),
+            diff_items=(),
+        )
+
+    sheet_name = runtime_config.sheet_binding.active_cwl_sheet_name
+    previous_blocks = await sheet_block_repository.list_blocks(
+        runtime_config.chat_id,
+        sheet_name,
+    )
+    cwl_blocks = tuple(
+        block
+        for block in previous_blocks
+        if block.block_key.startswith(CWL_BLOCK_PREFIX)
+        or block.block_key.startswith(CWL_MESSAGE_BLOCK_PREFIX)
+    )
+    imported = await import_current_cwl_sheet(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        blocks=cwl_blocks,
+        season=season,
+    )
+    existing_rows = await cwl_repository.list_rows(
+        chat_id=runtime_config.chat_id,
+        season=season,
+    )
+    active_clan_tag_set = set(active_clan_tags)
+    planned_rows = tuple(
+        _planned_row_from_state(row) for row in existing_rows if row.clan_tag in active_clan_tag_set
+    )
+    rows_with_user_values = _apply_user_values(
+        planned_rows=planned_rows,
+        imported=imported,
+        existing_rows=existing_rows,
+        composition_user_values_by_player=_composition_user_values_by_player(
+            composition_player_states,
+        ),
+        cwl_composition_user_column_links=_cwl_composition_user_column_links(
+            runtime_config.column_profiles,
+        ),
+    )
+    rows_by_clan_tag: dict[str, list[CwlPlannedRow]] = {}
+    for row in rows_with_user_values:
+        rows_by_clan_tag.setdefault(row.clan_tag, []).append(row)
+
+    clan_blocks: list[CwlClanBlock] = []
+    for clan in runtime_config.active_clans:
+        clan_rows = tuple(
+            sorted(
+                rows_by_clan_tag.get(clan.clan_tag, ()),
+                key=lambda row: row.sort_key,
+            ),
+        )
+        if not clan_rows:
+            clan_blocks.append(
+                CwlClanBlock(
+                    clan=clan,
+                    rows=(),
+                    message=f"Нет сохранённых данных CWL за сезон {season}",
+                ),
+            )
+            continue
+        clan_blocks.append(
+            CwlClanBlock(
+                clan=clan,
+                rows=clan_rows,
+                rounds_count=len({row.round_number for row in clan_rows}),
+            ),
+        )
+
+    return CwlPreparedData(
+        season=season,
+        clan_blocks=tuple(clan_blocks),
+        rows=rows_with_user_values,
+        all_not_in_progress=True,
+        not_in_progress_clans=not_in_progress_clans,
+        warnings=imported.warnings,
+        diff_items=(),
+        showing_previous_season=True,
+    )
+
+
+def _planned_row_from_state(row: CwlRowState) -> CwlPlannedRow:
+    """Восстанавливает planned row из проверенного SQLite state."""
+
+    technical = CwlTechnicalValues.from_json(row.technical_values)
+    clan_tag = normalize_tag(row.clan_tag)
+    marker = row.marker
+    if (
+        row.round_number != technical.round_number
+        or row.attacker_tag != technical.attacker_tag
+        or marker != technical.marker
+    ):
+        raise CwlDataError(f"CWL state {row.row_key} содержит противоречивые поля.")
+
+    expected_row_key = make_cwl_row_key(
+        season=row.season,
+        clan_tag=clan_tag,
+        round_number=technical.round_number,
+        attacker_tag=technical.attacker_tag,
+        marker=marker,
+    )
+    if row.row_key != expected_row_key:
+        raise CwlDataError(f"CWL state содержит некорректный row_key {row.row_key}.")
+
+    return CwlPlannedRow(
+        row_key=row.row_key,
+        season=row.season,
+        clan_tag=clan_tag,
+        round_number=technical.round_number,
+        attacker_tag=technical.attacker_tag,
+        marker=marker,
+        technical_values=technical,
+        no_attack_key=make_cwl_row_key(
+            season=row.season,
+            clan_tag=clan_tag,
+            round_number=technical.round_number,
+            attacker_tag=technical.attacker_tag,
+            marker=NO_ATTACK_MARKER,
+        ),
+        user_values=dict(row.user_values),
     )
 
 
@@ -825,8 +1027,12 @@ async def _write_cwl_with_staging_archive(
             sheet.title for sheet in metadata.sheets if sheet.sheet_id != old_active.sheet_id
         },
     )
-    await sheets_client.rename_sheet(old_active.sheet_id, archive_title)
-    await sheets_client.rename_sheet(staging.sheet_id, CWL_ACTIVE_SHEET_NAME)
+    await sheets_client.rename_sheets_atomically(
+        (
+            (old_active.sheet_id, archive_title),
+            (staging.sheet_id, CWL_ACTIVE_SHEET_NAME),
+        ),
+    )
     await _move_cwl_before_composition(
         runtime_config=runtime_config,
         sheets_client=sheets_client,
@@ -1938,22 +2144,34 @@ async def _resolve_active_cwl_sheet(
     runtime_config: RuntimeChatConfig,
     sheets_client: SheetsClient,
 ) -> SheetMetadata:
-    """Находит активный CWL-лист по sheet_id, затем по названию, либо создаёт."""
+    """Находит активный CWL-лист, учитывая незавершённую ротацию."""
 
     metadata = await sheets_client.get_spreadsheet_metadata()
+    configured_title = runtime_config.sheet_binding.active_cwl_sheet_name
+    sheet_by_configured_title = next(
+        (sheet for sheet in metadata.sheets if sheet.title == configured_title),
+        None,
+    )
+    canonical_sheet = next(
+        (sheet for sheet in metadata.sheets if sheet.title == CWL_ACTIVE_SHEET_NAME),
+        None,
+    )
     active_sheet_id = runtime_config.sheet_binding.active_cwl_sheet_id
     if active_sheet_id is not None:
-        for sheet in metadata.sheets:
-            if sheet.sheet_id == active_sheet_id:
-                return sheet
+        sheet_by_id = next(
+            (sheet for sheet in metadata.sheets if sheet.sheet_id == active_sheet_id),
+            None,
+        )
+        if sheet_by_id is not None:
+            if sheet_by_id.title == configured_title:
+                return sheet_by_id
+            if canonical_sheet is None:
+                return sheet_by_id
 
-    for sheet in metadata.sheets:
-        if sheet.title == runtime_config.sheet_binding.active_cwl_sheet_name:
-            return sheet
-
-    for sheet in metadata.sheets:
-        if sheet.title == CWL_ACTIVE_SHEET_NAME:
-            return sheet
+    if sheet_by_configured_title is not None:
+        return sheet_by_configured_title
+    if canonical_sheet is not None:
+        return canonical_sheet
 
     return await sheets_client.add_sheet(CWL_ACTIVE_SHEET_NAME)
 
@@ -2394,6 +2612,17 @@ def _json_int(data: JsonObject | None, key: str) -> int:
     value = data.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
         raise CwlDataError(f"Внутреннее поле {key} должно быть числом.")
+    return value
+
+
+def _json_optional_int(data: JsonObject, key: str) -> int | None:
+    """Читает nullable-число из внутреннего JSON."""
+
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise CwlDataError(f"Внутреннее поле {key} должно быть числом или null.")
     return value
 
 

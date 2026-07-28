@@ -107,7 +107,12 @@ def _cwl_summary_lines(cwl_result: CwlSheetSyncResult) -> list[str]:
 
     lines = ["CWL:"]
     if cwl_result.all_not_in_progress:
-        lines.append("CWL сейчас не проводится. Лист CWL не менялся.")
+        if cwl_result.showing_previous_season:
+            season = escape(cwl_result.season or "-")
+            lines.append(f"CWL сейчас не проводится. Показан сохранённый сезон: {season}.")
+            lines.append(f"Всего строк: {cwl_result.rows_count}.")
+        else:
+            lines.append("CWL сейчас не проводится. Сохранённых данных за прошлый сезон нет.")
         return lines
 
     counts = _count_items_by_kind(cwl_result.diff_items)

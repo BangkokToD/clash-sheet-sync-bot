@@ -444,6 +444,31 @@ class SheetsClient:
             fields="title",
         )
 
+    async def rename_sheets_atomically(
+        self,
+        renames: Sequence[tuple[int, str]],
+    ) -> None:
+        """Переименовывает несколько листов одним атомарным batchUpdate.
+
+        Args:
+            renames: Пары `(sheet_id, новое название)` в порядке применения.
+        """
+
+        await self.batch_update_spreadsheet(
+            [
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": sheet_id,
+                            "title": title,
+                        },
+                        "fields": "title",
+                    },
+                }
+                for sheet_id, title in renames
+            ],
+        )
+
     async def move_sheet(self, sheet_id: int, index: int) -> None:
         """Меняет позицию листа в Spreadsheet.
 

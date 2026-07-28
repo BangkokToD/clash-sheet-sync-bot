@@ -144,6 +144,46 @@ def test_build_success_report_includes_import_warning_summary() -> None:
     assert "Если число повторяется после следующего /sync" in payload.text
 
 
+def test_build_success_report_identifies_saved_cwl_season() -> None:
+    """Проверяет, что межсезонный CWL не называется текущим."""
+
+    payload = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=CwlSheetSyncResult(
+            season="2026-07",
+            rows_count=15,
+            blocks_count=1,
+            all_not_in_progress=True,
+            showing_previous_season=True,
+        ),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+
+    assert "CWL сейчас не проводится. Показан сохранённый сезон: 2026-07." in payload.text
+    assert "Всего строк: 15." in payload.text
+
+
+def test_build_success_report_explains_missing_cwl_history() -> None:
+    """Проверяет сообщение для новой группы без сохранённого CWL."""
+
+    payload = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=CwlSheetSyncResult(
+            season=None,
+            rows_count=0,
+            blocks_count=1,
+            all_not_in_progress=True,
+        ),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+
+    assert "CWL сейчас не проводится. Сохранённых данных за прошлый сезон нет." in payload.text
+
+
 def test_build_success_report_truncates_long_report() -> None:
     """Проверяет ограничение длины Telegram-отчёта."""
 

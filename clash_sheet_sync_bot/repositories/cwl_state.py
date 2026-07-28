@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import aiosqlite
@@ -14,6 +15,7 @@ from .base import (
     as_str,
     as_user_values,
     fetch_all,
+    fetch_one,
 )
 
 
@@ -53,6 +55,41 @@ class CwlRowStateRepository:
 
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
+
+    async def get_latest_season(
+        self,
+        *,
+        chat_id: int,
+        clan_tags: Sequence[str],
+    ) -> str | None:
+        """Возвращает последний сохранённый сезон активных кланов.
+
+        Args:
+            chat_id: ID Telegram-чата.
+            clan_tags: Теги кланов, историю которых можно показывать.
+
+        Returns:
+            Последний сезон или `None`, если сохранённых строк нет.
+        """
+
+        if not clan_tags:
+            return None
+
+        placeholders = ", ".join("?" for _ in clan_tags)
+        row = await fetch_one(
+            self._connection,
+            f"""
+            SELECT season
+            FROM cwl_row_state
+            WHERE chat_id = ? AND clan_tag IN ({placeholders})
+            ORDER BY season DESC
+            LIMIT 1
+            """,
+            (chat_id, *clan_tags),
+        )
+        if row is None:
+            return None
+        return as_str(row["season"], "season")
 
     async def list_rows(self, *, chat_id: int, season: str) -> tuple[CwlRowState, ...]:
         """Читает CWL row state одного сезона.
