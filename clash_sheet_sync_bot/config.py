@@ -52,6 +52,18 @@ def load_config(env_file: str | Path = ".env") -> AppConfig:
         sync_cooldown_seconds=_non_negative_int_env("SYNC_COOLDOWN_SECONDS", 60),
         max_concurrent_syncs=_positive_int_env("MAX_CONCURRENT_SYNCS", 3),
         cwl_war_concurrency_limit=_positive_int_env("CWL_WAR_CONCURRENCY_LIMIT", 5),
+        raid_archive_sheets_limit=_positive_int_env("RAID_ARCHIVE_SHEETS_LIMIT", 4),
+        raid_attacks_target=_positive_int_env("RAID_ATTACKS_TARGET", 6),
+        raid_normal_district_attack_norm=_positive_int_env(
+            "RAID_NORMAL_DISTRICT_ATTACK_NORM",
+            2,
+        ),
+        raid_capital_district_attack_norm=_positive_int_env(
+            "RAID_CAPITAL_DISTRICT_ATTACK_NORM",
+            3,
+        ),
+        raid_season_fetch_limit=_int_env_at_least("RAID_SEASON_FETCH_LIMIT", 5, minimum=2),
+        raid_api_concurrency_limit=_positive_int_env("RAID_API_CONCURRENCY_LIMIT", 5),
         admin_cache_ttl_seconds=_non_negative_int_env("ADMIN_CACHE_TTL_SECONDS", 300),
         setup_token_ttl_seconds=_positive_int_env("SETUP_TOKEN_TTL_SECONDS", 900),
         transfer_token_ttl_seconds=_positive_int_env("TRANSFER_TOKEN_TTL_SECONDS", 900),
@@ -174,6 +186,27 @@ def _non_negative_int_env(name: str, default: int) -> int:
     value = _int_env(name, default)
     if value < 0:
         raise ConfigError(f"{name} должен быть неотрицательным числом.")
+    return value
+
+
+def _int_env_at_least(name: str, default: int, *, minimum: int) -> int:
+    """Читает целое число не меньше заданной границы.
+
+    Args:
+        name: Имя переменной окружения.
+        default: Значение по умолчанию.
+        minimum: Минимальное допустимое значение.
+
+    Returns:
+        Целое число не меньше `minimum`.
+
+    Raises:
+        ConfigError: Если значение меньше границы или не является числом.
+    """
+
+    value = _int_env(name, default)
+    if value < minimum:
+        raise ConfigError(f"{name} должен быть не меньше {minimum}.")
     return value
 
 

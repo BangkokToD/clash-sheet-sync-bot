@@ -49,6 +49,12 @@ class AppConfig:
         sync_cooldown_seconds: Cooldown `/sync` для одного чата.
         max_concurrent_syncs: Глобальный лимит одновременных sync.
         cwl_war_concurrency_limit: Лимит конкурентных запросов CWL wars.
+        raid_archive_sheets_limit: Максимум архивных рейдовых листов.
+        raid_attacks_target: Целевое количество атак рейдового уикенда.
+        raid_normal_district_attack_norm: Норма атак обычного района.
+        raid_capital_district_attack_norm: Норма атак Capital Peak.
+        raid_season_fetch_limit: Размер окна загружаемых рейдовых сезонов.
+        raid_api_concurrency_limit: Лимит конкурентных запросов рейдового API.
         admin_cache_ttl_seconds: TTL кэша Telegram-админов для обычных меню.
         setup_token_ttl_seconds: TTL токена подключения группы.
         transfer_token_ttl_seconds: TTL токена переноса таблицы.
@@ -66,6 +72,12 @@ class AppConfig:
     sync_cooldown_seconds: int
     max_concurrent_syncs: int
     cwl_war_concurrency_limit: int
+    raid_archive_sheets_limit: int
+    raid_attacks_target: int
+    raid_normal_district_attack_norm: int
+    raid_capital_district_attack_norm: int
+    raid_season_fetch_limit: int
+    raid_api_concurrency_limit: int
     admin_cache_ttl_seconds: int
     setup_token_ttl_seconds: int
     transfer_token_ttl_seconds: int

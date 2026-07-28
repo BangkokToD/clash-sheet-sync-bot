@@ -71,6 +71,12 @@ def make_app_config(
     google_service_account_email: str | None = None,
     db_path: str | Path = "bot.db",
     dev_mode: bool = False,
+    raid_archive_sheets_limit: int = 4,
+    raid_attacks_target: int = 6,
+    raid_normal_district_attack_norm: int = 2,
+    raid_capital_district_attack_norm: int = 3,
+    raid_season_fetch_limit: int = 5,
+    raid_api_concurrency_limit: int = 5,
 ) -> AppConfig:
     """Создаёт AppConfig для setup/sync service tests."""
 
@@ -86,6 +92,12 @@ def make_app_config(
         sync_cooldown_seconds=60,
         max_concurrent_syncs=3,
         cwl_war_concurrency_limit=5,
+        raid_archive_sheets_limit=raid_archive_sheets_limit,
+        raid_attacks_target=raid_attacks_target,
+        raid_normal_district_attack_norm=raid_normal_district_attack_norm,
+        raid_capital_district_attack_norm=raid_capital_district_attack_norm,
+        raid_season_fetch_limit=raid_season_fetch_limit,
+        raid_api_concurrency_limit=raid_api_concurrency_limit,
         admin_cache_ttl_seconds=300,
         setup_token_ttl_seconds=900,
         transfer_token_ttl_seconds=900,

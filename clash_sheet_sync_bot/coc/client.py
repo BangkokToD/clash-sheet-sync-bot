@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import quote
@@ -186,10 +187,56 @@ class ClashClient:
         _require_dict(data, "opponent", "cwl war")
         return data
 
+    async def get_capital_raid_seasons(
+        self,
+        clan_tag: str,
+        *,
+        limit: int,
+    ) -> list[JsonObject]:
+        """Получает окно рейдовых сезонов клана.
+
+        Детальный контракт выбранного сезона проверяет доменный raid parser.
+        Старые элементы реального API могут содержать только сводные данные.
+
+        Args:
+            clan_tag: Тег клана вида `#ABC123`.
+            limit: Положительный размер окна сезонов.
+
+        Returns:
+            Список JSON-объектов рейдовых сезонов.
+
+        Raises:
+            ValueError: Если `limit` не является положительным целым числом.
+            ClashApiUnavailableError: Если API недоступно или envelope ответа
+                невалиден.
+        """
+
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit рейдовых сезонов должен быть положительным целым числом.")
+
+        encoded_tag = encode_coc_tag(clan_tag)
+        data = await self._get_json(
+            f"/clans/{encoded_tag}/capitalraidseasons",
+            params={"limit": limit},
+        )
+        raw_items = data.get("items")
+        if not isinstance(raw_items, list):
+            raise ClashApiUnavailableError("CoC raid seasons response не содержит список items.")
+
+        seasons: list[JsonObject] = []
+        for index, item in enumerate(raw_items, start=1):
+            if not isinstance(item, dict):
+                raise ClashApiUnavailableError(
+                    f"CoC raid seasons response содержит некорректный season #{index}.",
+                )
+            seasons.append(item)
+        return seasons
+
     async def _get_json(
         self,
         path: str,
         *,
+        params: Mapping[str, str | int] | None = None,
         league_group_404_as_not_in_progress: bool = False,
         clan_404_as_not_found: bool = False,
     ) -> JsonObject:
@@ -197,6 +244,7 @@ class ClashClient:
 
         Args:
             path: Путь API без базового URL.
+            params: Query-параметры запроса.
             league_group_404_as_not_in_progress: Нужно ли трактовать HTTP 404
                 как отсутствие CWL, а не как недоступность API.
             clan_404_as_not_found: Нужно ли трактовать HTTP 404 как отсутствие клана.
@@ -213,6 +261,7 @@ class ClashClient:
             response = await self._client.get(
                 f"{self._base_url}{path}",
                 headers=self._headers,
+                params=params,
             )
         except httpx.HTTPError as exc:
             raise ClashApiUnavailableError("CoC API network error.") from exc
