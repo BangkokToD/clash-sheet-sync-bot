@@ -8,7 +8,7 @@
 
 **Дата документа:** 2026-07-29
 
-**Статус:** утверждено, реализация не начата
+**Статус:** ТЗ утверждено, готово к реализации
 
 ## 1. Основание и связанные материалы
 
@@ -33,6 +33,10 @@
 - `clash_sheet_sync_bot/sync/reports.py`;
 - `clash_sheet_sync_bot/sync/service.py`;
 - актуальные тесты состава, CWL, repositories, setup и общего `/sync`;
+- реальный обезличенный ответ
+  `GET /clans/%232RVJ0CUR9/capitalraidseasons?limit=5`, сохранённый без
+  исходных имён, тегов, badge URLs и cursor в
+  `tests/fixtures/capital_raid_seasons.json`;
 - коммиты от 2026-07-28:
   - `3c7d809` — защита SQLite runtime-файлов и резервных копий;
   - `c0673af` — безопасный `DEV_MODE`;
@@ -48,6 +52,18 @@ baseline существующей системы. До завершения ре
 описывать рейдовые источники, таблицы, fallback или pipeline как уже
 существующие. Его актуализация выполняется последним коммитом плана после кода,
 миграций и тестов.
+
+Baseline на проверенном HEAD подтверждён вне Codex sandbox:
+
+```text
+.venv/bin/python -m pytest -q
+94 passed in 0.93s
+```
+
+Внутри Codex sandbox `aiosqlite` worker thread не пробуждает основной asyncio
+event loop. Это ограничение среды запуска, а не известный failing test
+репозитория. Полный SQLite suite должен подтверждаться вне sandbox; тесты без
+SQLite Codex продолжает запускать самостоятельно.
 
 ## 2. Цель
 
@@ -134,13 +150,32 @@ baseline существующей системы. До завершения ре
 - Бот управляет только зарегистрированными managed blocks.
 - Все данные состава, CWL и рейдов подготавливаются до начала записи.
 - Ошибка подготовки рейдов не должна оставлять частично обновлённые листы.
-- Ошибка после начала записи Google Sheets должна давать существующий partial
-  write warning.
+- Невосстановленная ошибка после начала записи Google Sheets должна давать
+  существующий partial write warning.
 - Chat lock, sheet lock и global semaphore сохраняются.
 - `DEV_MODE` не отключает конкурентные блокировки.
 - Пользовательская ширина колонок и горизонтальное выравнивание не сбрасываются.
 - Служебные идентификаторы листов хранятся и разрешаются по `sheet_id`, а не
   только по названию вкладки.
+
+### 5.1. Намеренные изменения относительно текущего SSOT
+
+Задача расширяет, но не заменяет существующую модель владения данными:
+
+- CoC API становится техническим источником текущих raid season/member/attack
+  values;
+- SQLite получает raid binding, aggregated row snapshots и bot-owned archive
+  registry;
+- Google Sheets получает managed active/staging/archive raid areas и остаётся
+  источником ручных raid user-values;
+- общий `/sync` получает raid preparation и raid write phase;
+- `TableType` получает `raids`, а `ColumnValueType` — `number`;
+- recoverable pruning failure после успешной ротации становится отдельным
+  successful-cleanup-warning, а не общей ошибкой sync.
+
+Остальные владельцы данных, transaction boundaries, access rules и
+composition/CWL контракты из SSOT сохраняются. Эти изменения вносятся в
+`SSOT.md` только коммитом 8 после реализации и проверки.
 
 ## 6. Источник данных и API-контракт
 
@@ -188,14 +223,30 @@ GET /clans/{encodedClanTag}/capitalraidseasons
 Если обязательный контракт нарушен, preparation завершается ошибкой до записи
 Google Sheets.
 
+Реальный fixture содержит пять `ended` seasons. Ongoing contract tests
+применяют
+`tests/fixtures/capital_raid_seasons_ongoing.synthetic.json` как overlay к
+первому реальному season object с заменой только `state = "ongoing"`. Overlay
+проверяет внутреннее ветвление, но не выдаётся за захваченный ongoing
+API-ответ.
+
+Несовпадение количества разобранных атак с `members[].attacks` никогда не
+принимается как корректная статистика:
+
+- для `ended` это строгая ошибка контракта;
+- для `ongoing` это retryable domain error с понятным предложением повторить
+  `/sync` позже;
+- оба сценария останавливаются на preparation до записи любого листа.
+
 ### 6.3. Определение Столицы
 
-Столица определяется по каноническому `district.id` из контракта API.
+Столица определяется по каноническому `district.id = 70000000`, подтверждённому
+реальным обезличенным fixture.
 
 Требования:
 
-- ID оформляется как именованная протокольная константа;
-- константа подтверждается сохранённым обезличенным API fixture;
+- ID `70000000` оформляется как именованная протокольная константа;
+- источник константы — `tests/fixtures/capital_raid_seasons.json`;
 - определение только по полю `name` запрещено;
 - район с любым другим корректным `district.id` считается обычным;
 - если API обозначает район как `Capital Peak`, но его `district.id` не
@@ -492,8 +543,13 @@ raid_row:<season_key>|<clan_tag>|<player_tag>
   удаляется.
 - После удаления вкладки удаляются её archive registry и managed-block metadata.
 - `raid_player_state` удалённого сезона сохраняется без срока.
-- При ошибке удаления новый active и новый архив не откатываются; sync получает
-  partial write warning, а pruning повторяется при следующем `/sync`.
+- При ошибке удаления новый active и новый архив не откатываются;
+  `sync_runs.status` и `last_sync_status` остаются `success`;
+  Telegram report получает отдельный cleanup warning, а pruning повторяется
+  при следующем `/sync`.
+- Recoverable pruning warning не использует общий текст
+  `Таблица могла быть частично обновлена`: active data уже успешно записаны, а
+  незавершён только retention cleanup.
 
 ## 13. SQLite
 
@@ -517,15 +573,16 @@ number
 
 ### 13.2. Расширение sheet binding
 
-Добавить nullable-поля:
+Добавить raid-поля:
 
-```text
-active_raid_sheet_name
-active_raid_sheet_id
-active_raid_season
+```sql
+active_raid_sheet_name TEXT NOT NULL DEFAULT 'Рейды'
+active_raid_sheet_id INTEGER
+active_raid_season TEXT
 ```
 
-Для новых binding:
+Имя обязательно и доступно до создания физического листа. `sheet_id` и
+`season` остаются nullable. Для новых binding:
 
 ```text
 active_raid_sheet_name = "Рейды"
@@ -833,8 +890,11 @@ Report должен соблюдать `REPORT_MAX_ITEMS` и существую�
 - ошибка форматирования active/staging;
 - ошибка атомарной ротации;
 - ошибка `_bot_state` write;
-- ошибка SQLite binding/state write после изменения Google Sheets;
-- ошибка удаления пятого архивного листа.
+- ошибка SQLite binding/state write после изменения Google Sheets.
+
+Ошибка удаления лишнего зарегистрированного архива после успешной ротации
+является исключением: она перехватывается как recoverable cleanup warning,
+сохраняет успешный status и повторяется при следующем sync.
 
 ### 20.3. Безопасное восстановление
 
@@ -862,7 +922,7 @@ Resolver active-листа должен учитывать частичную р
 Миграция должна:
 
 1. Повысить `SCHEMA_VERSION`.
-2. Добавить nullable raid-поля binding.
+2. Добавить обязательное raid sheet name и nullable raid sheet ID/season.
 3. Создать `raid_player_state`.
 4. Создать `raid_sheet_archives`.
 5. Добавить default `raids` column profiles всем существующим чатам.
@@ -903,7 +963,8 @@ Resolver active-листа должен учитывать частичную р
 - произвольный non-Capital district ID классифицируется как обычный;
 - конфликт названия `Capital Peak` и подтверждённого district ID;
 - нормализация player tags;
-- mismatch количества атак.
+- ended mismatch количества атак как strict contract error;
+- ongoing mismatch как retryable domain error до write.
 
 ### 22.3. Формула
 
@@ -972,7 +1033,8 @@ Resolver active-листа должен учитывать частичную р
 - незарегистрированный лист не удаляется;
 - SQLite player state старого сезона сохраняется;
 - отсутствующий вручную архив очищается из registry через auto-fix;
-- ошибка удаления даёт partial warning и допускает повторный pruning.
+- ошибка удаления даёт specific cleanup warning при successful sync и
+  допускает повторный pruning.
 
 ### 22.9. Общий `/sync`
 
@@ -1024,8 +1086,8 @@ Resolver active-листа должен учитывать частичную р
 18. Пропустить один или несколько уикендов и убедиться, что промежуточные архивы
     не создаются.
 19. Имитировать ошибку API до write и проверить неизменность всех листов.
-20. Имитировать ошибку pruning и проверить partial write warning и успешный
-    повторный pruning.
+20. Имитировать ошибку pruning и проверить successful status, specific cleanup
+    warning, сохранённый registry и успешный повторный pruning.
 21. Проверить `/status`, Telegram report, диагностику и auto-fix.
 22. Запустить полный набор автоматических проверок.
 
@@ -1168,11 +1230,13 @@ roadmap.
 15. Пропущенные промежуточные уикенды не восстанавливаются.
 16. Старые composition/CWL данные и поведение не повреждаются.
 17. Preparation error не меняет Google Sheets.
-18. Ошибка после начала write даёт partial write warning.
+18. Невосстановленная ошибка после начала write даёт partial write warning.
 19. Диагностика и auto-fix понимают рейдовый binding.
 20. Все целевые и полные проверки проходят.
 21. Последний коммит плана актуализирует `SSOT.md` по фактически реализованным
     владельцам данных, snapshots, fallback, pipeline и инвариантам рейдов.
+22. Recoverable pruning failure завершает sync успешно со специальным cleanup
+    warning и повторяется при следующем запуске.
 
 ## 27. Риски и принятые ограничения
 
@@ -1197,7 +1261,9 @@ roadmap.
 
 1. Утвердить это ТЗ без открытых продуктовых решений.
 2. Зафиксировать актуальный HEAD, от которого начинается работа.
-3. Получить обезличенный реальный fixture ответа
-   `capitalraidseasons` для contract tests.
-4. Подтвердить конкретный API `district.id` Столицы по fixture.
-5. Сделать backup рабочей SQLite базы перед применением миграции.
+3. Проверить committed ended fixture
+   `tests/fixtures/capital_raid_seasons.json`.
+4. Применять committed synthetic ongoing overlay к реальному season object.
+5. Использовать подтверждённый Capital Peak ID `70000000`.
+6. Зафиксировать зелёный baseline: `94 passed in 0.93s` вне Codex sandbox.
+7. Сделать backup рабочей SQLite базы перед применением migration 4.

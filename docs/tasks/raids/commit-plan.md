@@ -12,6 +12,13 @@
 - Несвязанные рефакторинги запрещены.
 - `SSOT.md` не меняется до коммита 8.
 - Фактический `git commit` выполняется только по прямой команде пользователя.
+- Списки изменяемых файлов в пунктах плана являются ожидаемыми, но не
+  исчерпывающими. Дополнительный файл можно изменить только при доказанной
+  необходимости, с объяснением до изменения и без выхода за scope коммита.
+- SQLite pytest внутри Codex sandbox может зависать на `aiosqlite` thread
+  wake-up. Codex запускает доступные проверки, а полный SQLite suite
+  подтверждается пользователем вне sandbox. Baseline:
+  `.venv/bin/python -m pytest -q` → `94 passed in 0.93s`.
 
 ## Предварительный docs-коммит
 
@@ -55,12 +62,15 @@ feat: add raid API parsing and scoring
 
 ### Обязательные входы
 
-- обезличенный реальный fixture `capitalraidseasons`;
-- подтверждённый `district.id` для `Capital Peak`;
-- проверка, как API представляет ongoing и ended seasons;
+- committed реальный ended fixture
+  `tests/fixtures/capital_raid_seasons.json`;
+- подтверждённый этим fixture `Capital Peak district.id = 70000000`;
+- committed synthetic ongoing overlay
+  `tests/fixtures/capital_raid_seasons_ongoing.synthetic.json`;
 - подтверждение соответствия `members[].attacks` фактическому attack log.
 
-Без этих входов Codex останавливается и не подставляет предполагаемый ID.
+Без валидного fixture Codex останавливается. ID не угадывается и не выводится
+из локализованного имени.
 
 ### Изменяемые файлы
 
@@ -72,13 +82,14 @@ clash_sheet_sync_bot/models.py
 tests/fakes/clash.py
 tests/fakes/factories.py
 tests/test_config.py
+tests/fixtures/capital_raid_seasons.json
+tests/fixtures/capital_raid_seasons_ongoing.synthetic.json
 ```
 
 ### Новые файлы
 
 ```text
 clash_sheet_sync_bot/sync/raids.py
-tests/fixtures/capital_raid_seasons.json
 tests/test_raid_sync.py
 ```
 
@@ -92,7 +103,7 @@ tests/test_raid_sync.py
 6. Проверять верхнеуровневый `items`, тип каждого сезона и обязательные поля.
 7. В `sync/raids.py` добавить:
    - raid exceptions;
-   - протокольную константу Capital Peak ID;
+   - протокольную константу Capital Peak ID `70000000`;
    - dataclass технических значений;
    - чистый parser;
    - чистый aggregator;
@@ -106,7 +117,9 @@ tests/test_raid_sync.py
 12. Отклонять противоречие, если API обозначает Capital Peak с другим ID.
 13. Проверять согласованность разобранного количества атак и
     `members[].attacks`.
-14. Не использовать float для промежуточного суммирования.
+14. Для ended mismatch возвращать strict contract error.
+15. Для ongoing mismatch возвращать retryable domain error до write.
+16. Не использовать float для промежуточного суммирования.
 
 ### Тесты
 
@@ -130,6 +143,8 @@ git diff --check
 - `bool` вместо int;
 - произвольный non-Capital district ID как обычный район;
 - конфликт названия Capital Peak и подтверждённого ID;
+- ended attack counter mismatch как strict error;
+- ongoing attack counter mismatch как retryable error;
 - обычный район `33% + 67% = 2,00`;
 - Capital Peak `40% + 35% + 25% = 3,00`;
 - шесть нормативных атак `K = 1,00`;
@@ -489,7 +504,9 @@ tests/test_repositories.py
     `sheet_id`.
 14. После подтверждённого удаления очищать registry и blocks.
 15. Не удалять `raid_player_state`.
-16. При pruning failure сохранять binding/registry и возвращать warning.
+16. При pruning failure сохранять binding/registry, завершать sync со status
+    `success` и возвращать специальный cleanup warning без общего
+    partial-write текста.
 17. Повторять pruning на каждом следующем raid apply.
 18. Реализовать canonical resolver незавершённой ротации.
 19. Не архивировать initial message-only sheet без active season.
@@ -524,7 +541,7 @@ git diff --check
 - registry с отсутствующим sheet ID не удаляет другой лист;
 - raid state сохраняется;
 - metadata blocks перепривязывается;
-- pruning failure возвращает warning и сохраняет registry;
+- pruning failure возвращает cleanup warning, сохраняет success и registry;
 - следующий sync повторяет pruning;
 - ошибка до rename;
 - ошибка после rename;
@@ -700,7 +717,7 @@ clash_sheet_sync_bot/repositories/__init__.py
     - архивирование;
     - удалённый архив;
     - warning сохранённого старого state;
-    - pruning warning.
+    - специальный cleanup warning при recoverable pruning.
 11. В baseline report не перечислять большой diff.
 12. Расширить `/status` active raid season.
 13. Не менять гарантию Telegram delivery failure после SQLite commit.
@@ -730,7 +747,8 @@ git diff --check
 - CWL write error;
 - raid write error;
 - partial warning после каждой write phase;
-- recoverable pruning warning с successful commit;
+- recoverable pruning cleanup warning с successful commit и без общего
+  partial-write текста;
 - общий SQLite commit;
 - Telegram delivery failure после commit;
 - baseline report;

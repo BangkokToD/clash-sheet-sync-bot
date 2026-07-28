@@ -12,18 +12,29 @@
 Успешные unit-тесты формулы не заменяют проверку lifecycle листов. Ручной smoke
 не заменяет автоматические failure tests.
 
+Baseline на проверенном HEAD подтверждён вне Codex sandbox:
+
+```text
+.venv/bin/python -m pytest -q
+94 passed in 0.93s
+```
+
+Внутри Codex sandbox SQLite tests могут зависать на инфраструктурном
+`aiosqlite` thread wake-up. Это не считается результатом тестов: Codex
+сообщает точку остановки, а пользователь повторяет полный SQLite suite вне
+sandbox.
+
 ## 2. Тестовые данные
 
-До коммита 1 сохранить обезличенный fixture:
+До коммита 1 проверить committed реальный ended fixture:
 
 ```text
 tests/fixtures/capital_raid_seasons.json
 ```
 
-Fixture должен содержать:
+Fixture содержит пять ended seasons и должен сохранять:
 
 - минимум один ended season;
-- по возможности ongoing season;
 - обычный район;
 - `Capital Peak`;
 - несколько атак одного игрока;
@@ -39,6 +50,13 @@ Fixture должен содержать:
 - числовые значения не изменены так, чтобы нарушить контракт;
 - `district.id` сохранён;
 - секретов и API tokens нет.
+
+Подтверждённый `Capital Peak district.id`: `70000000`.
+
+Ongoing tests используют synthetic copy реального season object с заменой
+только `state = "ongoing"`. Test helper применяет committed overlay
+`tests/fixtures/capital_raid_seasons_ongoing.synthetic.json`; результат не
+выдаётся за реальный captured API response.
 
 ## 3. Матрица автоматических тестов
 
@@ -73,6 +91,8 @@ Fixture должен содержать:
 - destruction находится в `0..100`;
 - tags нормализуются;
 - число разобранных атак согласуется с member counter;
+- ended mismatch является strict contract error;
+- ongoing mismatch является retryable domain error до write;
 - произвольный корректный non-Capital district ID считается обычным;
 - конфликт названия `Capital Peak` и подтверждённого ID отклоняется.
 
@@ -169,7 +189,8 @@ Fixture должен содержать:
 - ошибка binding/registry после rename;
 - ошибка deleteSheet;
 - повторный запуск после каждого сценария;
-- pruning warning сохраняет registry и повторяется;
+- pruning cleanup warning сохраняет successful status и registry, не
+  использует общий partial-write текст и повторяется;
 - stale binding не создаёт второй active;
 - staging не становится active автоматически.
 
@@ -193,8 +214,9 @@ Telegram report
 - raid preparation error до write;
 - domain errors дают понятный report;
 - unexpected error не раскрывает traceback пользователю;
-- любая write-stage error добавляет partial warning;
-- recoverable pruning остаётся warning успешного sync;
+- любая невосстановленная write-stage error добавляет partial warning;
+- recoverable pruning остаётся специальным cleanup warning успешного sync без
+  общего partial-write текста;
 - Telegram failure после commit не меняет success;
 - locks и semaphore не обходятся;
 - baseline report не разрастается;

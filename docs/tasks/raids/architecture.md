@@ -5,6 +5,10 @@
 Документ составлен по репозиторию на HEAD
 `bc4febc0f1f5a6cf5e5410c816b52159cbd94425`.
 
+Нормативное целевое поведение и acceptance criteria находятся в
+`requirements.md`. Этот документ описывает способ реализации и не создаёт
+альтернативных column keys, sorting или error semantics.
+
 Существующий `/sync`:
 
 ```text
@@ -84,7 +88,7 @@ async def get_capital_raid_seasons(
 Новый доменный модуль отвечает за:
 
 - строгий разбор используемых сезонов;
-- классификацию района по `district.id`;
+- классификацию района по подтверждённому `district.id = 70000000`;
 - расчёт `weighted_damage_units`;
 - выбор общего `season_key`;
 - отсутствие backfill;
@@ -333,13 +337,9 @@ normal_points = weighted_damage_units / 100
 coefficient = weighted_damage_units / (100 * raid_attacks_target)
 ```
 
-Сортировка:
-
-1. `coefficient` по убыванию;
-2. `normal_points` по убыванию;
-3. нормализованный `player_tag` по возрастанию.
-
-Третий ключ обязателен для детерминированного результата при равенстве.
+Сортировка реализует нормативный порядок раздела 10.3 `requirements.md`:
+`coefficient DESC`, `attacks DESC`, case-insensitive `player_name ASC`,
+`player_tag ASC`. Последний ключ обеспечивает детерминированный результат.
 
 ## 8. Выбор сезона
 
@@ -370,7 +370,7 @@ coefficient = weighted_damage_units / (100 * raid_attacks_target)
 Формат:
 
 - `normal_points` и `coefficient`: `0.00`;
-- `capital_gold` и `№`: целые;
+- `capital_resources_looted` и `№`: целые;
 - `Атаки`: строка `x/<raid_attacks_target>`;
 - красная заливка применяется только к ячейке `Атаки`, только для ended и
   только при `< raid_attacks_target`;
@@ -397,8 +397,10 @@ coefficient = weighted_damage_units / (100 * raid_attacks_target)
 - новый active и созданный архив остаются;
 - исключение удаления перехватывается внутри raid apply;
 - binding и registry нового состояния сохраняются;
-- `RaidSheetSyncResult.warnings` получает partial-write предупреждение;
+- `RaidSheetSyncResult.warnings` получает специальное cleanup warning без
+  общего partial-write текста;
 - sync может завершиться успешно с предупреждением;
+- `sync_runs.status` и `last_sync_status` остаются `success`;
 - pruning повторяется при следующем `/sync` и через auto-fix.
 
 Это отдельный recoverable сценарий. Ошибки создания staging, заполнения,
@@ -429,6 +431,12 @@ Preparation error:
 - не изменяет Google Sheets;
 - откатывает незакоммиченные SQLite-изменения;
 - сохраняется как sync error без partial warning.
+
+Attack counter mismatch разделяется по state:
+
+- `ended` — strict contract error;
+- `ongoing` — retryable domain error с предложением повторить sync позже;
+- оба варианта завершаются до write.
 
 Write error:
 

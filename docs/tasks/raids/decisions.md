@@ -4,7 +4,11 @@
 
 Документ отделяет закрытые решения от технических деталей реализации. Codex не
 должен повторно предлагать альтернативы из этого списка, если новый факт не
-создаёт прямого конфликта с утверждённым ТЗ.
+создаёт прямого конфликта с текущим проектом ТЗ.
+
+Детальные значения ключей, sorting и acceptance criteria определяет
+`requirements.md`. Этот файл фиксирует причины и границы решений, но не
+переопределяет нормативный контракт.
 
 ## Продуктовые решения
 
@@ -35,20 +39,11 @@
 
 Физически первой остаётся скрытая service-колонка `__bot_key`.
 
-Видимые системные колонки:
-
-| Ключ | Заголовок | Тип |
-|---|---|---|
-| `number` | `№` | integer |
-| `tag` | `Тег` | string |
-| `nickname` | `Ник` | string |
-| `attacks` | `Атаки` | string |
-| `normal_points` | `Нормо-очки` | number |
-| `coefficient` | `Коэффициент` | number |
-| `capital_gold` | `Золото столицы` | integer |
-
-`normal_points` и `coefficient` передаются в Google Sheets числами и
-отображаются форматом `0.00`.
+Нормативный список видимых системных колонок и стабильных `column_key`
+находится в разделе 10.2 `requirements.md`. Выбран подробный namespace:
+`player_tag`, `player_name`, `capital_resources_looted`. `normal_points` и
+`coefficient` передаются в Google Sheets числами и отображаются форматом
+`0.00`.
 
 ## Пользовательские колонки
 
@@ -91,12 +86,15 @@
 - Google Sheets владеет ручными значениями рейдовых user-колонок.
 - SQLite владеет runtime binding, registry архивов и хранит snapshots строк.
 - Внутренний расчёт выполняется через целые `weighted_damage_units`.
-- `Capital Peak` определяется по подтверждённому `district.id`.
+- `Capital Peak` определяется по подтверждённому `district.id = 70000000`.
+- Ended mismatch между `members[].attacks` и attack log является strict
+  contract error; ongoing mismatch является retryable domain error до write.
 - Все три домена — composition, CWL и raids — готовятся до первой записи.
 - Google Sheets и SQLite не образуют общей транзакции.
 - Ошибка pruning после успешной ротации не должна откатывать созданный active
-  лист. Она становится предупреждением текущего sync, а registry сохраняется,
-  чтобы pruning повторился при следующем запуске.
+  лист. Sync сохраняет status `success`, report получает специальный cleanup
+  warning без общего partial-write текста, а registry сохраняется, чтобы
+  pruning повторился при следующем запуске.
 - `_bot_state` остаётся служебным зеркалом; SQLite binding имеет приоритет.
 - `SSOT.md` не описывает рейды до их реализации и обновляется коммитом 8.
 
