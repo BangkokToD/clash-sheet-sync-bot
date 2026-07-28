@@ -9,14 +9,20 @@ service-account*.json
 *.key
 
 # SQLite runtime DB
-bot.db
-bot.db-shm
-bot.db-wal
-bot.db.backup.*
-bot.db-shm.backup.*
-bot.db-wal.backup.*
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.backup.*
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 *.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+backups/
 
 # Legacy/local runtime files
 sync_settings.json
