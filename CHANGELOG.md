@@ -47,6 +47,7 @@
   - `make lint`;
   - `make format`.
 - Архитектурная документация:
+  - `SSOT.md`;
   - `docs/architecture.md`;
   - `docs/operations.md`.
 

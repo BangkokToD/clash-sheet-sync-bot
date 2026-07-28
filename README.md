@@ -256,7 +256,8 @@ bot.db-wal
 
 ## Документация
 
-- [docs/architecture.md](docs/architecture.md) — архитектура и инварианты.
+- [SSOT.md](SSOT.md) — нормативные источники данных, приоритеты и инварианты.
+- [docs/architecture.md](docs/architecture.md) — устройство и runtime-потоки.
 - [docs/operations.md](docs/operations.md) — production runbook.
 - [CHANGELOG.md](CHANGELOG.md) — история изменений.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — правила разработки.
