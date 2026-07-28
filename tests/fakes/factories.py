@@ -70,6 +70,7 @@ def make_app_config(
     google_service_account_file: str | Path = "credentials.json",
     google_service_account_email: str | None = None,
     db_path: str | Path = "bot.db",
+    dev_mode: bool = False,
 ) -> AppConfig:
     """Создаёт AppConfig для setup/sync service tests."""
 
@@ -80,6 +81,7 @@ def make_app_config(
         google_service_account_email=google_service_account_email,
         db_path=Path(db_path),
         default_timezone="Europe/Kyiv",
+        dev_mode=dev_mode,
         max_clans_per_chat=20,
         sync_cooldown_seconds=60,
         max_concurrent_syncs=3,

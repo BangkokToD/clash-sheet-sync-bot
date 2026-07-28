@@ -8,6 +8,8 @@
 
 ### Added
 
+- Безопасный `DEV_MODE`, отключающий cooldown последовательных `/sync` без снятия
+  блокировок конкурентной записи.
 - Публичная SQLite runtime-архитектура:
   - Telegram-группы;
   - Google Sheets bindings;

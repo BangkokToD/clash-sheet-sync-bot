@@ -47,6 +47,7 @@ def load_config(env_file: str | Path = ".env") -> AppConfig:
         google_service_account_email=_optional_nullable_env("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
         db_path=Path(_optional_env("DB_PATH", "bot.db")),
         default_timezone=default_timezone,
+        dev_mode=_bool_env("DEV_MODE", False),
         max_clans_per_chat=_positive_int_env("MAX_CLANS_PER_CHAT", 20),
         sync_cooldown_seconds=_non_negative_int_env("SYNC_COOLDOWN_SECONDS", 60),
         max_concurrent_syncs=_positive_int_env("MAX_CONCURRENT_SYNCS", 3),
@@ -108,6 +109,32 @@ def _optional_nullable_env(name: str) -> str | None:
     if value is None or value.strip() == "":
         return None
     return value.strip()
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    """Читает булеву переменную окружения.
+
+    Args:
+        name: Имя переменной окружения.
+        default: Значение по умолчанию.
+
+    Returns:
+        `True`, `False` или `default` для отсутствующего/пустого значения.
+
+    Raises:
+        ConfigError: Если значение не равно `True` или `False`.
+    """
+
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+
+    normalized_value = raw_value.strip().casefold()
+    if normalized_value == "true":
+        return True
+    if normalized_value == "false":
+        return False
+    raise ConfigError(f"{name} должен быть True или False.")
 
 
 def _positive_int_env(name: str, default: int) -> int:

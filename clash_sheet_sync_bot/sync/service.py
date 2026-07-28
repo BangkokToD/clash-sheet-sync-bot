@@ -434,6 +434,9 @@ class SyncService:
     async def _rate_limit_retry_after(self, chat_id: int) -> int:
         """Считает остаток cooldown для чата."""
 
+        if self._config.dev_mode:
+            return 0
+
         last_started_at = await self._telegram_chats.get_last_sync_started_at(chat_id)
         if last_started_at is None or self._config.sync_cooldown_seconds <= 0:
             return 0

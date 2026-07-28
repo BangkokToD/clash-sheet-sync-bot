@@ -44,6 +44,7 @@ class AppConfig:
         google_service_account_email: Ожидаемый email service account или `None`.
         db_path: Путь к SQLite-файлу.
         default_timezone: IANA-таймзона для новых привязок.
+        dev_mode: Отключает cooldown `/sync` для разработки.
         max_clans_per_chat: Максимум активных кланов на Telegram-группу.
         sync_cooldown_seconds: Cooldown `/sync` для одного чата.
         max_concurrent_syncs: Глобальный лимит одновременных sync.
@@ -60,6 +61,7 @@ class AppConfig:
     google_service_account_email: str | None
     db_path: Path
     default_timezone: str
+    dev_mode: bool
     max_clans_per_chat: int
     sync_cooldown_seconds: int
     max_concurrent_syncs: int

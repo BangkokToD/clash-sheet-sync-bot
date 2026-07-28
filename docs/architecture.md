@@ -316,6 +316,11 @@ send Telegram report
 - если CoC API или импорт таблицы падает на preparation-фазе, таблица ещё не тронута;
 - если ошибка случилась после начала записи в Google Sheets, пользователь получает partial write warning.
 
+Перед запуском pipeline действует cooldown одной Telegram-группы из
+`SYNC_COOLDOWN_SECONDS`. `DEV_MODE=True` отключает только этот cooldown для
+последовательных тестовых запусков. Chat lock, sheet lock и global semaphore
+остаются включёнными, чтобы не допустить конкурентную запись.
+
 ## 11. Locks и concurrency control
 
 В `/sync` используются три уровня ограничения конкурентности.

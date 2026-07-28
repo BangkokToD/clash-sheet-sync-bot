@@ -15,6 +15,7 @@ CONFIG_ENV_NAMES = (
     "GOOGLE_SERVICE_ACCOUNT_EMAIL",
     "DB_PATH",
     "DEFAULT_TIMEZONE",
+    "DEV_MODE",
     "MAX_CLANS_PER_CHAT",
     "SYNC_COOLDOWN_SECONDS",
     "MAX_CONCURRENT_SYNCS",
@@ -80,6 +81,7 @@ def test_load_config_uses_defaults(
     assert config.google_service_account_email is None
     assert config.db_path == Path("bot.db")
     assert config.default_timezone == "Europe/Kyiv"
+    assert config.dev_mode is False
     assert config.max_clans_per_chat == 20
     assert config.sync_cooldown_seconds == 60
     assert config.max_concurrent_syncs == 3
@@ -126,6 +128,47 @@ def test_load_config_rejects_invalid_timezone(
     monkeypatch.setenv("DEFAULT_TIMEZONE", "Invalid/Timezone")
 
     with pytest.raises(ConfigError, match="DEFAULT_TIMEZONE"):
+        load_config(_empty_env_file(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    (
+        ("True", True),
+        ("true", True),
+        ("False", False),
+        ("false", False),
+        ("", False),
+    ),
+)
+def test_load_config_reads_dev_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw_value: str,
+    expected: bool,
+) -> None:
+    """Проверяет чтение DEV_MODE и безопасный false для пустого значения."""
+
+    _clear_config_env(monkeypatch)
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DEV_MODE", raw_value)
+
+    config = load_config(_empty_env_file(tmp_path))
+
+    assert config.dev_mode is expected
+
+
+def test_load_config_rejects_invalid_dev_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Проверяет ошибку для DEV_MODE вне допустимых True/False."""
+
+    _clear_config_env(monkeypatch)
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("DEV_MODE", "yes")
+
+    with pytest.raises(ConfigError, match="DEV_MODE"):
         load_config(_empty_env_file(tmp_path))
 
 

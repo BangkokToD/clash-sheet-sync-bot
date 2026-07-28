@@ -133,6 +133,7 @@ DB_PATH=bot.db
 
 ```env
 DEFAULT_TIMEZONE=Europe/Kyiv
+DEV_MODE=False
 MAX_CLANS_PER_CHAT=20
 SYNC_COOLDOWN_SECONDS=60
 MAX_CONCURRENT_SYNCS=3
@@ -142,6 +143,10 @@ SETUP_TOKEN_TTL_SECONDS=900
 TRANSFER_TOKEN_TTL_SECONDS=900
 REPORT_MAX_ITEMS=50
 ```
+
+`DEV_MODE=True` отключает cooldown между последовательными `/sync` для разработки.
+Если переменная отсутствует, пуста или равна `False`, cooldown работает. Защитные
+блокировки одновременных sync остаются включёнными в любом режиме.
 
 ## Google service account
 

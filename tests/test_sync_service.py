@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 import aiosqlite
@@ -24,6 +25,20 @@ from clash_sheet_sync_bot.sync.service import (
 from clash_sheet_sync_bot.telegram.client import TelegramApiError
 
 NOW = "2026-07-09T12:00:00+00:00"
+
+
+class _TelegramChatsStub:
+    """Минимальный stub времени последнего `/sync`."""
+
+    def __init__(self, last_sync_started_at: str) -> None:
+        self.last_sync_started_at = last_sync_started_at
+        self.calls = 0
+
+    async def get_last_sync_started_at(self, chat_id: int) -> str:
+        """Возвращает время последнего запуска и считает обращения."""
+
+        self.calls += 1
+        return self.last_sync_started_at
 
 
 async def _insert_ready_chat(
@@ -238,6 +253,38 @@ def test_sync_error_reason_after_sheet_write_adds_partial_warning() -> None:
 
     assert "Google write failed" in reason
     assert PARTIAL_SHEET_WRITE_WARNING in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dev_mode", "expected_retry_after"),
+    (
+        (False, 60),
+        (True, 0),
+    ),
+)
+async def test_dev_mode_controls_sync_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    dev_mode: bool,
+    expected_retry_after: int,
+) -> None:
+    """Проверяет, что DEV_MODE отключает только cooldown `/sync`."""
+
+    chat_id = -1500
+    monkeypatch.setattr(sync_service, "_utc_now", lambda: datetime.fromisoformat(NOW))
+
+    service = SyncService(
+        config=make_app_config(dev_mode=dev_mode),
+        telegram=FakeTelegram(),  # type: ignore[arg-type]
+        connection=object(),
+    )
+    telegram_chats = _TelegramChatsStub(NOW)
+    service._telegram_chats = telegram_chats  # type: ignore[assignment]
+
+    retry_after = await service._rate_limit_retry_after(chat_id)
+
+    assert retry_after == expected_retry_after
+    assert telegram_chats.calls == int(not dev_mode)
 
 
 @pytest.mark.asyncio
