@@ -104,10 +104,20 @@ async def test_apply_migrations_creates_required_tables(
         "column_profiles",
         "composition_player_state",
         "cwl_row_state",
+        "raid_player_state",
+        "raid_sheet_archives",
         "sheet_blocks",
         "sync_runs",
         "transfer_tokens",
     }.issubset(table_names)
+
+    cursor = await migrated_connection.execute("PRAGMA table_info(sheet_bindings)")
+    binding_columns = {row["name"] for row in await cursor.fetchall()}
+    assert {
+        "active_raid_sheet_name",
+        "active_raid_sheet_id",
+        "active_raid_season",
+    }.issubset(binding_columns)
 
 
 @pytest.mark.asyncio

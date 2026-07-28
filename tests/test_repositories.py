@@ -8,6 +8,10 @@ import pytest
 from clash_sheet_sync_bot.models import SheetBlock
 from clash_sheet_sync_bot.repositories import (
     CwlRowStateRepository,
+    RaidPlayerState,
+    RaidPlayerStateRepository,
+    RaidSheetArchive,
+    RaidSheetArchiveRepository,
     RuntimeConfigRepository,
     SheetBlockRepository,
     SyncRunRepository,
@@ -506,3 +510,40 @@ async def test_runtime_config_repository_builds_ready_chat_config(
         "composition_exited",
         "cwl",
     }
+    assert runtime_config.sheet_binding.active_raid_sheet_name == "Рейды"
+    assert runtime_config.sheet_binding.active_raid_sheet_id is None
+    assert runtime_config.sheet_binding.active_raid_season is None
+
+
+@pytest.mark.asyncio
+async def test_raid_repositories_round_trip_and_archive_order(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет raid snapshot и канонический порядок registry."""
+
+    await _insert_chat(migrated_connection, chat_id=-1001)
+    rows = RaidPlayerStateRepository(migrated_connection)
+    archives = RaidSheetArchiveRepository(migrated_connection)
+    state = RaidPlayerState(
+        chat_id=-1001,
+        season_key="2026-07-24T07:00:00+00:00",
+        season_start_at="2026-07-24T07:00:00+00:00",
+        season_end_at="2026-07-27T07:00:00+00:00",
+        season_state="ended",
+        row_key="raid_row:season|#CLAN|#PLAYER",
+        clan_tag="#CLAN",
+        player_tag="#PLAYER",
+        technical_values={"weighted_damage_units": 600, "coefficient": 1.0},
+        user_values={"note": "manual"},
+        row_hash="hash",
+        updated_at=NOW,
+    )
+    await rows.upsert(state)
+    assert await rows.list_for_season(chat_id=-1001, season_key=state.season_key) == (state,)
+
+    older = RaidSheetArchive(-1001, "old", "2026-07-17", "Рейды 2026-07-17", 201, NOW)
+    newer = RaidSheetArchive(-1001, "new", "2026-07-24", "Рейды 2026-07-24", 202, NOW)
+    await archives.upsert(newer)
+    await archives.upsert(older)
+    assert await archives.list_ordered(-1001) == (older, newer)
+    assert await archives.get_by_sheet_id(chat_id=-1001, sheet_id=202) == newer

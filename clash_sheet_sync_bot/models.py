@@ -23,9 +23,9 @@ TelegramMemberStatus = Literal[
     "left",
     "kicked",
 ]
-TableType = Literal["composition", "composition_active", "composition_exited", "cwl"]
+TableType = Literal["composition", "composition_active", "composition_exited", "cwl", "raids"]
 ColumnKind = Literal["system", "user", "service"]
-ColumnValueType = Literal["string", "integer", "datetime"]
+ColumnValueType = Literal["string", "integer", "datetime", "number"]
 CompositionPlayerStatus = Literal["active", "exited", "untracked"]
 SyncRunStatus = Literal["success", "error", "rate_limited", "skipped"]
 
@@ -166,6 +166,9 @@ class SheetBinding:
         active_cwl_sheet_name: Название активного CWL-листа.
         active_cwl_sheet_id: Числовой ID активного CWL-листа или `None`.
         active_cwl_season: Текущий CWL-сезон или `None`.
+        active_raid_sheet_name: Название активного рейдового листа.
+        active_raid_sheet_id: Числовой ID активного рейдового листа или `None`.
+        active_raid_season: Текущий рейдовый сезон или `None`.
         bot_state_sheet_name: Название служебного листа.
         bot_state_sheet_id: Числовой ID служебного листа или `None`.
         timezone: IANA-таймзона чата.
@@ -179,6 +182,9 @@ class SheetBinding:
     active_cwl_sheet_name: str
     active_cwl_sheet_id: int | None
     active_cwl_season: str | None
+    active_raid_sheet_name: str
+    active_raid_sheet_id: int | None
+    active_raid_season: str | None
     bot_state_sheet_name: str
     bot_state_sheet_id: int | None
     timezone: str
@@ -217,6 +223,9 @@ class ChatSyncConfig:
         active_cwl_sheet_name: Название активного CWL-листа.
         active_cwl_sheet_id: Числовой ID активного CWL-листа или `None`.
         active_cwl_season: Текущий CWL-сезон или `None`.
+        active_raid_sheet_name: Название активного рейдового листа.
+        active_raid_sheet_id: Числовой ID активного рейдового листа или `None`.
+        active_raid_season: Текущий рейдовый сезон или `None`.
         active_clans: Активные кланы в порядке вывода.
         column_profiles: Профили колонок.
         timezone: IANA-таймзона чата.
@@ -229,6 +238,9 @@ class ChatSyncConfig:
     active_cwl_sheet_name: str
     active_cwl_sheet_id: int | None
     active_cwl_season: str | None
+    active_raid_sheet_name: str
+    active_raid_sheet_id: int | None
+    active_raid_season: str | None
     active_clans: tuple[TrackedClan, ...]
     column_profiles: tuple[ColumnProfile, ...]
     timezone: str
@@ -253,6 +265,9 @@ class ChatSyncConfig:
             active_cwl_sheet_name=binding.active_cwl_sheet_name,
             active_cwl_sheet_id=binding.active_cwl_sheet_id,
             active_cwl_season=binding.active_cwl_season,
+            active_raid_sheet_name=binding.active_raid_sheet_name,
+            active_raid_sheet_id=binding.active_raid_sheet_id,
+            active_raid_season=binding.active_raid_season,
             active_clans=config.active_clans,
             column_profiles=config.column_profiles,
             timezone=config.timezone,

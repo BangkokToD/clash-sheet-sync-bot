@@ -19,6 +19,7 @@ TABLE_TITLES: Final[dict[TableType, str]] = {
     "composition_active": "Колонки активного состава",
     "composition_exited": "Колонки вышедших",
     "cwl": "Колонки CWL",
+    "raids": "Колонки рейдов",
 }
 
 
@@ -72,6 +73,22 @@ DEFAULT_COLUMN_DEFINITIONS: Final[tuple[ColumnDefinition, ...]] = (
     ColumnDefinition("cwl", "stars", "Звезды", True, "system", "string", 60),
     ColumnDefinition(
         "cwl", "destruction_percentage", "Процент разрушений", True, "system", "string", 70
+    ),
+    ColumnDefinition("raids", BOT_KEY_COLUMN_KEY, BOT_KEY_TITLE, False, "service", "string", 0),
+    ColumnDefinition("raids", "number", "№", True, "system", "integer", 10),
+    ColumnDefinition("raids", "player_tag", "Тег", True, "system", "string", 20),
+    ColumnDefinition("raids", "player_name", "Ник", True, "system", "string", 30),
+    ColumnDefinition("raids", "attacks", "Атаки", True, "system", "string", 40),
+    ColumnDefinition("raids", "normal_points", "Нормо-очки", True, "system", "number", 50),
+    ColumnDefinition("raids", "coefficient", "Коэффициент", True, "system", "number", 60),
+    ColumnDefinition(
+        "raids",
+        "capital_resources_looted",
+        "Золото столицы",
+        True,
+        "system",
+        "integer",
+        70,
     ),
 )
 

@@ -106,6 +106,9 @@ class RuntimeConfigRepository:
                 active_cwl_sheet_name,
                 active_cwl_sheet_id,
                 active_cwl_season,
+                active_raid_sheet_name,
+                active_raid_sheet_id,
+                active_raid_season,
                 bot_state_sheet_name,
                 bot_state_sheet_id,
                 timezone
@@ -127,6 +130,11 @@ class RuntimeConfigRepository:
             active_cwl_sheet_name=as_str(row["active_cwl_sheet_name"], "active_cwl_sheet_name"),
             active_cwl_sheet_id=as_optional_int(row["active_cwl_sheet_id"], "active_cwl_sheet_id"),
             active_cwl_season=as_optional_str(row["active_cwl_season"], "active_cwl_season"),
+            active_raid_sheet_name=as_str(row["active_raid_sheet_name"], "active_raid_sheet_name"),
+            active_raid_sheet_id=as_optional_int(
+                row["active_raid_sheet_id"], "active_raid_sheet_id"
+            ),
+            active_raid_season=as_optional_str(row["active_raid_season"], "active_raid_season"),
             bot_state_sheet_name=as_str(row["bot_state_sheet_name"], "bot_state_sheet_name"),
             bot_state_sheet_id=as_optional_int(row["bot_state_sheet_id"], "bot_state_sheet_id"),
             timezone=as_str(row["timezone"], "timezone"),
@@ -243,6 +251,9 @@ class SheetBindingRepository:
         active_cwl_sheet_name: str,
         active_cwl_sheet_id: int,
         active_cwl_season: str | None,
+        active_raid_sheet_name: str = "Рейды",
+        active_raid_sheet_id: int | None = None,
+        active_raid_season: str | None = None,
         bot_state_sheet_name: str,
         bot_state_sheet_id: int,
         timezone: str,
@@ -261,6 +272,9 @@ class SheetBindingRepository:
                 active_cwl_sheet_name,
                 active_cwl_sheet_id,
                 active_cwl_season,
+                active_raid_sheet_name,
+                active_raid_sheet_id,
+                active_raid_season,
                 bot_state_sheet_name,
                 bot_state_sheet_id,
                 timezone,
@@ -268,7 +282,7 @@ class SheetBindingRepository:
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 google_sheet_id = excluded.google_sheet_id,
                 spreadsheet_url = excluded.spreadsheet_url,
@@ -277,6 +291,9 @@ class SheetBindingRepository:
                 active_cwl_sheet_name = excluded.active_cwl_sheet_name,
                 active_cwl_sheet_id = excluded.active_cwl_sheet_id,
                 active_cwl_season = excluded.active_cwl_season,
+                active_raid_sheet_name = excluded.active_raid_sheet_name,
+                active_raid_sheet_id = excluded.active_raid_sheet_id,
+                active_raid_season = excluded.active_raid_season,
                 bot_state_sheet_name = excluded.bot_state_sheet_name,
                 bot_state_sheet_id = excluded.bot_state_sheet_id,
                 timezone = excluded.timezone,
@@ -292,12 +309,38 @@ class SheetBindingRepository:
                 active_cwl_sheet_name,
                 active_cwl_sheet_id,
                 active_cwl_season,
+                active_raid_sheet_name,
+                active_raid_sheet_id,
+                active_raid_season,
                 bot_state_sheet_name,
                 bot_state_sheet_id,
                 timezone,
                 now,
                 now,
             ),
+        )
+
+    async def update_active_raid_binding(
+        self,
+        *,
+        chat_id: int,
+        active_raid_sheet_name: str,
+        active_raid_sheet_id: int,
+        active_raid_season: str,
+        now: str,
+    ) -> None:
+        """Обновляет active raid binding после успешной записи."""
+
+        await self._connection.execute(
+            """
+            UPDATE sheet_bindings
+            SET active_raid_sheet_name = ?,
+                active_raid_sheet_id = ?,
+                active_raid_season = ?,
+                updated_at = ?
+            WHERE chat_id = ? AND is_active = 1
+            """,
+            (active_raid_sheet_name, active_raid_sheet_id, active_raid_season, now, chat_id),
         )
 
     async def update_active_cwl_binding(
@@ -340,6 +383,9 @@ class SheetBindingRepository:
         active_cwl_sheet_name: str,
         active_cwl_sheet_id: int,
         active_cwl_season: str | None,
+        active_raid_sheet_name: str = "Рейды",
+        active_raid_sheet_id: int | None = None,
+        active_raid_season: str | None = None,
         bot_state_sheet_name: str,
         bot_state_sheet_id: int,
         now: str,
@@ -354,6 +400,9 @@ class SheetBindingRepository:
                 active_cwl_sheet_name = ?,
                 active_cwl_sheet_id = ?,
                 active_cwl_season = ?,
+                active_raid_sheet_name = ?,
+                active_raid_sheet_id = ?,
+                active_raid_season = ?,
                 bot_state_sheet_name = ?,
                 bot_state_sheet_id = ?,
                 updated_at = ?
@@ -365,6 +414,9 @@ class SheetBindingRepository:
                 active_cwl_sheet_name,
                 active_cwl_sheet_id,
                 active_cwl_season,
+                active_raid_sheet_name,
+                active_raid_sheet_id,
+                active_raid_season,
                 bot_state_sheet_name,
                 bot_state_sheet_id,
                 now,
