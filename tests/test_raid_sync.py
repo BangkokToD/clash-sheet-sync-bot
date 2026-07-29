@@ -801,9 +801,7 @@ async def test_prepare_selects_ongoing_members_ranks_ties_and_performs_no_sheet_
     assert [row.technical_values.player_tag for row in rows] == ["#ONE", "#TWO", "#LEFT"]
     assert [row.rank for row in rows] == [1, 2, 3]
     assert all("#NOT_MEMBER" not in row.row_key for row in rows)
-    assert rows[0].row_key == (
-        "raid_row:2026-07-24T07:00:00+00:00|#AAA111|#ONE"
-    )
+    assert rows[0].row_key == ("raid_row:2026-07-24T07:00:00+00:00|#AAA111|#ONE")
     assert sheets.batch_value_updates == []
     assert sheets.spreadsheet_requests == []
     assert sheets.hidden_dimensions == []
@@ -1039,7 +1037,9 @@ async def test_prepare_maps_malformed_sqlite_technical_state_to_domain_error() -
 
 
 @pytest.mark.asyncio
-async def test_prepare_imports_registered_block_and_merges_snapshot_and_composition_by_title() -> None:
+async def test_prepare_imports_registered_block_and_merges_snapshot_and_composition_by_title() -> (
+    None
+):
     """Проверяет import, layered merge, empty inheritance и hidden snapshot."""
 
     payload = _season(
@@ -1230,9 +1230,7 @@ async def test_prepare_uses_unique_technical_fallback_and_rejects_ambiguous_rows
         "ЗАМЕТКА",
     ]
     data_row = ["", 1, "#PLAYER", "Player", "1/6", 2, "0.33", 1000, "manual"]
-    sheets = FakeSheetsClient(
-        values_by_range={("Рейды", "A1:I3"): [header, data_row]}
-    )
+    sheets = FakeSheetsClient(values_by_range={("Рейды", "A1:I3"): [header, data_row]})
     blocks = RecordingSheetBlockRepository(
         blocks=(
             make_sheet_block(

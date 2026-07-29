@@ -879,6 +879,4 @@ async def test_rebind_and_delete_touch_only_selected_raid_blocks(
     )
 
     remaining = await repository.list_blocks(chat_id)
-    assert [(block.sheet_name, block.block_key) for block in remaining] == [
-        ("Рейды", "cwl:#KEEP")
-    ]
+    assert [(block.sheet_name, block.block_key) for block in remaining] == [("Рейды", "cwl:#KEEP")]

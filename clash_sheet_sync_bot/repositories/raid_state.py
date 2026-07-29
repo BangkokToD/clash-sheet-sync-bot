@@ -351,9 +351,7 @@ def _validate_raid_technical_values(
             raise RaidDataError(f"поле {field} не может быть отрицательным.")
         result[field] = value
 
-    if int(result["attacks"]) > int(result["attack_limit"]) + int(
-        result["bonus_attack_limit"]
-    ):
+    if int(result["attacks"]) > int(result["attack_limit"]) + int(result["bonus_attack_limit"]):
         raise RaidDataError("поле attacks превышает attack_limit + bonus_attack_limit.")
 
     for field in RAID_DECIMAL_FIELDS:
@@ -375,9 +373,7 @@ def _validate_raid_technical_values(
 
     expected_normal_points = Decimal(int(result["weighted_damage_units"])) / Decimal(100)
     if result["normal_points"] != expected_normal_points:
-        raise RaidDataError(
-            "поле normal_points не соответствует weighted_damage_units / 100."
-        )
+        raise RaidDataError("поле normal_points не соответствует weighted_damage_units / 100.")
     return result
 
 

@@ -242,9 +242,7 @@ async def prepare_public_raid_sync(
             config=config,
         )
         if not api_history_exists:
-            warnings.append(
-                f"{selected_key}: выбран последний сохранённый raid season из SQLite."
-            )
+            warnings.append(f"{selected_key}: выбран последний сохранённый raid season из SQLite.")
 
     previous_active_season: PreparedRaidSeason | None = None
     active_season_key = runtime_config.sheet_binding.active_raid_season
@@ -336,7 +334,8 @@ def _prepare_season_state(
                 )
         season_state: RaidSeasonState = (
             "ongoing"
-            if state == "ongoing" or any(item.state == "ongoing" for item in parsed_by_clan.values())
+            if state == "ongoing"
+            or any(item.state == "ongoing" for item in parsed_by_clan.values())
             else "ended"
         )
     else:
@@ -363,9 +362,7 @@ def _prepare_season_state(
             )
         elif use_saved_fallback:
             stored = tuple(
-                row
-                for row in saved_for_season
-                if normalize_tag(row.clan_tag) == clan_tag
+                row for row in saved_for_season if normalize_tag(row.clan_tag) == clan_tag
             )
             technical_rows = tuple(_technical_from_state(row) for row in stored)
 
@@ -535,9 +532,7 @@ def _parse_registered_raid_block(
                     f"{block_key}, строка {row_number}: повреждены __bot_key и Тег."
                 ) from exc
             row_key = make_raid_row_key(season_key, clan_tag, player_tag)
-            warnings.append(
-                f"{block_key}, строка {row_number}: использован fallback по Тег."
-            )
+            warnings.append(f"{block_key}, строка {row_number}: использован fallback по Тег.")
         if row_key in imported:
             raise RaidDataError(
                 f"{block_key}, строка {row_number}: неоднозначный дубликат raid row {row_key}."
@@ -627,9 +622,7 @@ def _raid_composition_user_column_links(
     )
     by_title: dict[str, list[str]] = {}
     for profile in composition_profiles:
-        by_title.setdefault(column_title_identity(profile.title), []).append(
-            profile.column_key
-        )
+        by_title.setdefault(column_title_identity(profile.title), []).append(profile.column_key)
 
     links: dict[str, tuple[str, ...]] = {}
     for profile in sorted(
@@ -656,14 +649,10 @@ def _build_raid_diff(
     if selected_season is None:
         return ()
     existing = {
-        row.row_key: row
-        for row in saved_rows
-        if row.season_key == selected_season.season_key
+        row.row_key: row for row in saved_rows if row.season_key == selected_season.season_key
     }
     planned: dict[str, RaidPlannedRow] = {
-        row.row_key: row
-        for block in selected_season.blocks
-        for row in block.rows
+        row.row_key: row for block in selected_season.blocks for row in block.rows
     }
     items: list[str] = []
     for row_key, row in planned.items():
