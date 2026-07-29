@@ -13,9 +13,17 @@ from clash_sheet_sync_bot.sheets.client import SheetMetadata
 class FakeSheetsClient:
     """Fake Google Sheets client для composition apply tests."""
 
+    values_by_range: dict[tuple[str, str], list[list[Any]]] = field(default_factory=dict)
+    read_calls: list[tuple[str, str]] = field(default_factory=list)
     batch_value_updates: list[Any] = field(default_factory=list)
     spreadsheet_requests: list[Any] = field(default_factory=list)
     hidden_dimensions: list[dict[str, Any]] = field(default_factory=list)
+
+    async def read_values(self, sheet_name: str, range_a1: str) -> list[list[Any]]:
+        """Возвращает настроенные значения и запоминает read-only вызов."""
+
+        self.read_calls.append((sheet_name, range_a1))
+        return self.values_by_range.get((sheet_name, range_a1), [])
 
     async def batch_update_values(self, updates: Any) -> dict[str, Any]:
         """Запоминает values batch update."""

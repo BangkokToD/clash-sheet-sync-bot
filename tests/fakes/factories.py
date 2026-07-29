@@ -272,6 +272,7 @@ def make_composition_column_profiles(chat_id: int = -1001) -> tuple[ColumnProfil
 def make_runtime_config(
     *,
     chat_id: int = -1001,
+    sheet_binding: SheetBinding | None = None,
     active_clans: tuple[TrackedClan, ...] | None = None,
     column_profiles: tuple[ColumnProfile, ...] | None = None,
 ) -> RuntimeChatConfig:
@@ -284,7 +285,7 @@ def make_runtime_config(
     return RuntimeChatConfig(
         chat_id=chat_id,
         status="ready",
-        sheet_binding=make_sheet_binding(chat_id=chat_id),
+        sheet_binding=sheet_binding or make_sheet_binding(chat_id=chat_id),
         active_clans=clans,
         column_profiles=column_profiles or make_composition_column_profiles(chat_id),
         timezone="Europe/Kyiv",

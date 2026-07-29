@@ -10,19 +10,36 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
 
-from clash_sheet_sync_bot.models import AppConfig, TrackedClan, normalize_tag
-from clash_sheet_sync_bot.repositories.raid_state import RaidPlayerState
+from clash_sheet_sync_bot.models import (
+    AppConfig,
+    ColumnProfile,
+    RuntimeChatConfig,
+    TrackedClan,
+    normalize_tag,
+)
+from clash_sheet_sync_bot.repositories.raid_state import (
+    RaidDataError,
+    RaidPlayerState,
+    decode_raid_technical_values,
+    encode_raid_technical_values,
+)
+from clash_sheet_sync_bot.repositories.sheet_blocks import SheetBlockRepository
+from clash_sheet_sync_bot.sheets.client import (
+    CellValue,
+    SheetsClient,
+    range_from_start_cell,
+)
+from clash_sheet_sync_bot.sheets.column_profiles import BOT_KEY_TITLE, column_title_identity
+from clash_sheet_sync_bot.sync.composition import PlannedPlayerState
 
 CAPITAL_PEAK_DISTRICT_ID: Final = 70_000_000
 CAPITAL_PEAK_NAME: Final = "Capital Peak"
+RAID_BLOCK_PREFIX: Final = "raid:"
+RAID_MESSAGE_BLOCK_PREFIX: Final = "raid_message:"
 
 RaidSeasonState = Literal["ongoing", "ended"]
 RaidDistrictKind = Literal["normal", "capital"]
 JsonObject = dict[str, Any]
-
-
-class RaidDataError(RuntimeError):
-    """Базовая ошибка обязательных рейдовых данных."""
 
 
 class RaidContractError(RaidDataError):
@@ -104,27 +121,58 @@ class RaidClanBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedRaidSeason:
+    """Полностью подготовленное состояние одного raid season."""
+
+    season_key: str
+    start_time: str
+    end_time: str
+    state: RaidSeasonState
+    blocks: tuple[RaidClanBlock, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedRaidSync:
     """Результат raid preparation без каких-либо write-операций."""
 
-    season_key: str | None
-    season_state: RaidSeasonState | None
-    blocks: tuple[RaidClanBlock, ...]
+    selected_season: PreparedRaidSeason | None
+    previous_active_season: PreparedRaidSeason | None
+    empty_blocks: tuple[RaidClanBlock, ...] = ()
     warnings: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+
+    @property
+    def season_key(self) -> str | None:
+        """Возвращает выбранный season key для совместимого read-only доступа."""
+
+        return None if self.selected_season is None else self.selected_season.season_key
+
+    @property
+    def season_state(self) -> RaidSeasonState | None:
+        """Возвращает общее состояние выбранного сезона."""
+
+        return None if self.selected_season is None else self.selected_season.state
+
+    @property
+    def blocks(self) -> tuple[RaidClanBlock, ...]:
+        """Возвращает selected blocks либо message-only blocks без сезона."""
+
+        return self.empty_blocks if self.selected_season is None else self.selected_season.blocks
 
 
 async def prepare_public_raid_sync(
     *,
-    clans: Sequence[TrackedClan],
+    runtime_config: RuntimeChatConfig,
     clash_client: Any,
+    sheets_client: SheetsClient,
+    sheet_block_repository: SheetBlockRepository,
     config: AppConfig,
     saved_rows: Sequence[RaidPlayerState] = (),
-    imported_user_values: Mapping[str, Mapping[str, str]] | None = None,
-    composition_user_values: Mapping[str, Mapping[str, str]] | None = None,
+    composition_player_states: Sequence[PlannedPlayerState] = (),
 ) -> PreparedRaidSync:
     """Подготавливает общий raid season всех активных кланов до Sheets write."""
 
+    clans = runtime_config.active_clans
     semaphore = asyncio.Semaphore(config.raid_api_concurrency_limit)
 
     async def load(clan: TrackedClan) -> tuple[str, list[JsonObject]]:
@@ -144,72 +192,202 @@ async def prepare_public_raid_sync(
     }
     if len(ongoing_keys) > 1:
         raise RaidContractError("Активные кланы вернули разные ongoing raid seasons.")
-    api_keys = {
+    ended_keys = {
         _season_key(_required_non_empty_str(item, "startTime", "raid season"))
         for items in windows.values()
         for item in items
-        if item.get("state") in {"ongoing", "ended"}
+        if item.get("state") == "ended"
     }
-    selected_key = next(iter(ongoing_keys), max(api_keys, default=None))
-    if selected_key is None and saved_rows:
-        selected_key = max(row.season_key for row in saved_rows)
+    selected_key = next(iter(ongoing_keys), max(ended_keys, default=None))
+    active_clan_tags = {normalize_tag(clan.clan_tag) for clan in clans}
+    scoped_saved_rows = tuple(
+        row
+        for row in saved_rows
+        if row.chat_id == runtime_config.chat_id and normalize_tag(row.clan_tag) in active_clan_tags
+    )
+    api_history_exists = bool(ongoing_keys or ended_keys)
+    if selected_key is None and scoped_saved_rows:
+        selected_key = max(
+            scoped_saved_rows,
+            key=lambda row: (row.season_start_at, row.season_key),
+        ).season_key
 
-    imported = imported_user_values or {}
-    composition = composition_user_values or {}
-    saved_by_key = {row.row_key: row for row in saved_rows}
-    blocks: list[RaidClanBlock] = []
     warnings: list[str] = []
-    selected_state: RaidSeasonState | None = None
+    imported, import_warnings = await _import_registered_raid_values(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        sheet_block_repository=sheet_block_repository,
+    )
+    warnings.extend(import_warnings)
+    composition_by_tag = {
+        normalize_tag(state.player_tag): state for state in composition_player_states
+    }
+    saved_by_key = {row.row_key: row for row in scoped_saved_rows}
+    user_column_links = _raid_composition_user_column_links(runtime_config.column_profiles)
 
+    selected_season: PreparedRaidSeason | None = None
+    if selected_key is not None:
+        selected_season = _prepare_season_state(
+            season_key=selected_key,
+            state="ongoing" if selected_key in ongoing_keys else None,
+            clans=clans,
+            windows=windows,
+            saved_rows=scoped_saved_rows,
+            use_saved_fallback=not api_history_exists,
+            imported=imported,
+            imported_season=runtime_config.sheet_binding.active_raid_season,
+            saved_by_key=saved_by_key,
+            composition_by_tag=composition_by_tag,
+            user_column_links=user_column_links,
+            config=config,
+        )
+        if not api_history_exists:
+            warnings.append(
+                f"{selected_key}: выбран последний сохранённый raid season из SQLite."
+            )
+
+    previous_active_season: PreparedRaidSeason | None = None
+    active_season_key = runtime_config.sheet_binding.active_raid_season
+    if (
+        active_season_key is not None
+        and selected_key is not None
+        and active_season_key != selected_key
+    ):
+        previous_active_season = _prepare_season_state(
+            season_key=active_season_key,
+            state=None,
+            clans=clans,
+            windows=windows,
+            saved_rows=scoped_saved_rows,
+            use_saved_fallback=True,
+            imported=imported,
+            imported_season=active_season_key,
+            saved_by_key=saved_by_key,
+            composition_by_tag=composition_by_tag,
+            user_column_links=user_column_links,
+            config=config,
+        )
+        if not _window_contains_season(windows, active_season_key):
+            warnings.append(
+                f"{active_season_key}: старый active raid season восстановлен из SQLite."
+            )
+
+    empty_blocks = ()
+    if selected_season is None:
+        empty_blocks = tuple(
+            RaidClanBlock(
+                clan_tag=normalize_tag(clan.clan_tag),
+                clan_name=clan.clan_name,
+                message="Нет данных рейдового уикенда за доступный период",
+            )
+            for clan in clans
+        )
+    diff = _build_raid_diff(selected_season, scoped_saved_rows)
+    return PreparedRaidSync(
+        selected_season=selected_season,
+        previous_active_season=previous_active_season,
+        empty_blocks=empty_blocks,
+        warnings=tuple(warnings),
+        diff=diff,
+    )
+
+
+def _prepare_season_state(
+    *,
+    season_key: str,
+    state: RaidSeasonState | None,
+    clans: Sequence[TrackedClan],
+    windows: Mapping[str, Sequence[JsonObject]],
+    saved_rows: Sequence[RaidPlayerState],
+    use_saved_fallback: bool,
+    imported: Mapping[str, Mapping[str, str]],
+    imported_season: str | None,
+    saved_by_key: Mapping[str, RaidPlayerState],
+    composition_by_tag: Mapping[str, PlannedPlayerState],
+    user_column_links: Mapping[str, tuple[str, ...]],
+    config: AppConfig,
+) -> PreparedRaidSeason:
+    matching_raw: list[tuple[str, JsonObject]] = []
+    for clan_tag, items in windows.items():
+        for item in items:
+            if _raw_season_key(item) == season_key:
+                matching_raw.append((clan_tag, item))
+
+    saved_for_season = tuple(row for row in saved_rows if row.season_key == season_key)
+    if not matching_raw and not saved_for_season:
+        raise RaidDataError(
+            f"{season_key}: отсутствует API и SQLite state известного active raid season."
+        )
+
+    parsed_by_clan: dict[str, ParsedRaidSeason] = {}
+    for clan_tag, raw in matching_raw:
+        if clan_tag in parsed_by_clan:
+            raise RaidContractError(f"{clan_tag}: raid season {season_key} встречается дважды.")
+        parsed_by_clan[clan_tag] = parse_raid_season(raw, clan_tag=clan_tag)
+
+    if parsed_by_clan:
+        first = next(iter(parsed_by_clan.values()))
+        start_time = _season_key(first.start_time)
+        end_time = _season_key(first.end_time)
+        for parsed in parsed_by_clan.values():
+            if _season_key(parsed.end_time) != end_time:
+                raise RaidContractError(
+                    f"{season_key}: активные кланы вернули разные endTime raid season."
+                )
+        season_state: RaidSeasonState = (
+            "ongoing"
+            if state == "ongoing" or any(item.state == "ongoing" for item in parsed_by_clan.values())
+            else "ended"
+        )
+    else:
+        first_saved = max(
+            saved_for_season,
+            key=lambda row: (row.season_start_at, row.season_end_at),
+        )
+        start_time = first_saved.season_start_at
+        end_time = first_saved.season_end_at
+        season_state = _consistent_saved_state(saved_for_season)
+
+    period = _raid_period(start_time, end_time)
+    blocks: list[RaidClanBlock] = []
     for clan in clans:
         clan_tag = normalize_tag(clan.clan_tag)
-        raw = next(
-            (
-                item
-                for item in windows.get(clan_tag, [])
-                if _season_key(_required_non_empty_str(item, "startTime", "raid season"))
-                == selected_key
-            ),
-            None,
-        )
+        parsed = parsed_by_clan.get(clan_tag)
         technical_rows: tuple[RaidTechnicalValues, ...] = ()
-        if raw is not None:
-            parsed = parse_raid_season(raw, clan_tag=clan_tag)
-            selected_state = parsed.state
+        if parsed is not None:
             technical_rows = aggregate_raid_season(
                 parsed,
                 attacks_target=config.raid_attacks_target,
                 normal_district_attack_norm=config.raid_normal_district_attack_norm,
                 capital_district_attack_norm=config.raid_capital_district_attack_norm,
             )
-        elif selected_key is not None:
-            stored = [
+        elif use_saved_fallback:
+            stored = tuple(
                 row
-                for row in saved_rows
-                if row.season_key == selected_key and normalize_tag(row.clan_tag) == clan_tag
-            ]
+                for row in saved_for_season
+                if normalize_tag(row.clan_tag) == clan_tag
+            )
             technical_rows = tuple(_technical_from_state(row) for row in stored)
-            if stored:
-                selected_state = _stored_state(stored[0].season_state)
-                warnings.append(f"{clan_tag}: использовано сохранённое состояние рейдов.")
 
         if not technical_rows:
             blocks.append(
                 RaidClanBlock(
                     clan_tag=clan_tag,
                     clan_name=clan.clan_name,
-                    message="Нет данных рейдового уикенда",
+                    message=f"Нет данных рейдового уикенда {period}",
                 )
             )
             continue
+
         planned = [
             _planned_row(
                 values,
-                season_key=selected_key or "",
+                season_key=season_key,
                 clan_tag=clan_tag,
-                imported=imported,
+                imported=imported if imported_season == season_key else {},
                 saved_by_key=saved_by_key,
-                composition=composition,
+                composition_by_tag=composition_by_tag,
+                user_column_links=user_column_links,
             )
             for values in technical_rows
         ]
@@ -234,10 +412,347 @@ async def prepare_public_raid_sync(
         )
         blocks.append(RaidClanBlock(clan_tag, clan.clan_name, ranked))
 
-    diff = tuple(
-        f"{block.clan_tag}: {len(block.rows)} участников" for block in blocks if block.rows
+    return PreparedRaidSeason(
+        season_key=season_key,
+        start_time=start_time,
+        end_time=end_time,
+        state=season_state,
+        blocks=tuple(blocks),
     )
-    return PreparedRaidSync(selected_key, selected_state, tuple(blocks), tuple(warnings), diff)
+
+
+async def _import_registered_raid_values(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    sheet_block_repository: SheetBlockRepository,
+) -> tuple[dict[str, dict[str, str]], tuple[str, ...]]:
+    active_season = runtime_config.sheet_binding.active_raid_season
+    if active_season is None:
+        return {}, ()
+
+    sheet_name = runtime_config.sheet_binding.active_raid_sheet_name
+    sheet_id = runtime_config.sheet_binding.active_raid_sheet_id
+    blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id, sheet_name)
+    imported: dict[str, dict[str, str]] = {}
+    warnings: list[str] = []
+    seen_clans: set[str] = set()
+    for block in blocks:
+        if block.block_key.startswith(RAID_MESSAGE_BLOCK_PREFIX):
+            continue
+        if not block.block_key.startswith(RAID_BLOCK_PREFIX):
+            continue
+        if sheet_id is not None and block.sheet_id != sheet_id:
+            raise RaidDataError(
+                f"{block.block_key}: registered raid block указывает на другой sheet_id."
+            )
+        try:
+            clan_tag = normalize_tag(block.block_key.removeprefix(RAID_BLOCK_PREFIX))
+        except ValueError as exc:
+            raise RaidDataError(f"{block.block_key}: повреждён clan tag managed block.") from exc
+        if clan_tag in seen_clans:
+            raise RaidDataError(f"{clan_tag}: найден дубликат registered raid block.")
+        seen_clans.add(clan_tag)
+        values = await sheets_client.read_values(
+            sheet_name,
+            range_from_start_cell(
+                start_cell=block.start_cell,
+                rows_count=block.rows_count,
+                columns_count=block.columns_count,
+            ),
+        )
+        rows, block_warnings = _parse_registered_raid_block(
+            values=values,
+            block_key=block.block_key,
+            clan_tag=clan_tag,
+            season_key=active_season,
+            column_profiles=runtime_config.column_profiles,
+        )
+        warnings.extend(block_warnings)
+        for row_key, user_values in rows.items():
+            if row_key in imported:
+                raise RaidDataError(f"{row_key}: найден дубликат импортированной raid row.")
+            imported[row_key] = user_values
+    return imported, tuple(warnings)
+
+
+def _parse_registered_raid_block(
+    *,
+    values: Sequence[Sequence[CellValue]],
+    block_key: str,
+    clan_tag: str,
+    season_key: str,
+    column_profiles: Sequence[ColumnProfile],
+) -> tuple[dict[str, dict[str, str]], tuple[str, ...]]:
+    rows = [[_cell_text(cell) for cell in row] for row in values]
+    header_rows = [
+        (index, row)
+        for index, row in enumerate(rows)
+        if any(cell.strip() == BOT_KEY_TITLE for cell in row)
+    ]
+    if len(header_rows) != 1:
+        raise RaidDataError(
+            f"{block_key}: managed raid block должен содержать один header с {BOT_KEY_TITLE}."
+        )
+    header_index, header = header_rows[0]
+    bot_key_index = _unique_header_index(header, BOT_KEY_TITLE, block_key)
+    player_tag_profile = next(
+        (
+            profile
+            for profile in column_profiles
+            if profile.table_type == "raids"
+            and profile.column_key == "player_tag"
+            and profile.kind == "system"
+        ),
+        None,
+    )
+    if player_tag_profile is None:
+        raise RaidDataError(f"{block_key}: отсутствует обязательный profile player_tag.")
+    player_tag_index = _unique_header_identity_index(
+        header,
+        column_title_identity(player_tag_profile.title),
+        block_key,
+    )
+    user_indexes = _raid_user_indexes_from_header(column_profiles, header, block_key)
+
+    imported: dict[str, dict[str, str]] = {}
+    warnings: list[str] = []
+    for row_number, row in enumerate(rows[header_index + 1 :], start=header_index + 2):
+        if not any(cell.strip() for cell in row):
+            continue
+        bot_key = _cell_at_text(row, bot_key_index).strip()
+        row_key = _validated_imported_row_key(
+            bot_key,
+            season_key=season_key,
+            clan_tag=clan_tag,
+        )
+        if row_key is None:
+            raw_player_tag = _cell_at_text(row, player_tag_index).strip()
+            try:
+                player_tag = normalize_tag(raw_player_tag)
+            except ValueError as exc:
+                raise RaidDataError(
+                    f"{block_key}, строка {row_number}: повреждены __bot_key и Тег."
+                ) from exc
+            row_key = make_raid_row_key(season_key, clan_tag, player_tag)
+            warnings.append(
+                f"{block_key}, строка {row_number}: использован fallback по Тег."
+            )
+        if row_key in imported:
+            raise RaidDataError(
+                f"{block_key}, строка {row_number}: неоднозначный дубликат raid row {row_key}."
+            )
+        imported[row_key] = {
+            column_key: _cell_at_text(row, column_index)
+            for column_key, column_index in user_indexes.items()
+        }
+    return imported, tuple(warnings)
+
+
+def _validated_imported_row_key(
+    value: str,
+    *,
+    season_key: str,
+    clan_tag: str,
+) -> str | None:
+    if value == "":
+        return None
+    if not value.startswith("raid_row:"):
+        return None
+    parts = value.removeprefix("raid_row:").split("|")
+    if len(parts) != 3:
+        return None
+    raw_season, raw_clan, raw_player = parts
+    try:
+        normalized_clan = normalize_tag(raw_clan)
+        normalized_player = normalize_tag(raw_player)
+    except ValueError:
+        return None
+    if raw_season != season_key or normalized_clan != clan_tag:
+        raise RaidDataError("__bot_key не соответствует active raid season или managed block.")
+    return make_raid_row_key(season_key, clan_tag, normalized_player)
+
+
+def _raid_user_indexes_from_header(
+    column_profiles: Sequence[ColumnProfile],
+    header: Sequence[str],
+    block_key: str,
+) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for profile in column_profiles:
+        if (
+            profile.table_type != "raids"
+            or profile.kind != "user"
+            or not profile.visible
+            or not profile.is_active
+        ):
+            continue
+        identity = column_title_identity(profile.title)
+        indexes = [
+            index
+            for index, value in enumerate(header)
+            if value.strip() and column_title_identity(value) == identity
+        ]
+        if len(indexes) > 1:
+            raise RaidDataError(
+                f"{block_key}: заголовок user-колонки {profile.title!r} неоднозначен."
+            )
+        if indexes:
+            result[profile.column_key] = indexes[0]
+    return result
+
+
+def _raid_composition_user_column_links(
+    column_profiles: Sequence[ColumnProfile],
+) -> dict[str, tuple[str, ...]]:
+    table_order = {
+        "composition_active": 0,
+        "composition_exited": 1,
+        "composition": 2,
+    }
+    composition_profiles = sorted(
+        (
+            profile
+            for profile in column_profiles
+            if profile.table_type in table_order
+            and profile.kind == "user"
+            and profile.visible
+            and profile.is_active
+        ),
+        key=lambda profile: (
+            table_order[profile.table_type],
+            profile.sort_order,
+            profile.column_key,
+        ),
+    )
+    by_title: dict[str, list[str]] = {}
+    for profile in composition_profiles:
+        by_title.setdefault(column_title_identity(profile.title), []).append(
+            profile.column_key
+        )
+
+    links: dict[str, tuple[str, ...]] = {}
+    for profile in sorted(
+        (
+            item
+            for item in column_profiles
+            if item.table_type == "raids"
+            and item.kind == "user"
+            and item.visible
+            and item.is_active
+        ),
+        key=lambda item: (item.sort_order, item.column_key),
+    ):
+        composition_keys = by_title.get(column_title_identity(profile.title))
+        if composition_keys:
+            links[profile.column_key] = tuple(composition_keys)
+    return links
+
+
+def _build_raid_diff(
+    selected_season: PreparedRaidSeason | None,
+    saved_rows: Sequence[RaidPlayerState],
+) -> tuple[str, ...]:
+    if selected_season is None:
+        return ()
+    existing = {
+        row.row_key: row
+        for row in saved_rows
+        if row.season_key == selected_season.season_key
+    }
+    planned: dict[str, RaidPlannedRow] = {
+        row.row_key: row
+        for block in selected_season.blocks
+        for row in block.rows
+    }
+    items: list[str] = []
+    for row_key, row in planned.items():
+        previous = existing.get(row_key)
+        if previous is None:
+            items.append(f"Добавлен участник {row.technical_values.player_tag}.")
+            continue
+        previous_values = decode_raid_technical_values(
+            encode_raid_technical_values(previous.technical_values)
+        )
+        if (
+            previous_values != _technical_values_dict(row.technical_values)
+            or previous.user_values != row.user_values
+        ):
+            items.append(f"Обновлён участник {row.technical_values.player_tag}.")
+    for row_key in sorted(existing.keys() - planned.keys()):
+        items.append(f"Удалён участник {existing[row_key].player_tag}.")
+    return tuple(items)
+
+
+def _technical_values_dict(values: RaidTechnicalValues) -> dict[str, object]:
+    return {
+        "player_name": values.player_name,
+        "attacks": values.attacks,
+        "attack_limit": values.attack_limit,
+        "bonus_attack_limit": values.bonus_attack_limit,
+        "capital_resources_looted": values.capital_resources_looted,
+        "weighted_damage_units": values.weighted_damage_units,
+        "normal_points": values.normal_points,
+        "coefficient": values.coefficient,
+    }
+
+
+def _window_contains_season(
+    windows: Mapping[str, Sequence[JsonObject]],
+    season_key: str,
+) -> bool:
+    return any(_raw_season_key(item) == season_key for items in windows.values() for item in items)
+
+
+def _raw_season_key(item: JsonObject) -> str:
+    return _season_key(_required_non_empty_str(item, "startTime", "raid season"))
+
+
+def _consistent_saved_state(rows: Sequence[RaidPlayerState]) -> RaidSeasonState:
+    states = {_stored_state(row.season_state) for row in rows}
+    if len(states) != 1:
+        raise RaidDataError("SQLite raid season содержит противоречивые state.")
+    return next(iter(states))
+
+
+def _raid_period(start_time: str, end_time: str) -> str:
+    return f"{start_time[:10]} — {end_time[:10]}"
+
+
+def _unique_header_index(header: Sequence[str], title: str, block_key: str) -> int:
+    indexes = [index for index, value in enumerate(header) if value.strip() == title]
+    if len(indexes) != 1:
+        raise RaidDataError(f"{block_key}: заголовок {title} должен встречаться один раз.")
+    return indexes[0]
+
+
+def _unique_header_identity_index(
+    header: Sequence[str],
+    identity: str,
+    block_key: str,
+) -> int:
+    indexes = [
+        index
+        for index, value in enumerate(header)
+        if value.strip() and column_title_identity(value) == identity
+    ]
+    if len(indexes) != 1:
+        raise RaidDataError(
+            f"{block_key}: обязательный заголовок {identity!r} должен встречаться один раз."
+        )
+    return indexes[0]
+
+
+def _cell_text(value: CellValue) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        raise RaidDataError("Managed raid block содержит bool вместо значения ячейки.")
+    return str(value)
+
+
+def _cell_at_text(row: Sequence[str], index: int) -> str:
+    return row[index] if index < len(row) else ""
 
 
 def make_raid_row_key(season_key: str, clan_tag: str, player_tag: str) -> str:
@@ -373,7 +888,10 @@ def aggregate_raid_season(
 
 
 def _season_key(value: str) -> str:
-    parsed = datetime.strptime(value, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=UTC)
+    try:
+        parsed = datetime.strptime(value, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise RaidContractError(f"Некорректный raid season time: {value}.") from exc
     return parsed.isoformat()
 
 
@@ -384,33 +902,40 @@ def _planned_row(
     clan_tag: str,
     imported: Mapping[str, Mapping[str, str]],
     saved_by_key: Mapping[str, RaidPlayerState],
-    composition: Mapping[str, Mapping[str, str]],
+    composition_by_tag: Mapping[str, PlannedPlayerState],
+    user_column_links: Mapping[str, tuple[str, ...]],
 ) -> RaidPlannedRow:
     row_key = make_raid_row_key(season_key, clan_tag, values.player_tag)
+    saved = saved_by_key.get(row_key)
+    user_values = {} if saved is None else dict(saved.user_values)
     if row_key in imported:
-        user_values = dict(imported[row_key])
-    elif row_key in saved_by_key:
-        user_values = dict(saved_by_key[row_key].user_values)
-    else:
-        user_values = {}
-    for key, value in composition.get(values.player_tag, {}).items():
-        if user_values.get(key, "").strip() == "" and value.strip() != "":
-            user_values[key] = value
+        user_values.update(imported[row_key])
+
+    composition = composition_by_tag.get(values.player_tag)
+    if composition is not None:
+        for raid_key, composition_keys in user_column_links.items():
+            if user_values.get(raid_key, "").strip() != "":
+                continue
+            for composition_key in composition_keys:
+                composition_value = composition.user_values.get(composition_key, "")
+                if composition_value.strip() != "":
+                    user_values[raid_key] = composition_value
+                    break
     return RaidPlannedRow(row_key, season_key, clan_tag, 0, values, user_values)
 
 
 def _technical_from_state(state: RaidPlayerState) -> RaidTechnicalValues:
-    data = state.technical_values
+    data = decode_raid_technical_values(encode_raid_technical_values(state.technical_values))
     return RaidTechnicalValues(
         player_tag=state.player_tag,
-        player_name=str(data["player_name"]),
-        attacks=int(data["attacks"]),
-        attack_limit=int(data["attack_limit"]),
-        bonus_attack_limit=int(data["bonus_attack_limit"]),
-        capital_resources_looted=int(data["capital_resources_looted"]),
-        weighted_damage_units=int(data["weighted_damage_units"]),
-        normal_points=Decimal(str(data["normal_points"])),
-        coefficient=Decimal(str(data["coefficient"])),
+        player_name=data["player_name"],  # type: ignore[arg-type]
+        attacks=data["attacks"],  # type: ignore[arg-type]
+        attack_limit=data["attack_limit"],  # type: ignore[arg-type]
+        bonus_attack_limit=data["bonus_attack_limit"],  # type: ignore[arg-type]
+        capital_resources_looted=data["capital_resources_looted"],  # type: ignore[arg-type]
+        weighted_damage_units=data["weighted_damage_units"],  # type: ignore[arg-type]
+        normal_points=data["normal_points"],  # type: ignore[arg-type]
+        coefficient=data["coefficient"],  # type: ignore[arg-type]
     )
 
 
