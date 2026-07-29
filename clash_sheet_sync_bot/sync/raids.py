@@ -10,16 +10,20 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
 
+from clash_sheet_sync_bot.common.time import utc_now_iso
 from clash_sheet_sync_bot.models import (
     AppConfig,
     ColumnProfile,
     RuntimeChatConfig,
+    SheetBlock,
+    TableType,
     TrackedClan,
     normalize_tag,
 )
 from clash_sheet_sync_bot.repositories.raid_state import (
     RaidDataError,
     RaidPlayerState,
+    RaidPlayerStateRepository,
     decode_raid_technical_values,
     encode_raid_technical_values,
     validate_raid_player_state,
@@ -27,16 +31,38 @@ from clash_sheet_sync_bot.repositories.raid_state import (
 from clash_sheet_sync_bot.repositories.sheet_blocks import SheetBlockRepository
 from clash_sheet_sync_bot.sheets.client import (
     CellValue,
+    SheetMetadata,
     SheetsClient,
+    SheetValues,
     range_from_start_cell,
 )
-from clash_sheet_sync_bot.sheets.column_profiles import BOT_KEY_TITLE, column_title_identity
+from clash_sheet_sync_bot.sheets.column_profiles import (
+    BOT_KEY_COLUMN_KEY,
+    BOT_KEY_TITLE,
+    column_title_identity,
+)
+from clash_sheet_sync_bot.sheets.ranges import (
+    grid_range_from_start_cell,
+    offset_cell,
+)
 from clash_sheet_sync_bot.sync.composition import PlannedPlayerState
 
 CAPITAL_PEAK_DISTRICT_ID: Final = 70_000_000
 CAPITAL_PEAK_NAME: Final = "Capital Peak"
+RAID_TABLE: Final[TableType] = "raids"
+RAID_ACTIVE_SHEET_NAME: Final = "Рейды"
 RAID_BLOCK_PREFIX: Final = "raid:"
 RAID_MESSAGE_BLOCK_PREFIX: Final = "raid_message:"
+RAID_TITLE_ROWS_COUNT: Final = 2
+RAID_BLOCK_GAP_ROWS: Final = 1
+
+WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
+BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
+DARK_HEADER_RGB: Final = {"red": 0.20, "green": 0.24, "blue": 0.29}
+HEADER_RGB: Final = {"red": 0.78, "green": 0.82, "blue": 0.86}
+LIGHT_BAND_RGB: Final = {"red": 0.96, "green": 0.96, "blue": 0.96}
+SOFT_PINK_RGB: Final = {"red": 0.98, "green": 0.86, "blue": 0.88}
+WHITE_TEXT_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
 RaidSeasonState = Literal["ongoing", "ended"]
 RaidDistrictKind = Literal["normal", "capital"]
@@ -159,6 +185,769 @@ class PreparedRaidSync:
         """Возвращает selected blocks либо message-only blocks без сезона."""
 
         return self.empty_blocks if self.selected_season is None else self.selected_season.blocks
+
+
+@dataclass(frozen=True, slots=True)
+class BuiltRaidBlock:
+    """Построенный managed block рейдового листа."""
+
+    block: SheetBlock
+    values: list[list[CellValue]]
+    rows: tuple[RaidPlannedRow, ...]
+    has_table: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RaidSheetSyncResult:
+    """Результат изолированной записи active raid sheet."""
+
+    season_key: str | None
+    season_state: RaidSeasonState | None
+    sheet_name: str
+    sheet_id: int
+    rows_count: int
+    blocks_count: int
+    warnings: tuple[str, ...] = ()
+
+
+async def apply_public_raid_sync(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    raid_player_state_repository: RaidPlayerStateRepository,
+    sheet_block_repository: SheetBlockRepository,
+    config: AppConfig,
+    prepared: PreparedRaidSync,
+) -> RaidSheetSyncResult:
+    """Записывает первый или неизменившийся active raid season.
+
+    Смена сезона намеренно не выполняется здесь: staging, архивирование и
+    ротация относятся к следующему пункту плана.
+    """
+
+    selected = prepared.selected_season
+    active_season_key = runtime_config.sheet_binding.active_raid_season
+    if active_season_key is not None and (
+        selected is None or selected.season_key != active_season_key
+    ):
+        raise RaidDataError(
+            "Смена active raid season требует ротации, которая не входит в текущий apply.",
+        )
+
+    columns = _physical_raid_columns(runtime_config.column_profiles)
+    active_sheet = await _resolve_active_raid_sheet(runtime_config, sheets_client)
+    built_blocks = build_raid_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name=active_sheet.title,
+        sheet_id=active_sheet.sheet_id,
+        prepared=prepared,
+        columns=columns,
+        attacks_target=config.raid_attacks_target,
+    )
+    registered_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id)
+    previous_blocks = _registered_blocks_for_active_raid_sheet(
+        registered_blocks=registered_blocks,
+        active_sheet=active_sheet,
+    )
+
+    await _rewrite_raid_values(
+        sheets_client=sheets_client,
+        sheet_name=active_sheet.title,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
+    await _format_raid_sheet(
+        sheets_client=sheets_client,
+        sheet_id=active_sheet.sheet_id,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+        columns=columns,
+        season_state=None if selected is None else selected.state,
+        attacks_target=config.raid_attacks_target,
+    )
+    await sheets_client.hide_dimension(
+        sheet_id=active_sheet.sheet_id,
+        dimension="COLUMNS",
+        start_index=0,
+        end_index=1,
+        hidden=True,
+    )
+
+    updated_at = utc_now_iso()
+    if selected is not None:
+        await _store_raid_player_states(
+            runtime_config=runtime_config,
+            repository=raid_player_state_repository,
+            season=selected,
+            updated_at=updated_at,
+        )
+    await _replace_raid_block_metadata(
+        runtime_config=runtime_config,
+        repository=sheet_block_repository,
+        active_sheet=active_sheet,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+        updated_at=updated_at,
+    )
+
+    return RaidSheetSyncResult(
+        season_key=None if selected is None else selected.season_key,
+        season_state=None if selected is None else selected.state,
+        sheet_name=active_sheet.title,
+        sheet_id=active_sheet.sheet_id,
+        rows_count=sum(len(block.rows) for block in built_blocks),
+        blocks_count=len(built_blocks),
+        warnings=prepared.warnings,
+    )
+
+
+async def _resolve_active_raid_sheet(
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+) -> SheetMetadata:
+    """Разрешает active raid sheet по ID, binding title и canonical title."""
+
+    metadata = await sheets_client.get_spreadsheet_metadata()
+    active_sheet_id = runtime_config.sheet_binding.active_raid_sheet_id
+    if active_sheet_id is not None:
+        matches_by_id = tuple(
+            sheet for sheet in metadata.sheets if sheet.sheet_id == active_sheet_id
+        )
+        sheet_by_id = _unique_active_raid_sheet_match(
+            matches_by_id,
+            criterion=f"sheet_id={active_sheet_id}",
+        )
+        if sheet_by_id is not None:
+            return sheet_by_id
+
+    configured_title = runtime_config.sheet_binding.active_raid_sheet_name
+    matches_by_configured_title = tuple(
+        sheet for sheet in metadata.sheets if sheet.title == configured_title
+    )
+    sheet_by_configured_title = _unique_active_raid_sheet_match(
+        matches_by_configured_title,
+        criterion=f"binding title={configured_title!r}",
+    )
+    if sheet_by_configured_title is not None:
+        return sheet_by_configured_title
+
+    matches_by_canonical_title = tuple(
+        sheet for sheet in metadata.sheets if sheet.title == RAID_ACTIVE_SHEET_NAME
+    )
+    canonical_sheet = _unique_active_raid_sheet_match(
+        matches_by_canonical_title,
+        criterion=f"canonical title={RAID_ACTIVE_SHEET_NAME!r}",
+    )
+    if canonical_sheet is not None:
+        return canonical_sheet
+    return await sheets_client.add_sheet(RAID_ACTIVE_SHEET_NAME)
+
+
+def _unique_active_raid_sheet_match(
+    matches: Sequence[SheetMetadata],
+    *,
+    criterion: str,
+) -> SheetMetadata | None:
+    """Возвращает единственный resolver match или отклоняет неоднозначность."""
+
+    if len(matches) > 1:
+        raise RaidDataError(
+            f"Неоднозначный active raid sheet для {criterion}: найдено {len(matches)} листа.",
+        )
+    return matches[0] if matches else None
+
+
+def build_raid_sheet_blocks(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheet_name: str,
+    sheet_id: int,
+    prepared: PreparedRaidSync,
+    columns: Sequence[ColumnProfile],
+    attacks_target: int,
+) -> tuple[BuiltRaidBlock, ...]:
+    """Строит отдельный managed block для каждого active clan."""
+
+    built_blocks: list[BuiltRaidBlock] = []
+    row_cursor = 1
+    selected = prepared.selected_season
+    for index, clan_block in enumerate(prepared.blocks):
+        if index > 0:
+            row_cursor += RAID_BLOCK_GAP_ROWS
+        if clan_block.message is None:
+            values = _build_raid_table_values(
+                clan_block=clan_block,
+                season=selected,
+                columns=columns,
+                attacks_target=attacks_target,
+            )
+            block_key = f"{RAID_BLOCK_PREFIX}{normalize_tag(clan_block.clan_tag)}"
+            has_table = True
+        else:
+            values = _build_raid_message_values(
+                clan_block=clan_block,
+                season=selected,
+                columns=columns,
+            )
+            block_key = f"{RAID_MESSAGE_BLOCK_PREFIX}{normalize_tag(clan_block.clan_tag)}"
+            has_table = False
+
+        block = SheetBlock(
+            chat_id=runtime_config.chat_id,
+            sheet_name=sheet_name,
+            sheet_id=sheet_id,
+            block_key=block_key,
+            start_cell=f"A{row_cursor}",
+            rows_count=len(values),
+            columns_count=len(columns),
+        )
+        built_blocks.append(
+            BuiltRaidBlock(
+                block=block,
+                values=values,
+                rows=clan_block.rows,
+                has_table=has_table,
+            ),
+        )
+        row_cursor += len(values)
+    return tuple(built_blocks)
+
+
+def _physical_raid_columns(
+    profiles: Sequence[ColumnProfile],
+) -> tuple[ColumnProfile, ...]:
+    """Возвращает service key и активные видимые raid columns."""
+
+    raid_profiles = sorted(
+        (profile for profile in profiles if profile.table_type == RAID_TABLE and profile.is_active),
+        key=lambda profile: (profile.sort_order, profile.column_key),
+    )
+    service = tuple(
+        profile
+        for profile in raid_profiles
+        if profile.kind == "service" and profile.column_key == BOT_KEY_COLUMN_KEY
+    )
+    if len(service) != 1:
+        raise RaidDataError(
+            f"Профиль рейдов должен содержать одну service-колонку {BOT_KEY_TITLE}.",
+        )
+    visible = tuple(
+        profile for profile in raid_profiles if profile.kind != "service" and profile.visible
+    )
+    return (service[0], *visible)
+
+
+def _build_raid_table_values(
+    *,
+    clan_block: RaidClanBlock,
+    season: PreparedRaidSeason | None,
+    columns: Sequence[ColumnProfile],
+    attacks_target: int,
+) -> list[list[CellValue]]:
+    """Строит values табличного raid block."""
+
+    values: list[list[CellValue]] = [
+        _raid_title_row(clan_block, season, len(columns)),
+        [column.title for column in columns],
+    ]
+    values.extend(
+        _raid_row_to_values(row=row, columns=columns, attacks_target=attacks_target)
+        for row in clan_block.rows
+    )
+    if len(values) == RAID_TITLE_ROWS_COUNT:
+        values.append(["" for _ in columns])
+    return values
+
+
+def _build_raid_message_values(
+    *,
+    clan_block: RaidClanBlock,
+    season: PreparedRaidSeason | None,
+    columns: Sequence[ColumnProfile],
+) -> list[list[CellValue]]:
+    """Строит message-only raid block."""
+
+    return [
+        _raid_title_row(clan_block, season, len(columns)),
+        _visible_text_row(clan_block.message or "", len(columns)),
+    ]
+
+
+def _raid_title_row(
+    clan_block: RaidClanBlock,
+    season: PreparedRaidSeason | None,
+    width: int,
+) -> list[CellValue]:
+    """Строит верхнюю строку блока с кланом, периодом и состоянием."""
+
+    title = f"{clan_block.clan_name} | {normalize_tag(clan_block.clan_tag)}"
+    if season is not None:
+        period = f"{season.start_time[:10]} — {season.end_time[:10]}"
+        status = "проводится" if season.state == "ongoing" else "завершён"
+        title = f"{title} | {period} | {status}"
+    return _visible_text_row(title, width)
+
+
+def _visible_text_row(value: str, width: int) -> list[CellValue]:
+    """Помещает видимый текст после скрытой service-колонки."""
+
+    if width <= 1:
+        return [value]
+    return ["", value, *["" for _ in range(width - 2)]]
+
+
+def _raid_row_to_values(
+    *,
+    row: RaidPlannedRow,
+    columns: Sequence[ColumnProfile],
+    attacks_target: int,
+) -> list[CellValue]:
+    """Преобразует planned row в типизированные Sheets values."""
+
+    technical = row.technical_values
+    values: list[CellValue] = []
+    for column in columns:
+        if column.kind == "service" and column.column_key == BOT_KEY_COLUMN_KEY:
+            values.append(row.row_key)
+        elif column.kind == "user":
+            values.append(row.user_values.get(column.column_key, ""))
+        elif column.column_key == "number":
+            values.append(row.rank)
+        elif column.column_key == "player_tag":
+            values.append(normalize_tag(technical.player_tag))
+        elif column.column_key == "player_name":
+            values.append(technical.player_name)
+        elif column.column_key == "attacks":
+            values.append(f"{technical.attacks}/{attacks_target}")
+        elif column.column_key == "normal_points":
+            values.append(float(technical.normal_points))
+        elif column.column_key == "coefficient":
+            values.append(float(technical.coefficient))
+        elif column.column_key == "capital_resources_looted":
+            values.append(technical.capital_resources_looted)
+        else:
+            values.append("")
+    return values
+
+
+def _registered_blocks_for_active_raid_sheet(
+    *,
+    registered_blocks: Sequence[SheetBlock],
+    active_sheet: SheetMetadata,
+) -> tuple[SheetBlock, ...]:
+    """Выбирает только raid blocks разрешённого физического active-листа."""
+
+    return tuple(
+        block
+        for block in registered_blocks
+        if (
+            block.block_key.startswith(RAID_BLOCK_PREFIX)
+            or block.block_key.startswith(RAID_MESSAGE_BLOCK_PREFIX)
+        )
+        and block.sheet_id == active_sheet.sheet_id
+    )
+
+
+async def _rewrite_raid_values(
+    *,
+    sheets_client: SheetsClient,
+    sheet_name: str,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltRaidBlock],
+) -> None:
+    """Очищает прежние owned ranges и пишет только новые managed ranges."""
+
+    updates: list[SheetValues] = []
+    for block in previous_blocks:
+        updates.append(
+            SheetValues(
+                sheet_name=sheet_name,
+                range_a1=range_from_start_cell(
+                    start_cell=block.start_cell,
+                    rows_count=block.rows_count,
+                    columns_count=block.columns_count,
+                ),
+                values=[["" for _ in range(block.columns_count)] for _ in range(block.rows_count)],
+            ),
+        )
+    updates.extend(
+        SheetValues(
+            sheet_name=sheet_name,
+            range_a1=range_from_start_cell(
+                start_cell=built.block.start_cell,
+                rows_count=built.block.rows_count,
+                columns_count=built.block.columns_count,
+            ),
+            values=built.values,
+        )
+        for built in built_blocks
+    )
+    if updates:
+        await sheets_client.batch_update_values(updates)
+
+
+async def _format_raid_sheet(
+    *,
+    sheets_client: SheetsClient,
+    sheet_id: int,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltRaidBlock],
+    columns: Sequence[ColumnProfile],
+    season_state: RaidSeasonState | None,
+    attacks_target: int,
+) -> None:
+    """Форматирует только прежние и новые managed raid ranges."""
+
+    requests = _build_raid_format_requests(
+        sheet_id=sheet_id,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+        columns=columns,
+        season_state=season_state,
+        attacks_target=attacks_target,
+    )
+    if requests:
+        await sheets_client.batch_update_spreadsheet(requests)
+
+
+def _build_raid_format_requests(
+    *,
+    sheet_id: int,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltRaidBlock],
+    columns: Sequence[ColumnProfile],
+    season_state: RaidSeasonState | None,
+    attacks_target: int,
+) -> list[JsonObject]:
+    """Строит formatting requests без width и horizontal alignment."""
+
+    requests: list[JsonObject] = []
+    reset_fields = (
+        "userEnteredFormat(backgroundColorStyle,borders,textFormat,"
+        "verticalAlignment,wrapStrategy,numberFormat)"
+    )
+    for block in previous_blocks:
+        requests.append(
+            _repeat_raid_cell_request(
+                grid_range_from_start_cell(
+                    sheet_id=sheet_id,
+                    start_cell=block.start_cell,
+                    rows_count=block.rows_count,
+                    columns_count=block.columns_count,
+                    error_cls=RaidDataError,
+                ),
+                {"userEnteredFormat": {}},
+                reset_fields,
+            ),
+        )
+
+    number_column_indexes = tuple(
+        index
+        for index, column in enumerate(columns)
+        if column.column_key in {"normal_points", "coefficient"}
+    )
+    attacks_column_index = next(
+        (index for index, column in enumerate(columns) if column.column_key == "attacks"),
+        None,
+    )
+    for built in built_blocks:
+        block = built.block
+        block_range = grid_range_from_start_cell(
+            sheet_id=sheet_id,
+            start_cell=block.start_cell,
+            rows_count=block.rows_count,
+            columns_count=block.columns_count,
+            error_cls=RaidDataError,
+        )
+        requests.append(
+            _repeat_raid_cell_request(
+                block_range,
+                _raid_base_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        requests.append(
+            _repeat_raid_cell_request(
+                _raid_block_row_range(sheet_id, block, row_offset=0),
+                _raid_title_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        if not built.has_table:
+            requests.append(
+                _repeat_raid_cell_request(
+                    _raid_block_row_range(sheet_id, block, row_offset=1),
+                    _raid_message_cell_format(),
+                    "userEnteredFormat(backgroundColorStyle,textFormat,"
+                    "verticalAlignment,wrapStrategy)",
+                ),
+            )
+            continue
+
+        requests.append(
+            _repeat_raid_cell_request(
+                _raid_block_row_range(sheet_id, block, row_offset=1),
+                _raid_header_cell_format(),
+                "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)",
+            ),
+        )
+        data_rows_count = max(block.rows_count - RAID_TITLE_ROWS_COUNT, 0)
+        for data_row_offset in range(data_rows_count):
+            if data_row_offset % 2 != 0:
+                requests.append(
+                    _repeat_raid_cell_request(
+                        _raid_block_row_range(
+                            sheet_id,
+                            block,
+                            row_offset=RAID_TITLE_ROWS_COUNT + data_row_offset,
+                        ),
+                        {
+                            "userEnteredFormat": {
+                                "backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB},
+                            },
+                        },
+                        "userEnteredFormat.backgroundColorStyle",
+                    ),
+                )
+            for column_index in number_column_indexes:
+                requests.append(
+                    _repeat_raid_cell_request(
+                        _raid_block_cell_range(
+                            sheet_id,
+                            block,
+                            row_offset=RAID_TITLE_ROWS_COUNT + data_row_offset,
+                            column_offset=column_index,
+                        ),
+                        {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": "NUMBER",
+                                    "pattern": "0.00",
+                                },
+                            },
+                        },
+                        "userEnteredFormat.numberFormat",
+                    ),
+                )
+            if (
+                season_state == "ended"
+                and attacks_column_index is not None
+                and data_row_offset < len(built.rows)
+                and built.rows[data_row_offset].technical_values.attacks < attacks_target
+            ):
+                requests.append(
+                    _repeat_raid_cell_request(
+                        _raid_block_cell_range(
+                            sheet_id,
+                            block,
+                            row_offset=RAID_TITLE_ROWS_COUNT + data_row_offset,
+                            column_offset=attacks_column_index,
+                        ),
+                        {
+                            "userEnteredFormat": {
+                                "backgroundColorStyle": {"rgbColor": SOFT_PINK_RGB},
+                            },
+                        },
+                        "userEnteredFormat.backgroundColorStyle",
+                    ),
+                )
+    return requests
+
+
+def _raid_block_row_range(
+    sheet_id: int,
+    block: SheetBlock,
+    *,
+    row_offset: int,
+) -> JsonObject:
+    """Возвращает GridRange одной строки managed block."""
+
+    return grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=offset_cell(
+            block.start_cell,
+            row_offset=row_offset,
+            column_offset=0,
+            error_cls=RaidDataError,
+        ),
+        rows_count=1,
+        columns_count=block.columns_count,
+        error_cls=RaidDataError,
+    )
+
+
+def _raid_block_cell_range(
+    sheet_id: int,
+    block: SheetBlock,
+    *,
+    row_offset: int,
+    column_offset: int,
+) -> JsonObject:
+    """Возвращает GridRange одной ячейки managed block."""
+
+    return grid_range_from_start_cell(
+        sheet_id=sheet_id,
+        start_cell=offset_cell(
+            block.start_cell,
+            row_offset=row_offset,
+            column_offset=column_offset,
+            error_cls=RaidDataError,
+        ),
+        rows_count=1,
+        columns_count=1,
+        error_cls=RaidDataError,
+    )
+
+
+def _repeat_raid_cell_request(
+    grid_range: JsonObject,
+    cell: JsonObject,
+    fields: str,
+) -> JsonObject:
+    """Строит repeatCell request."""
+
+    return {
+        "repeatCell": {
+            "range": grid_range,
+            "cell": cell,
+            "fields": fields,
+        },
+    }
+
+
+def _raid_base_cell_format() -> JsonObject:
+    """Возвращает нейтральный базовый формат managed range."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": WHITE_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _raid_title_cell_format() -> JsonObject:
+    """Возвращает нейтральный формат clan/season title."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": DARK_HEADER_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": WHITE_TEXT_RGB},
+                "bold": True,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _raid_header_cell_format() -> JsonObject:
+    """Возвращает нейтральный формат заголовков колонок."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": HEADER_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": True,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+def _raid_message_cell_format() -> JsonObject:
+    """Возвращает нейтральный формат message row."""
+
+    return {
+        "userEnteredFormat": {
+            "backgroundColorStyle": {"rgbColor": LIGHT_BAND_RGB},
+            "textFormat": {
+                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "bold": False,
+            },
+            "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+        },
+    }
+
+
+async def _store_raid_player_states(
+    *,
+    runtime_config: RuntimeChatConfig,
+    repository: RaidPlayerStateRepository,
+    season: PreparedRaidSeason,
+    updated_at: str,
+) -> None:
+    """Сохраняет отображённые raid rows как SQLite source of truth."""
+
+    for clan_block in season.blocks:
+        for row in clan_block.rows:
+            technical = row.technical_values
+            await repository.upsert(
+                RaidPlayerState(
+                    chat_id=runtime_config.chat_id,
+                    season_key=season.season_key,
+                    season_start_at=season.start_time,
+                    season_end_at=season.end_time,
+                    season_state=season.state,
+                    row_key=row.row_key,
+                    clan_tag=normalize_tag(row.clan_tag),
+                    player_tag=normalize_tag(technical.player_tag),
+                    technical_values={
+                        "player_name": technical.player_name,
+                        "attacks": technical.attacks,
+                        "attack_limit": technical.attack_limit,
+                        "bonus_attack_limit": technical.bonus_attack_limit,
+                        "capital_resources_looted": technical.capital_resources_looted,
+                        "weighted_damage_units": technical.weighted_damage_units,
+                        "normal_points": technical.normal_points,
+                        "coefficient": technical.coefficient,
+                    },
+                    user_values=dict(row.user_values),
+                    row_hash=None,
+                    updated_at=updated_at,
+                ),
+            )
+
+
+async def _replace_raid_block_metadata(
+    *,
+    runtime_config: RuntimeChatConfig,
+    repository: SheetBlockRepository,
+    active_sheet: SheetMetadata,
+    previous_blocks: Sequence[SheetBlock],
+    built_blocks: Sequence[BuiltRaidBlock],
+    updated_at: str,
+) -> None:
+    """Заменяет registry текущего active raid sheet без ротации."""
+
+    prefixes = (RAID_BLOCK_PREFIX, RAID_MESSAGE_BLOCK_PREFIX)
+    stale_sheet_names = sorted(
+        {block.sheet_name for block in previous_blocks if block.sheet_name != active_sheet.title},
+    )
+    for stale_sheet_name in stale_sheet_names:
+        await repository.replace_blocks_by_prefixes(
+            chat_id=runtime_config.chat_id,
+            sheet_name=stale_sheet_name,
+            block_key_prefixes=prefixes,
+            blocks=(),
+            updated_at=updated_at,
+        )
+    await repository.replace_blocks_by_prefixes(
+        chat_id=runtime_config.chat_id,
+        sheet_name=active_sheet.title,
+        block_key_prefixes=prefixes,
+        blocks=tuple(built.block for built in built_blocks),
+        updated_at=updated_at,
+    )
 
 
 async def prepare_public_raid_sync(

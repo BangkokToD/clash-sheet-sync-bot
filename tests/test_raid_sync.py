@@ -14,14 +14,25 @@ import pytest
 
 from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError, ClashClient
 from clash_sheet_sync_bot.repositories import RaidDataError, RaidPlayerState
+from clash_sheet_sync_bot.sheets.client import SheetMetadata
 from clash_sheet_sync_bot.sheets.column_profiles import default_columns
 from clash_sheet_sync_bot.sync.composition import PlannedPlayerState
 from clash_sheet_sync_bot.sync.raids import (
     CAPITAL_PEAK_DISTRICT_ID,
+    RAID_ACTIVE_SHEET_NAME,
+    RAID_BLOCK_PREFIX,
+    RAID_MESSAGE_BLOCK_PREFIX,
+    SOFT_PINK_RGB,
+    PreparedRaidSeason,
+    PreparedRaidSync,
+    RaidClanBlock,
     RaidContractError,
+    RaidPlannedRow,
     RaidRetryableDataError,
+    RaidSheetSyncResult,
     RaidTechnicalValues,
     aggregate_raid_season,
+    apply_public_raid_sync,
     classify_raid_district,
     parse_raid_season,
     prepare_public_raid_sync,
@@ -34,7 +45,11 @@ from tests.fakes.factories import (
     make_sheet_block,
     make_tracked_clan,
 )
-from tests.fakes.sheets import FakeSheetsClient, RecordingSheetBlockRepository
+from tests.fakes.sheets import (
+    FakeSheetsClient,
+    RecordingRaidPlayerStateRepository,
+    RecordingSheetBlockRepository,
+)
 
 JsonObject = dict[str, Any]
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -688,11 +703,13 @@ def _runtime(
     *,
     clans: tuple[Any, ...] | None = None,
     active_raid_season: str | None = None,
+    active_raid_sheet_name: str = "Рейды",
+    active_raid_sheet_id: int | None = 444,
     profiles: tuple[Any, ...] | None = None,
 ) -> Any:
     binding = make_sheet_binding(
-        active_raid_sheet_name="Рейды",
-        active_raid_sheet_id=444,
+        active_raid_sheet_name=active_raid_sheet_name,
+        active_raid_sheet_id=active_raid_sheet_id,
         active_raid_season=active_raid_season,
     )
     return make_runtime_config(
@@ -1425,3 +1442,1058 @@ async def test_prepare_warns_for_each_clan_using_partial_old_active_sqlite_fallb
     assert fallback_warnings == [
         f"{old_key}: старый active raid season восстановлен из SQLite для кланов #TWO."
     ]
+
+
+RAID_SEASON_KEY = "2026-07-24T07:00:00+00:00"
+RAID_SEASON_END = "2026-07-27T07:00:00+00:00"
+
+
+def _planned_raid_row(
+    *,
+    clan_tag: str = "#AAA111",
+    player_tag: str = "#PLAYER",
+    player_name: str = "Player",
+    rank: int = 1,
+    attacks: int = 5,
+    normal_points: Decimal = Decimal("2.50"),
+    coefficient: Decimal = Decimal("0.42"),
+    user_values: dict[str, str] | None = None,
+) -> RaidPlannedRow:
+    """Создаёт готовую raid row для apply-контрактов."""
+
+    return RaidPlannedRow(
+        row_key=f"raid_row:{RAID_SEASON_KEY}|{clan_tag}|{player_tag}",
+        season_key=RAID_SEASON_KEY,
+        clan_tag=clan_tag,
+        rank=rank,
+        technical_values=RaidTechnicalValues(
+            player_tag=player_tag,
+            player_name=player_name,
+            attacks=attacks,
+            attack_limit=5,
+            bonus_attack_limit=1,
+            capital_resources_looted=1234,
+            weighted_damage_units=250,
+            normal_points=normal_points,
+            coefficient=coefficient,
+        ),
+        user_values=user_values or {},
+    )
+
+
+def _prepared_raid_apply(
+    *,
+    state: str = "ended",
+    blocks: tuple[RaidClanBlock, ...] | None = None,
+) -> PreparedRaidSync:
+    """Создаёт результат preparation для изолированного apply."""
+
+    return PreparedRaidSync(
+        selected_season=PreparedRaidSeason(
+            season_key=RAID_SEASON_KEY,
+            start_time=RAID_SEASON_KEY,
+            end_time=RAID_SEASON_END,
+            state=state,  # type: ignore[arg-type]
+            blocks=blocks
+            or (
+                RaidClanBlock(
+                    clan_tag="#AAA111",
+                    clan_name="Alpha",
+                    rows=(_planned_raid_row(),),
+                ),
+            ),
+        ),
+        previous_active_season=None,
+    )
+
+
+async def _apply_raid(
+    *,
+    runtime: Any,
+    prepared: PreparedRaidSync,
+    sheets: FakeSheetsClient | None = None,
+    blocks: RecordingSheetBlockRepository | None = None,
+    states: RecordingRaidPlayerStateRepository | None = None,
+    config: Any | None = None,
+) -> tuple[
+    RaidSheetSyncResult,
+    FakeSheetsClient,
+    RecordingSheetBlockRepository,
+    RecordingRaidPlayerStateRepository,
+]:
+    """Запускает raid apply через полностью локальные fakes."""
+
+    sheets = sheets or FakeSheetsClient()
+    blocks = blocks or RecordingSheetBlockRepository()
+    states = states or RecordingRaidPlayerStateRepository()
+    result = await apply_public_raid_sync(
+        runtime_config=runtime,
+        sheets_client=sheets,  # type: ignore[arg-type]
+        raid_player_state_repository=states,  # type: ignore[arg-type]
+        sheet_block_repository=blocks,  # type: ignore[arg-type]
+        config=config or make_app_config(),
+        prepared=prepared,
+    )
+    return result, sheets, blocks, states
+
+
+def _pink_ranges(
+    sheets: FakeSheetsClient,
+    batch_index: int | None = None,
+) -> list[dict[str, Any]]:
+    """Извлекает ranges статусной розовой заливки."""
+
+    batches = (
+        sheets.spreadsheet_requests
+        if batch_index is None
+        else [sheets.spreadsheet_requests[batch_index]]
+    )
+    return [
+        request["repeatCell"]["range"]
+        for request_batch in batches
+        for request in request_batch
+        if request.get("repeatCell", {})
+        .get("cell", {})
+        .get("userEnteredFormat", {})
+        .get("backgroundColorStyle", {})
+        .get("rgbColor")
+        == SOFT_PINK_RGB
+    ]
+
+
+def _format_reset_ranges(
+    sheets: FakeSheetsClient,
+    *,
+    batch_index: int,
+) -> list[dict[str, Any]]:
+    """Извлекает точные ranges сброса старого managed formatting."""
+
+    return [
+        request["repeatCell"]["range"]
+        for request in sheets.spreadsheet_requests[batch_index]
+        if request.get("repeatCell", {}).get("cell") == {"userEnteredFormat": {}}
+        and request["repeatCell"]["fields"]
+        == (
+            "userEnteredFormat(backgroundColorStyle,borders,textFormat,"
+            "verticalAlignment,wrapStrategy,numberFormat)"
+        )
+    ]
+
+
+def _number_format_requests(
+    sheets: FakeSheetsClient,
+    *,
+    batch_index: int,
+) -> list[dict[str, Any]]:
+    """Извлекает реальные repeatCell requests числового формата."""
+
+    return [
+        request["repeatCell"]
+        for request in sheets.spreadsheet_requests[batch_index]
+        if request.get("repeatCell", {}).get("fields") == "userEnteredFormat.numberFormat"
+    ]
+
+
+def _grid_range(
+    *,
+    sheet_id: int,
+    start_row: int,
+    end_row: int,
+    start_column: int,
+    end_column: int,
+) -> dict[str, int]:
+    """Строит ожидаемый zero-based GridRange."""
+
+    return {
+        "sheetId": sheet_id,
+        "startRowIndex": start_row,
+        "endRowIndex": end_row,
+        "startColumnIndex": start_column,
+        "endColumnIndex": end_column,
+    }
+
+
+def _assert_no_rotation_operations(sheets: FakeSheetsClient) -> None:
+    """Проверяет отсутствие операций будущего commit 5."""
+
+    serialized_requests = json.dumps(sheets.spreadsheet_requests, ensure_ascii=False)
+    assert sheets.added_sheets == []
+    assert "duplicateSheet" not in serialized_requests
+    assert "deleteSheet" not in serialized_requests
+    assert "updateSheetProperties" not in serialized_requests
+
+
+async def _apply_raid_twice(
+    *,
+    first: PreparedRaidSync,
+    second: PreparedRaidSync,
+) -> tuple[
+    FakeSheetsClient,
+    RecordingSheetBlockRepository,
+    RecordingRaidPlayerStateRepository,
+]:
+    """Последовательно применяет два состояния одного raid season."""
+
+    runtime = _runtime(active_raid_season=RAID_SEASON_KEY)
+    sheets = FakeSheetsClient()
+    blocks = RecordingSheetBlockRepository()
+    states = RecordingRaidPlayerStateRepository()
+    await _apply_raid(
+        runtime=runtime,
+        prepared=first,
+        sheets=sheets,
+        blocks=blocks,
+        states=states,
+    )
+    blocks.blocks = blocks.replace_calls[-1]["blocks"]
+    await _apply_raid(
+        runtime=runtime,
+        prepared=second,
+        sheets=sheets,
+        blocks=blocks,
+        states=states,
+    )
+    return sheets, blocks, states
+
+
+@pytest.mark.asyncio
+async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_state() -> None:
+    """Покрывает первый лист, матрицу, numeric values, format и runtime state."""
+
+    first = _planned_raid_row(player_tag="#P1", player_name="Five", attacks=5)
+    complete = _planned_raid_row(
+        player_tag="#P2",
+        player_name="Six",
+        rank=2,
+        attacks=6,
+        normal_points=Decimal("3.75"),
+        coefficient=Decimal("0.625"),
+    )
+    prepared = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(first, complete),
+            ),
+        ),
+    )
+    sheets = FakeSheetsClient(metadata_sheets=())
+    runtime = _runtime(
+        active_raid_season=None,
+        active_raid_sheet_name="Старое имя",
+        active_raid_sheet_id=None,
+        profiles=_raid_profiles(include_user=True),
+    )
+
+    result, sheets, block_repository, state_repository = await _apply_raid(
+        runtime=runtime,
+        prepared=prepared,
+        sheets=sheets,
+    )
+
+    assert result.sheet_name == RAID_ACTIVE_SHEET_NAME
+    assert result.season_key == RAID_SEASON_KEY
+    assert sheets.added_sheets == [RAID_ACTIVE_SHEET_NAME]
+    assert len(sheets.batch_value_updates) == 1
+    updates = sheets.batch_value_updates[0]
+    assert len(updates) == 1
+    assert updates[0].range_a1 == "A1:I4"
+    assert updates[0].values[1] == [
+        "__bot_key",
+        "№",
+        "Тег",
+        "Ник",
+        "Атаки",
+        "Нормо-очки",
+        "Коэффициент",
+        "Золото столицы",
+        " ЗАМЕТКА ",
+    ]
+    first_values = updates[0].values[2]
+    complete_values = updates[0].values[3]
+    assert first_values == [
+        first.row_key,
+        1,
+        "#P1",
+        "Five",
+        "5/6",
+        2.5,
+        0.42,
+        1234,
+        "",
+    ]
+    assert complete_values[1:8] == [2, "#P2", "Six", "6/6", 3.75, 0.625, 1234]
+    assert isinstance(first_values[1], int)
+    assert isinstance(first_values[5], float)
+    assert isinstance(first_values[6], float)
+    assert isinstance(first_values[7], int)
+
+    expected_number_format = {
+        "userEnteredFormat": {
+            "numberFormat": {
+                "type": "NUMBER",
+                "pattern": "0.00",
+            },
+        },
+    }
+    assert _number_format_requests(sheets, batch_index=0) == [
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=2,
+                end_row=3,
+                start_column=5,
+                end_column=6,
+            ),
+            "cell": expected_number_format,
+            "fields": "userEnteredFormat.numberFormat",
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=2,
+                end_row=3,
+                start_column=6,
+                end_column=7,
+            ),
+            "cell": expected_number_format,
+            "fields": "userEnteredFormat.numberFormat",
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=3,
+                end_row=4,
+                start_column=5,
+                end_column=6,
+            ),
+            "cell": expected_number_format,
+            "fields": "userEnteredFormat.numberFormat",
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=3,
+                end_row=4,
+                start_column=6,
+                end_column=7,
+            ),
+            "cell": expected_number_format,
+            "fields": "userEnteredFormat.numberFormat",
+        },
+    ]
+    serialized_requests = json.dumps(sheets.spreadsheet_requests, ensure_ascii=False)
+    assert "horizontalAlignment" not in serialized_requests
+    assert "pixelSize" not in serialized_requests
+    assert "deleteSheet" not in serialized_requests
+    assert "updateSheetProperties" not in serialized_requests
+    assert _pink_ranges(sheets) == [
+        {
+            "sheetId": result.sheet_id,
+            "startRowIndex": 2,
+            "endRowIndex": 3,
+            "startColumnIndex": 4,
+            "endColumnIndex": 5,
+        },
+    ]
+    assert sheets.hidden_dimensions == [
+        {
+            "sheet_id": result.sheet_id,
+            "dimension": "COLUMNS",
+            "start_index": 0,
+            "end_index": 1,
+            "hidden": True,
+        },
+    ]
+    assert [state.row_key for state in state_repository.upserted_states] == [
+        first.row_key,
+        complete.row_key,
+    ]
+    assert {state.season_state for state in state_repository.upserted_states} == {"ended"}
+    assert len(block_repository.replace_calls) == 1
+    assert block_repository.replace_calls[0]["blocks"] == (
+        make_sheet_block(
+            sheet_name=RAID_ACTIVE_SHEET_NAME,
+            sheet_id=result.sheet_id,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=4,
+            columns_count=9,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_ongoing_raid_uses_configured_target_without_status_fill() -> None:
+    """Покрывает target из AppConfig и отсутствие ongoing status fill."""
+
+    prepared = _prepared_raid_apply(
+        state="ongoing",
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(_planned_raid_row(attacks=5),),
+            ),
+        ),
+    )
+
+    _result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=prepared,
+        config=make_app_config(raid_attacks_target=8),
+    )
+
+    assert sheets.batch_value_updates[0][-1].values[2][4] == "5/8"
+    assert _pink_ranges(sheets) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding_title", "binding_id", "metadata_sheets", "expected_title", "expected_id"),
+    (
+        (
+            "Старое имя",
+            777,
+            (
+                SheetMetadata(sheet_id=444, title="Рейды", index=0),
+                SheetMetadata(sheet_id=777, title="Переименованный active", index=1),
+            ),
+            "Переименованный active",
+            777,
+        ),
+        (
+            "Мои рейды",
+            999,
+            (SheetMetadata(sheet_id=555, title="Мои рейды", index=0),),
+            "Мои рейды",
+            555,
+        ),
+        (
+            "Старое имя",
+            999,
+            (SheetMetadata(sheet_id=444, title="Рейды", index=0),),
+            "Рейды",
+            444,
+        ),
+    ),
+)
+async def test_apply_resolves_active_raid_sheet_by_id_binding_title_then_canonical(
+    binding_title: str,
+    binding_id: int,
+    metadata_sheets: tuple[SheetMetadata, ...],
+    expected_title: str,
+    expected_id: int,
+) -> None:
+    """Проверяет resolver active-листа без staging/rotation."""
+
+    sheets = FakeSheetsClient(metadata_sheets=metadata_sheets)
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(
+            active_raid_season=RAID_SEASON_KEY,
+            active_raid_sheet_name=binding_title,
+            active_raid_sheet_id=binding_id,
+        ),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+    )
+
+    assert (result.sheet_name, result.sheet_id) == (expected_title, expected_id)
+    assert sheets.added_sheets == []
+    assert {update.sheet_name for update in sheets.batch_value_updates[0]} == {expected_title}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding_title", "binding_id", "metadata_sheets"),
+    (
+        (
+            "Настроенные рейды",
+            444,
+            (
+                SheetMetadata(sheet_id=444, title="Первый", index=0),
+                SheetMetadata(sheet_id=444, title="Второй", index=1),
+            ),
+        ),
+        (
+            "Настроенные рейды",
+            999,
+            (
+                SheetMetadata(sheet_id=444, title="Настроенные рейды", index=0),
+                SheetMetadata(sheet_id=555, title="Настроенные рейды", index=1),
+            ),
+        ),
+        (
+            "Отсутствующие рейды",
+            999,
+            (
+                SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+                SheetMetadata(sheet_id=555, title=RAID_ACTIVE_SHEET_NAME, index=1),
+            ),
+        ),
+    ),
+    ids=("duplicate-sheet-id", "duplicate-binding-title", "duplicate-canonical-title"),
+)
+async def test_apply_rejects_ambiguous_active_raid_sheet_without_writes(
+    binding_title: str,
+    binding_id: int,
+    metadata_sheets: tuple[SheetMetadata, ...],
+) -> None:
+    """Проверяет остановку ambiguous resolver до любого write/state."""
+
+    sheets = FakeSheetsClient(metadata_sheets=metadata_sheets)
+    blocks = RecordingSheetBlockRepository()
+    states = RecordingRaidPlayerStateRepository()
+
+    with pytest.raises(RaidDataError, match=r"(?i)неоднознач"):
+        await _apply_raid(
+            runtime=_runtime(
+                active_raid_season=RAID_SEASON_KEY,
+                active_raid_sheet_name=binding_title,
+                active_raid_sheet_id=binding_id,
+            ),
+            prepared=_prepared_raid_apply(),
+            sheets=sheets,
+            blocks=blocks,
+            states=states,
+        )
+
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+    assert sheets.added_sheets == []
+    assert states.upserted_states == []
+    assert blocks.replace_calls == []
+    assert states.commit_calls == 0
+    assert blocks.commit_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_writes_separate_clan_and_message_blocks_and_clears_only_owned_range() -> None:
+    """Покрывает multi-clan blocks, message-block и точечную очистку."""
+
+    prepared = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(_planned_raid_row(),),
+            ),
+            RaidClanBlock(
+                clan_tag="#BBB222",
+                clan_name="Beta",
+                message="Нет данных за выбранный рейдовый уикенд",
+            ),
+        ),
+    )
+    old_owned = make_sheet_block(
+        sheet_name="Рейды",
+        sheet_id=444,
+        block_key=f"{RAID_BLOCK_PREFIX}#OLD",
+        start_cell="K20",
+        rows_count=4,
+        columns_count=3,
+    )
+    blocks = RecordingSheetBlockRepository(
+        blocks=(
+            old_owned,
+            make_sheet_block(
+                sheet_name="Рейды",
+                sheet_id=444,
+                block_key="cwl:#USER",
+                start_cell="A40",
+            ),
+            make_sheet_block(
+                sheet_name="Рейды",
+                sheet_id=999,
+                block_key=f"{RAID_BLOCK_PREFIX}#OTHER",
+                start_cell="A50",
+            ),
+            make_sheet_block(
+                sheet_name="Рейды",
+                sheet_id=None,
+                block_key=f"{RAID_BLOCK_PREFIX}#TITLE_ONLY",
+                start_cell="A60",
+            ),
+        ),
+    )
+
+    _result, sheets, blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=prepared,
+        blocks=blocks,
+    )
+
+    updates = sheets.batch_value_updates[0]
+    assert [(update.range_a1, update.values) for update in updates[:1]] == [
+        ("K20:M23", [["", "", ""] for _ in range(4)])
+    ]
+    assert [update.range_a1 for update in updates[1:]] == ["A1:H3", "A5:H6"]
+    assert "2026-07-24" in updates[1].values[0][1]
+    assert "2026-07-27" in updates[1].values[0][1]
+    assert updates[2].values[1][1] == "Нет данных за выбранный рейдовый уикенд"
+    replacement = blocks.replace_calls[-1]
+    assert replacement["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_MESSAGE_BLOCK_PREFIX}#BBB222",
+            start_cell="A5",
+            rows_count=2,
+            columns_count=8,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_rewrites_same_raid_season_idempotently_without_rotation_operations() -> None:
+    """Покрывает повторную запись active season и exact previous range clear."""
+
+    runtime = _runtime(active_raid_season=RAID_SEASON_KEY)
+    prepared = _prepared_raid_apply()
+    blocks = RecordingSheetBlockRepository()
+    first_result, sheets, blocks, _states = await _apply_raid(
+        runtime=runtime,
+        prepared=prepared,
+        blocks=blocks,
+    )
+    blocks.blocks = blocks.replace_calls[-1]["blocks"]
+
+    second_result, sheets, blocks, _states = await _apply_raid(
+        runtime=runtime,
+        prepared=prepared,
+        sheets=sheets,
+        blocks=blocks,
+    )
+
+    assert second_result == first_result
+    assert sheets.added_sheets == []
+    second_updates = sheets.batch_value_updates[1]
+    assert [update.range_a1 for update in second_updates] == ["A1:H3", "A1:H3"]
+    assert second_updates[0].values == [["" for _ in range(8)] for _ in range(3)]
+    serialized_requests = json.dumps(sheets.spreadsheet_requests, ensure_ascii=False)
+    assert "duplicateSheet" not in serialized_requests
+    assert "deleteSheet" not in serialized_requests
+    assert "updateSheetProperties" not in serialized_requests
+
+
+@pytest.mark.asyncio
+async def test_apply_clears_attack_fill_when_player_reaches_target() -> None:
+    """Проверяет ended 5/6 → 6/6 с полным сбросом прежней заливки."""
+
+    first = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(_planned_raid_row(attacks=5),),
+            ),
+        ),
+    )
+    second_row = _planned_raid_row(attacks=6)
+    second = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(second_row,),
+            ),
+        ),
+    )
+
+    sheets, blocks, _states = await _apply_raid_twice(first=first, second=second)
+
+    second_updates = sheets.batch_value_updates[1]
+    assert [update.range_a1 for update in second_updates] == ["A1:H3", "A1:H3"]
+    assert second_updates[0].values == [["" for _ in range(8)] for _ in range(3)]
+    assert second_updates[1].values[2][4] == "6/6"
+    assert _format_reset_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=0,
+            end_row=3,
+            start_column=0,
+            end_column=8,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=0) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=2,
+            end_row=3,
+            start_column=4,
+            end_column=5,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=1) == []
+    assert blocks.replace_calls[-1]["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+    )
+    _assert_no_rotation_operations(sheets)
+
+
+@pytest.mark.asyncio
+async def test_apply_reassigns_attack_fill_after_row_reorder() -> None:
+    """Проверяет, что status fill следует за игроком после перестановки строк."""
+
+    incomplete_first = _planned_raid_row(
+        player_tag="#P1",
+        player_name="Incomplete",
+        rank=1,
+        attacks=5,
+    )
+    complete_second = _planned_raid_row(
+        player_tag="#P2",
+        player_name="Complete",
+        rank=2,
+        attacks=6,
+    )
+    complete_first = replace(complete_second, rank=1)
+    incomplete_second = replace(incomplete_first, rank=2)
+    first = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(incomplete_first, complete_second),
+            ),
+        ),
+    )
+    second = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(complete_first, incomplete_second),
+            ),
+        ),
+    )
+
+    sheets, blocks, _states = await _apply_raid_twice(first=first, second=second)
+
+    second_updates = sheets.batch_value_updates[1]
+    assert [update.range_a1 for update in second_updates] == ["A1:H4", "A1:H4"]
+    assert second_updates[0].values == [["" for _ in range(8)] for _ in range(4)]
+    assert [row[2] for row in second_updates[1].values[2:]] == ["#P2", "#P1"]
+    assert _format_reset_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=0,
+            end_row=4,
+            start_column=0,
+            end_column=8,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=0) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=2,
+            end_row=3,
+            start_column=4,
+            end_column=5,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=3,
+            end_row=4,
+            start_column=4,
+            end_column=5,
+        ),
+    ]
+    assert blocks.replace_calls[-1]["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=4,
+            columns_count=8,
+        ),
+    )
+    _assert_no_rotation_operations(sheets)
+
+
+@pytest.mark.asyncio
+async def test_apply_replaces_rows_with_message_block() -> None:
+    """Проверяет очистку rows и formatting при переходе к message-block."""
+
+    rows = (
+        _planned_raid_row(player_tag="#P1", attacks=5),
+        _planned_raid_row(player_tag="#P2", rank=2, attacks=6),
+    )
+    first = _prepared_raid_apply(
+        blocks=(RaidClanBlock(clan_tag="#AAA111", clan_name="Alpha", rows=rows),),
+    )
+    message = "Нет данных рейдового уикенда 2026-07-24 — 2026-07-27"
+    second = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                message=message,
+            ),
+        ),
+    )
+
+    sheets, blocks, _states = await _apply_raid_twice(first=first, second=second)
+
+    second_updates = sheets.batch_value_updates[1]
+    assert [update.range_a1 for update in second_updates] == ["A1:H4", "A1:H2"]
+    assert second_updates[0].values == [["" for _ in range(8)] for _ in range(4)]
+    assert second_updates[0].values[2:] == [["" for _ in range(8)] for _ in range(2)]
+    assert second_updates[1].values[1][1] == message
+    assert _format_reset_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=0,
+            end_row=4,
+            start_column=0,
+            end_column=8,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=1) == []
+    assert blocks.replace_calls[-1]["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_MESSAGE_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=2,
+            columns_count=8,
+        ),
+    )
+    _assert_no_rotation_operations(sheets)
+
+
+@pytest.mark.asyncio
+async def test_apply_replaces_message_block_with_rows() -> None:
+    """Проверяет очистку message text перед записью data rows."""
+
+    old_message = "Нет данных рейдового уикенда 2026-07-24 — 2026-07-27"
+    first = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                message=old_message,
+            ),
+        ),
+    )
+    rows = (
+        _planned_raid_row(player_tag="#P1", attacks=6),
+        _planned_raid_row(player_tag="#P2", rank=2, attacks=5),
+    )
+    second = _prepared_raid_apply(
+        blocks=(RaidClanBlock(clan_tag="#AAA111", clan_name="Alpha", rows=rows),),
+    )
+
+    sheets, blocks, _states = await _apply_raid_twice(first=first, second=second)
+
+    second_updates = sheets.batch_value_updates[1]
+    assert [update.range_a1 for update in second_updates] == ["A1:H2", "A1:H4"]
+    assert second_updates[0].values == [["" for _ in range(8)] for _ in range(2)]
+    assert all(old_message not in str(cell) for row in second_updates[1].values for cell in row)
+    assert [row[2] for row in second_updates[1].values[2:]] == ["#P1", "#P2"]
+    assert _format_reset_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=0,
+            end_row=2,
+            start_column=0,
+            end_column=8,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=3,
+            end_row=4,
+            start_column=4,
+            end_column=5,
+        ),
+    ]
+    assert blocks.replace_calls[-1]["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=4,
+            columns_count=8,
+        ),
+    )
+    _assert_no_rotation_operations(sheets)
+
+
+@pytest.mark.asyncio
+async def test_apply_clears_tail_after_managed_range_shrinks() -> None:
+    """Проверяет очистку хвоста прежнего более высокого managed block."""
+
+    first_rows = (
+        _planned_raid_row(player_tag="#P1", attacks=6),
+        _planned_raid_row(player_tag="#P2", rank=2, attacks=6),
+        _planned_raid_row(player_tag="#P3", rank=3, attacks=5),
+    )
+    second_row = _planned_raid_row(player_tag="#P1", attacks=6)
+    first = _prepared_raid_apply(
+        blocks=(RaidClanBlock(clan_tag="#AAA111", clan_name="Alpha", rows=first_rows),),
+    )
+    second = _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(second_row,),
+            ),
+        ),
+    )
+
+    sheets, blocks, _states = await _apply_raid_twice(first=first, second=second)
+
+    second_updates = sheets.batch_value_updates[1]
+    assert [update.range_a1 for update in second_updates] == ["A1:H5", "A1:H3"]
+    assert second_updates[0].values == [["" for _ in range(8)] for _ in range(5)]
+    assert second_updates[0].values[3:] == [["" for _ in range(8)] for _ in range(2)]
+    assert len(second_updates[1].values) == 3
+    assert _format_reset_ranges(sheets, batch_index=1) == [
+        _grid_range(
+            sheet_id=444,
+            start_row=0,
+            end_row=5,
+            start_column=0,
+            end_column=8,
+        ),
+    ]
+    assert _pink_ranges(sheets, batch_index=1) == []
+    assert blocks.replace_calls[-1]["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды",
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+    )
+    _assert_no_rotation_operations(sheets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_field", "message"),
+    (
+        ("fail_values_update", "values write failed"),
+        ("fail_spreadsheet_update", "format write failed"),
+        ("fail_hide", "hide write failed"),
+    ),
+    ids=("values", "format", "hide"),
+)
+async def test_apply_sheet_write_failure_does_not_update_sqlite_or_block_metadata(
+    failure_field: str,
+    message: str,
+) -> None:
+    """Проверяет отсутствие ложного success-state при Sheet write failure."""
+
+    error = RuntimeError(message)
+    sheets = FakeSheetsClient(**{failure_field: error})  # type: ignore[arg-type]
+    blocks = RecordingSheetBlockRepository()
+    states = RecordingRaidPlayerStateRepository()
+
+    with pytest.raises(RuntimeError, match=message) as caught:
+        await _apply_raid(
+            runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+            prepared=_prepared_raid_apply(),
+            sheets=sheets,
+            blocks=blocks,
+            states=states,
+        )
+
+    assert caught.value is error
+    assert states.upserted_states == []
+    assert blocks.replace_calls == []
+    assert states.commit_calls == 0
+    assert blocks.commit_calls == 0
+    if failure_field == "fail_values_update":
+        assert len(sheets.batch_value_updates) == 1
+        assert sheets.spreadsheet_requests == []
+        assert sheets.hidden_dimensions == []
+    elif failure_field == "fail_spreadsheet_update":
+        assert len(sheets.batch_value_updates) == 1
+        assert len(sheets.spreadsheet_requests) == 1
+        assert sheets.hidden_dimensions == []
+    else:
+        assert len(sheets.batch_value_updates) == 1
+        assert len(sheets.spreadsheet_requests) == 1
+        assert len(sheets.hidden_dimensions) == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_keeps_saved_ended_raid_visible_between_api_events() -> None:
+    """Покрывает отображение сохранённого ended state при пустом API-окне."""
+
+    runtime = _runtime(active_raid_season=RAID_SEASON_KEY)
+    prepared = await _prepare(
+        runtime=runtime,
+        clash=FakeRaidClash({"#AAA111": []}),
+        saved_rows=(
+            _saved_raid_state(
+                season_key=RAID_SEASON_KEY,
+                season_end_at=RAID_SEASON_END,
+                clan_tag="#AAA111",
+                player_tag="#PLAYER",
+            ),
+        ),
+    )
+
+    result, sheets, _blocks, states = await _apply_raid(
+        runtime=runtime,
+        prepared=prepared,
+    )
+
+    assert result.season_state == "ended"
+    assert sheets.batch_value_updates[0][-1].values[0][1].endswith("| завершён")
+    assert sheets.batch_value_updates[0][-1].values[2][4] == "1/6"
+    assert states.upserted_states[0].season_state == "ended"
+
+
+@pytest.mark.asyncio
+async def test_apply_rejects_season_change_without_sheet_or_state_writes() -> None:
+    """Фиксирует границу commit 4: смена сезона требует будущей rotation."""
+
+    sheets = FakeSheetsClient()
+    blocks = RecordingSheetBlockRepository()
+    states = RecordingRaidPlayerStateRepository()
+
+    with pytest.raises(RaidDataError, match="ротац"):
+        await _apply_raid(
+            runtime=_runtime(active_raid_season="2026-07-17T07:00:00+00:00"),
+            prepared=_prepared_raid_apply(),
+            sheets=sheets,
+            blocks=blocks,
+            states=states,
+        )
+
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+    assert sheets.added_sheets == []
+    assert blocks.replace_calls == []
+    assert states.upserted_states == []
