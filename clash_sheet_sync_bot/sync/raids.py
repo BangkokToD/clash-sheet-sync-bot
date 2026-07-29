@@ -22,6 +22,7 @@ from clash_sheet_sync_bot.repositories.raid_state import (
     RaidPlayerState,
     decode_raid_technical_values,
     encode_raid_technical_values,
+    validate_raid_player_state,
 )
 from clash_sheet_sync_bot.repositories.sheet_blocks import SheetBlockRepository
 from clash_sheet_sync_bot.sheets.client import (
@@ -184,26 +185,24 @@ async def prepare_public_raid_sync(
         return normalize_tag(clan.clan_tag), items
 
     windows = dict(await asyncio.gather(*(load(clan) for clan in clans)))
-    ongoing_keys = {
-        _season_key(_required_non_empty_str(item, "startTime", "raid season"))
-        for items in windows.values()
-        for item in items
-        if item.get("state") == "ongoing"
-    }
+    selection_metadata = tuple(
+        _validate_selection_metadata(item, clan_tag=clan_tag, index=index)
+        for clan_tag, items in windows.items()
+        for index, item in enumerate(items, start=1)
+    )
+    ongoing_keys = {season_key for state, season_key in selection_metadata if state == "ongoing"}
     if len(ongoing_keys) > 1:
         raise RaidContractError("Активные кланы вернули разные ongoing raid seasons.")
-    ended_keys = {
-        _season_key(_required_non_empty_str(item, "startTime", "raid season"))
-        for items in windows.values()
-        for item in items
-        if item.get("state") == "ended"
-    }
+    ended_keys = {season_key for state, season_key in selection_metadata if state == "ended"}
     selected_key = next(iter(ongoing_keys), max(ended_keys, default=None))
     active_clan_tags = {normalize_tag(clan.clan_tag) for clan in clans}
-    scoped_saved_rows = tuple(
-        row
+    validated_saved_rows = tuple(
+        validate_raid_player_state(row)
         for row in saved_rows
-        if row.chat_id == runtime_config.chat_id and normalize_tag(row.clan_tag) in active_clan_tags
+        if row.chat_id == runtime_config.chat_id
+    )
+    scoped_saved_rows = tuple(
+        row for row in validated_saved_rows if normalize_tag(row.clan_tag) in active_clan_tags
     )
     api_history_exists = bool(ongoing_keys or ended_keys)
     if selected_key is None and scoped_saved_rows:
@@ -251,6 +250,7 @@ async def prepare_public_raid_sync(
         and selected_key is not None
         and active_season_key != selected_key
     ):
+        fallback_clan_tags: set[str] = set()
         previous_active_season = _prepare_season_state(
             season_key=active_season_key,
             state=None,
@@ -264,10 +264,13 @@ async def prepare_public_raid_sync(
             composition_by_tag=composition_by_tag,
             user_column_links=user_column_links,
             config=config,
+            fallback_clan_tags=fallback_clan_tags,
         )
-        if not _window_contains_season(windows, active_season_key):
+        if fallback_clan_tags:
+            formatted_tags = ", ".join(sorted(fallback_clan_tags))
             warnings.append(
-                f"{active_season_key}: старый active raid season восстановлен из SQLite."
+                f"{active_season_key}: старый active raid season восстановлен "
+                f"из SQLite для кланов {formatted_tags}."
             )
 
     empty_blocks = ()
@@ -304,6 +307,7 @@ def _prepare_season_state(
     composition_by_tag: Mapping[str, PlannedPlayerState],
     user_column_links: Mapping[str, tuple[str, ...]],
     config: AppConfig,
+    fallback_clan_tags: set[str] | None = None,
 ) -> PreparedRaidSeason:
     matching_raw: list[tuple[str, JsonObject]] = []
     for clan_tag, items in windows.items():
@@ -365,6 +369,8 @@ def _prepare_season_state(
                 row for row in saved_for_season if normalize_tag(row.clan_tag) == clan_tag
             )
             technical_rows = tuple(_technical_from_state(row) for row in stored)
+            if stored and fallback_clan_tags is not None:
+                fallback_clan_tags.add(clan_tag)
 
         if not technical_rows:
             blocks.append(
@@ -686,11 +692,18 @@ def _technical_values_dict(values: RaidTechnicalValues) -> dict[str, object]:
     }
 
 
-def _window_contains_season(
-    windows: Mapping[str, Sequence[JsonObject]],
-    season_key: str,
-) -> bool:
-    return any(_raw_season_key(item) == season_key for items in windows.values() for item in items)
+def _validate_selection_metadata(
+    item: object,
+    *,
+    clan_tag: str,
+    index: int,
+) -> tuple[RaidSeasonState, str]:
+    context = f"{clan_tag}: raid season #{index}"
+    if not isinstance(item, dict):
+        raise RaidContractError(f"{context} должен быть объектом.")
+    state = _season_state(item)
+    start_time = _required_non_empty_str(item, "startTime", context)
+    return state, _season_key(start_time)
 
 
 def _raw_season_key(item: JsonObject) -> str:

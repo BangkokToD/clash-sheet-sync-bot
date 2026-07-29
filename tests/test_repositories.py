@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 
 import aiosqlite
@@ -10,6 +11,7 @@ import pytest
 
 from clash_sheet_sync_bot.models import SheetBlock
 from clash_sheet_sync_bot.repositories import (
+    ChatLifecycleRepository,
     CwlRowStateRepository,
     RaidDataError,
     RaidPlayerState,
@@ -663,6 +665,34 @@ async def test_raid_repository_rejects_missing_or_unknown_technical_fields(
         await RaidPlayerStateRepository(migrated_connection).upsert(state)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"chat_id": True},
+        {"clan_tag": "BROKEN"},
+        {"player_tag": "BROKEN"},
+        {"season_key": "broken-season"},
+        {"season_start_at": "broken-start"},
+        {"season_end_at": "broken-end"},
+        {"season_end_at": "2026-07-20T07:00:00+00:00"},
+        {"season_state": "unknown"},
+        {"row_key": "raid_row:broken"},
+    ),
+)
+@pytest.mark.asyncio
+async def test_raid_repository_rejects_malformed_outer_player_state(
+    migrated_connection: aiosqlite.Connection,
+    changes: dict[str, object],
+) -> None:
+    """Проверяет централизованный persisted contract всех outer fields."""
+
+    await _insert_chat(migrated_connection, chat_id=-1001)
+    state = replace(_raid_state(), **changes)
+
+    with pytest.raises(RaidDataError):
+        await RaidPlayerStateRepository(migrated_connection).upsert(state)
+
+
 @pytest.mark.asyncio
 async def test_raid_repository_maps_corrupted_sqlite_json_to_domain_error(
     migrated_connection: aiosqlite.Connection,
@@ -880,3 +910,127 @@ async def test_rebind_and_delete_touch_only_selected_raid_blocks(
 
     remaining = await repository.list_blocks(chat_id)
     assert [(block.sheet_name, block.block_key) for block in remaining] == [("Рейды", "cwl:#KEEP")]
+
+
+@pytest.mark.asyncio
+async def test_transfer_moves_raid_runtime_state_and_replaces_target_conflicts(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет транзакционный перенос raid snapshots и archive registry."""
+
+    source_chat_id = -1501
+    target_chat_id = -1502
+    untouched_chat_id = -1503
+    for chat_id in (source_chat_id, target_chat_id, untouched_chat_id):
+        await _insert_chat(migrated_connection, chat_id=chat_id)
+    await _insert_tracked_clan(
+        migrated_connection,
+        chat_id=untouched_chat_id,
+        clan_tag="#KEEP",
+    )
+
+    player_states = RaidPlayerStateRepository(migrated_connection)
+    archives = RaidSheetArchiveRepository(migrated_connection)
+    source_states = (
+        _raid_state(chat_id=source_chat_id, player_tag="#SOURCE1"),
+        _raid_state(
+            chat_id=source_chat_id,
+            season_key="2026-07-17T07:00:00+00:00",
+            player_tag="#SOURCE2",
+        ),
+    )
+    target_conflict = replace(
+        _raid_state(chat_id=target_chat_id, player_tag="#SOURCE1"),
+        row_hash="target-conflict",
+    )
+    target_only = _raid_state(chat_id=target_chat_id, player_tag="#TARGET")
+    untouched_state = _raid_state(chat_id=untouched_chat_id, player_tag="#UNTOUCHED")
+    for state in (*source_states, target_conflict, target_only, untouched_state):
+        await player_states.upsert(state)
+
+    source_archives = (
+        RaidSheetArchive(
+            source_chat_id,
+            "2026-07-10T07:00:00+00:00",
+            "2026-07-10T07:00:00+00:00",
+            "Рейды 2026-07-10",
+            501,
+            NOW,
+        ),
+        RaidSheetArchive(
+            source_chat_id,
+            "2026-07-17T07:00:00+00:00",
+            "2026-07-17T07:00:00+00:00",
+            "Рейды 2026-07-17",
+            502,
+            NOW,
+        ),
+    )
+    target_conflict_archive = RaidSheetArchive(
+        target_chat_id,
+        "2026-07-10T07:00:00+00:00",
+        "2026-07-10T07:00:00+00:00",
+        "Старый target",
+        501,
+        NOW,
+    )
+    untouched_archive = RaidSheetArchive(
+        untouched_chat_id,
+        "2026-07-03T07:00:00+00:00",
+        "2026-07-03T07:00:00+00:00",
+        "Рейды 2026-07-03",
+        503,
+        NOW,
+    )
+    for archive in (*source_archives, target_conflict_archive, untouched_archive):
+        await archives.upsert(archive)
+    await migrated_connection.commit()
+
+    await migrated_connection.execute("BEGIN")
+    await ChatLifecycleRepository(migrated_connection).move_runtime_state(
+        source_chat_id=source_chat_id,
+        target_chat_id=target_chat_id,
+        now=NOW,
+    )
+    assert migrated_connection.in_transaction
+    await migrated_connection.commit()
+
+    assert (
+        await player_states.list_for_season(
+            chat_id=source_chat_id,
+            season_key="2026-07-24T07:00:00+00:00",
+        )
+        == ()
+    )
+    assert (
+        await player_states.list_for_season(
+            chat_id=source_chat_id,
+            season_key="2026-07-17T07:00:00+00:00",
+        )
+        == ()
+    )
+    transferred_latest = await player_states.list_for_season(
+        chat_id=target_chat_id,
+        season_key="2026-07-24T07:00:00+00:00",
+    )
+    assert [state.player_tag for state in transferred_latest] == ["#SOURCE1"]
+    assert transferred_latest[0].row_hash == "hash"
+    transferred_previous = await player_states.list_for_season(
+        chat_id=target_chat_id,
+        season_key="2026-07-17T07:00:00+00:00",
+    )
+    assert [state.player_tag for state in transferred_previous] == ["#SOURCE2"]
+    assert await archives.list_ordered(source_chat_id) == ()
+    assert await archives.list_ordered(target_chat_id) == tuple(
+        replace(archive, chat_id=target_chat_id) for archive in source_archives
+    )
+    assert await player_states.list_for_season(
+        chat_id=untouched_chat_id,
+        season_key=untouched_state.season_key,
+    ) == (untouched_state,)
+    assert await archives.list_ordered(untouched_chat_id) == (untouched_archive,)
+    cursor = await migrated_connection.execute(
+        "SELECT clan_tag FROM tracked_clans WHERE chat_id = ?",
+        (untouched_chat_id,),
+    )
+    assert [row["clan_tag"] for row in await cursor.fetchall()] == ["#KEEP"]

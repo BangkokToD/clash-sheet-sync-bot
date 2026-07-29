@@ -269,6 +269,114 @@ async def test_migration_4_upgrades_version_3_without_losing_existing_state(
 
 
 @pytest.mark.asyncio
+async def test_migration_4_creates_raid_indexes_foreign_keys_and_player_uniqueness(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет полный schema contract migration 4 и повторное применение."""
+
+    await apply_migrations(migrated_connection)
+    cursor = await migrated_connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (?, ?)
+        """,
+        (
+            "idx_raid_player_state_chat_season_clan",
+            "idx_raid_sheet_archives_order",
+        ),
+    )
+    assert {row["name"] for row in await cursor.fetchall()} == {
+        "idx_raid_player_state_chat_season_clan",
+        "idx_raid_sheet_archives_order",
+    }
+
+    for table_name in ("raid_player_state", "raid_sheet_archives"):
+        cursor = await migrated_connection.execute(f"PRAGMA foreign_key_list({table_name})")
+        foreign_keys = await cursor.fetchall()
+        assert any(
+            row["table"] == "telegram_chats" and row["from"] == "chat_id" and row["to"] == "chat_id"
+            for row in foreign_keys
+        )
+
+    chat_id = -4101
+    await _insert_chat(migrated_connection, chat_id=chat_id)
+    player_values = (
+        chat_id,
+        "2026-07-24T07:00:00+00:00",
+        "2026-07-24T07:00:00+00:00",
+        "2026-07-27T07:00:00+00:00",
+        "ended",
+        "raid_row:2026-07-24T07:00:00+00:00|#CLAN|#PLAYER",
+        "#CLAN",
+        "#PLAYER",
+        "{}",
+        "{}",
+        NOW,
+    )
+    await migrated_connection.execute(
+        """
+        INSERT INTO raid_player_state(
+            chat_id, season_key, season_start_at, season_end_at, season_state,
+            row_key, clan_tag, player_tag, technical_values_json,
+            user_values_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        player_values,
+    )
+    with pytest.raises(aiosqlite.IntegrityError):
+        await migrated_connection.execute(
+            """
+            INSERT INTO raid_player_state(
+                chat_id, season_key, season_start_at, season_end_at, season_state,
+                row_key, clan_tag, player_tag, technical_values_json,
+                user_values_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            player_values,
+        )
+
+    orphan_values = (
+        -999_999,
+        *player_values[1:],
+    )
+    with pytest.raises(aiosqlite.IntegrityError):
+        await migrated_connection.execute(
+            """
+            INSERT INTO raid_player_state(
+                chat_id, season_key, season_start_at, season_end_at, season_state,
+                row_key, clan_tag, player_tag, technical_values_json,
+                user_values_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            orphan_values,
+        )
+    with pytest.raises(aiosqlite.IntegrityError):
+        await migrated_connection.execute(
+            """
+            INSERT INTO raid_sheet_archives(
+                chat_id, season_key, season_start_at, sheet_name, sheet_id, archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                -999_999,
+                "2026-07-24T07:00:00+00:00",
+                "2026-07-24T07:00:00+00:00",
+                "Рейды 2026-07-24",
+                901,
+                NOW,
+            ),
+        )
+
+    await apply_migrations(migrated_connection)
+    cursor = await migrated_connection.execute(
+        "SELECT COUNT(*) AS count FROM raid_player_state WHERE chat_id = ?",
+        (chat_id,),
+    )
+    assert (await cursor.fetchone())["count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_migration_2_copies_legacy_composition_profile_to_active_and_exited(
     migrated_connection: aiosqlite.Connection,
 ) -> None:

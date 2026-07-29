@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
 import aiosqlite
 
+from clash_sheet_sync_bot.models import normalize_tag
+
 from .base import (
+    RepositoryError,
     as_int,
     as_optional_str,
     as_str,
@@ -115,7 +119,7 @@ class RaidPlayerStateRepository:
         row = await fetch_one(
             self._connection,
             f"""
-            SELECT season_key
+            SELECT *
             FROM raid_player_state
             WHERE chat_id = ? AND clan_tag IN ({placeholders})
             ORDER BY season_start_at DESC, season_key DESC
@@ -123,11 +127,12 @@ class RaidPlayerStateRepository:
             """,
             (chat_id, *clan_tags),
         )
-        return None if row is None else as_str(row["season_key"], "season_key")
+        return None if row is None else _row_to_player_state(row).season_key
 
     async def upsert(self, state: RaidPlayerState) -> None:
         """Идемпотентно сохраняет агрегированную строку."""
 
+        validate_raid_player_state(state)
         await self._connection.execute(
             """
             INSERT INTO raid_player_state(
@@ -254,22 +259,28 @@ class RaidSheetArchiveRepository:
 
 
 def _row_to_player_state(row: aiosqlite.Row) -> RaidPlayerState:
-    return RaidPlayerState(
-        chat_id=as_int(row["chat_id"], "chat_id"),
-        season_key=as_str(row["season_key"], "season_key"),
-        season_start_at=as_str(row["season_start_at"], "season_start_at"),
-        season_end_at=as_str(row["season_end_at"], "season_end_at"),
-        season_state=as_str(row["season_state"], "season_state"),
-        row_key=as_str(row["row_key"], "row_key"),
-        clan_tag=as_str(row["clan_tag"], "clan_tag"),
-        player_tag=as_str(row["player_tag"], "player_tag"),
-        technical_values=decode_raid_technical_values(
-            as_str(row["technical_values_json"], "technical_values_json")
-        ),
-        user_values=as_user_values(row["user_values_json"]),
-        row_hash=as_optional_str(row["row_hash"], "row_hash"),
-        updated_at=as_str(row["updated_at"], "updated_at"),
-    )
+    try:
+        state = RaidPlayerState(
+            chat_id=as_int(row["chat_id"], "chat_id"),
+            season_key=as_str(row["season_key"], "season_key"),
+            season_start_at=as_str(row["season_start_at"], "season_start_at"),
+            season_end_at=as_str(row["season_end_at"], "season_end_at"),
+            season_state=as_str(row["season_state"], "season_state"),
+            row_key=as_str(row["row_key"], "row_key"),
+            clan_tag=as_str(row["clan_tag"], "clan_tag"),
+            player_tag=as_str(row["player_tag"], "player_tag"),
+            technical_values=decode_raid_technical_values(
+                as_str(row["technical_values_json"], "technical_values_json")
+            ),
+            user_values=as_user_values(row["user_values_json"]),
+            row_hash=as_optional_str(row["row_hash"], "row_hash"),
+            updated_at=as_str(row["updated_at"], "updated_at"),
+        )
+    except RaidDataError:
+        raise
+    except (RepositoryError, KeyError, TypeError, ValueError, IndexError) as exc:
+        raise RaidDataError("Повреждён persisted raid player state.") from exc
+    return validate_raid_player_state(state)
 
 
 def _row_to_archive(row: aiosqlite.Row) -> RaidSheetArchive:
@@ -303,6 +314,31 @@ def encode_raid_technical_values(values: dict[str, object]) -> str:
     return "{" + ",".join(parts) + "}"
 
 
+def validate_raid_player_state(state: RaidPlayerState) -> RaidPlayerState:
+    """Проверяет полный persisted contract агрегированной raid-строки."""
+
+    if not isinstance(state.chat_id, int) or isinstance(state.chat_id, bool):
+        raise RaidDataError("поле chat_id должно быть целым числом.")
+
+    clan_tag = _canonical_stored_tag(state.clan_tag, "clan_tag")
+    player_tag = _canonical_stored_tag(state.player_tag, "player_tag")
+    season_key = _canonical_stored_timestamp(state.season_key, "season_key")
+    season_start = _canonical_stored_timestamp(state.season_start_at, "season_start_at")
+    season_end = _canonical_stored_timestamp(state.season_end_at, "season_end_at")
+    if state.season_key != state.season_start_at or season_key != season_start:
+        raise RaidDataError("season_key не соответствует season_start_at.")
+    if season_end <= season_start:
+        raise RaidDataError("season_end_at должен быть позже season_start_at.")
+    if state.season_state not in {"ongoing", "ended"}:
+        raise RaidDataError(f"некорректный season_state: {state.season_state!r}.")
+
+    expected_row_key = f"raid_row:{state.season_key}|{clan_tag}|{player_tag}"
+    if state.row_key != expected_row_key:
+        raise RaidDataError("row_key не соответствует season/clan/player identity.")
+    encode_raid_technical_values(state.technical_values)
+    return state
+
+
 def decode_raid_technical_values(raw_json: str) -> dict[str, object]:
     """Разбирает persisted technical JSON по строгому raid-контракту."""
 
@@ -329,6 +365,8 @@ def _validate_raid_technical_values(
     *,
     require_decimal: bool,
 ) -> dict[str, object]:
+    if not isinstance(values, dict):
+        raise RaidDataError("raid technical values должны быть объектом.")
     actual_fields = set(values)
     required_fields = set(RAID_TECHNICAL_FIELDS)
     missing = sorted(required_fields - actual_fields)
@@ -397,3 +435,29 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise RaidDataError(f"technical_values_json содержит дубликат поля {key}.")
         result[key] = value
     return result
+
+
+def _canonical_stored_tag(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise RaidDataError(f"поле {field} должно быть строкой.")
+    try:
+        normalized = normalize_tag(value)
+    except (TypeError, ValueError) as exc:
+        raise RaidDataError(f"поле {field} содержит некорректный tag.") from exc
+    if normalized != value:
+        raise RaidDataError(f"поле {field} должно содержать нормализованный tag.")
+    return normalized
+
+
+def _canonical_stored_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise RaidDataError(f"поле {field} должно быть строкой.")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise RaidDataError(f"поле {field} содержит некорректный timestamp.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise RaidDataError(f"поле {field} должно быть UTC timestamp.")
+    if parsed.isoformat() != value:
+        raise RaidDataError(f"поле {field} должно иметь канонический ISO-формат.")
+    return parsed

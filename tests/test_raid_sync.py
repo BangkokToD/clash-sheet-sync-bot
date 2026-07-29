@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -1293,3 +1294,134 @@ async def test_prepare_diff_contains_only_real_aggregated_changes() -> None:
     assert len(second.diff) == 1
     assert "#PLAYER" in second.diff[0]
     assert "атака #" not in second.diff[0].casefold()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("state", None),
+        ("state", 1),
+        ("state", "unknown"),
+        ("startTime", None),
+        ("startTime", "2026-07-24"),
+    ),
+)
+@pytest.mark.parametrize("with_saved_snapshot", (False, True))
+@pytest.mark.asyncio
+async def test_prepare_rejects_invalid_api_selection_metadata_before_fallback_or_writes(
+    field: str,
+    value: object,
+    with_saved_snapshot: bool,
+) -> None:
+    """Проверяет strict selection metadata до message/SQLite fallback."""
+
+    payload = _season(members=[], districts=[])
+    if value is None:
+        payload.pop(field)
+    else:
+        payload[field] = value
+    saved_rows = (
+        (
+            _saved_raid_state(
+                season_key="2026-07-17T07:00:00+00:00",
+                clan_tag="#AAA111",
+            ),
+        )
+        if with_saved_snapshot
+        else ()
+    )
+    sheets = FakeSheetsClient()
+
+    with pytest.raises(RaidDataError):
+        await _prepare(
+            runtime=_runtime(),
+            clash=FakeRaidClash({"#AAA111": [payload]}),
+            sheets=sheets,
+            saved_rows=saved_rows,
+        )
+
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda state: replace(state, clan_tag="BROKEN"),
+        lambda state: replace(state, player_tag="BROKEN"),
+        lambda state: replace(state, season_key="broken-season"),
+        lambda state: replace(state, season_start_at="broken-start"),
+        lambda state: replace(state, season_end_at="broken-end"),
+        lambda state: replace(
+            state,
+            season_end_at="2026-07-20T07:00:00+00:00",
+        ),
+        lambda state: replace(state, season_state="unknown"),
+        lambda state: replace(state, row_key="raid_row:broken"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_prepare_maps_corrupted_sqlite_outer_fields_to_raid_data_error(
+    mutate: Any,
+) -> None:
+    """Проверяет строгий persisted contract всех outer raid fields."""
+
+    saved = mutate(_saved_raid_state(clan_tag="#AAA111"))
+    sheets = FakeSheetsClient()
+
+    with pytest.raises(RaidDataError):
+        await _prepare(
+            runtime=_runtime(),
+            clash=FakeRaidClash({"#AAA111": []}),
+            sheets=sheets,
+            saved_rows=(saved,),
+        )
+
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_warns_for_each_clan_using_partial_old_active_sqlite_fallback() -> None:
+    """Проверяет warning частичного per-clan fallback старого active."""
+
+    old_key = "2026-07-10T07:00:00+00:00"
+    old_api = _season(
+        members=[_member("#ONE_PLAYER", attacks=1)],
+        districts=[_district(123, [_attack("#ONE_PLAYER", 100)])],
+        start_time="20260710T070000.000Z",
+        end_time="20260713T070000.000Z",
+    )
+    newest = _season(members=[], districts=[])
+    clans = (
+        make_tracked_clan(tag="#ONE", name="One"),
+        make_tracked_clan(tag="#TWO", name="Two"),
+    )
+    saved_second = _saved_raid_state(
+        season_key=old_key,
+        season_end_at="2026-07-13T07:00:00+00:00",
+        clan_tag="#TWO",
+        player_tag="#TWO_PLAYER",
+    )
+
+    prepared = await _prepare(
+        runtime=_runtime(clans=clans, active_raid_season=old_key),
+        clash=FakeRaidClash(
+            {
+                "#ONE": [newest, old_api],
+                "#TWO": [newest],
+            }
+        ),
+        saved_rows=(saved_second,),
+    )
+
+    assert prepared.previous_active_season is not None
+    assert [len(block.rows) for block in prepared.previous_active_season.blocks] == [1, 1]
+    fallback_warnings = [
+        warning for warning in prepared.warnings if "SQLite" in warning and old_key in warning
+    ]
+    assert fallback_warnings == [
+        f"{old_key}: старый active raid season восстановлен из SQLite для кланов #TWO."
+    ]

@@ -429,6 +429,8 @@ class ChatLifecycleRepository:
             "column_profiles",
             "composition_player_state",
             "cwl_row_state",
+            "raid_player_state",
+            "raid_sheet_archives",
             "sheet_blocks",
         ):
             await self._connection.execute(
