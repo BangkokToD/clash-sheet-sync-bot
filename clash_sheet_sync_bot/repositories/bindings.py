@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 import aiosqlite
 
 from clash_sheet_sync_bot.models import (
@@ -22,6 +24,13 @@ from .base import (
     fetch_one,
 )
 from .columns import _row_to_column_profile
+
+
+class _RaidFieldUnset(Enum):
+    VALUE = "unset"
+
+
+_RAID_FIELD_UNSET = _RaidFieldUnset.VALUE
 
 
 class RuntimeConfigRepository:
@@ -251,9 +260,9 @@ class SheetBindingRepository:
         active_cwl_sheet_name: str,
         active_cwl_sheet_id: int,
         active_cwl_season: str | None,
-        active_raid_sheet_name: str = "Рейды",
-        active_raid_sheet_id: int | None = None,
-        active_raid_season: str | None = None,
+        active_raid_sheet_name: str | _RaidFieldUnset = _RAID_FIELD_UNSET,
+        active_raid_sheet_id: int | None | _RaidFieldUnset = _RAID_FIELD_UNSET,
+        active_raid_season: str | None | _RaidFieldUnset = _RAID_FIELD_UNSET,
         bot_state_sheet_name: str,
         bot_state_sheet_id: int,
         timezone: str,
@@ -261,6 +270,12 @@ class SheetBindingRepository:
     ) -> None:
         """Создаёт или обновляет активную привязку таблицы."""
 
+        raid_name_omitted = active_raid_sheet_name is _RAID_FIELD_UNSET
+        raid_id_omitted = active_raid_sheet_id is _RAID_FIELD_UNSET
+        raid_season_omitted = active_raid_season is _RAID_FIELD_UNSET
+        raid_name = "Рейды" if raid_name_omitted else active_raid_sheet_name
+        raid_id = None if raid_id_omitted else active_raid_sheet_id
+        raid_season = None if raid_season_omitted else active_raid_season
         await self._connection.execute(
             """
             INSERT INTO sheet_bindings(
@@ -291,9 +306,18 @@ class SheetBindingRepository:
                 active_cwl_sheet_name = excluded.active_cwl_sheet_name,
                 active_cwl_sheet_id = excluded.active_cwl_sheet_id,
                 active_cwl_season = excluded.active_cwl_season,
-                active_raid_sheet_name = excluded.active_raid_sheet_name,
-                active_raid_sheet_id = excluded.active_raid_sheet_id,
-                active_raid_season = excluded.active_raid_season,
+                active_raid_sheet_name = CASE
+                    WHEN ? THEN sheet_bindings.active_raid_sheet_name
+                    ELSE excluded.active_raid_sheet_name
+                END,
+                active_raid_sheet_id = CASE
+                    WHEN ? THEN sheet_bindings.active_raid_sheet_id
+                    ELSE excluded.active_raid_sheet_id
+                END,
+                active_raid_season = CASE
+                    WHEN ? THEN sheet_bindings.active_raid_season
+                    ELSE excluded.active_raid_season
+                END,
                 bot_state_sheet_name = excluded.bot_state_sheet_name,
                 bot_state_sheet_id = excluded.bot_state_sheet_id,
                 timezone = excluded.timezone,
@@ -309,14 +333,17 @@ class SheetBindingRepository:
                 active_cwl_sheet_name,
                 active_cwl_sheet_id,
                 active_cwl_season,
-                active_raid_sheet_name,
-                active_raid_sheet_id,
-                active_raid_season,
+                raid_name,
+                raid_id,
+                raid_season,
                 bot_state_sheet_name,
                 bot_state_sheet_id,
                 timezone,
                 now,
                 now,
+                int(raid_name_omitted),
+                int(raid_id_omitted),
+                int(raid_season_omitted),
             ),
         )
 
@@ -383,15 +410,18 @@ class SheetBindingRepository:
         active_cwl_sheet_name: str,
         active_cwl_sheet_id: int,
         active_cwl_season: str | None,
-        active_raid_sheet_name: str = "Рейды",
-        active_raid_sheet_id: int | None = None,
-        active_raid_season: str | None = None,
+        active_raid_sheet_name: str | _RaidFieldUnset = _RAID_FIELD_UNSET,
+        active_raid_sheet_id: int | None | _RaidFieldUnset = _RAID_FIELD_UNSET,
+        active_raid_season: str | None | _RaidFieldUnset = _RAID_FIELD_UNSET,
         bot_state_sheet_name: str,
         bot_state_sheet_id: int,
         now: str,
     ) -> None:
         """Обновляет sheet IDs после диагностики/auto-fix."""
 
+        raid_name_omitted = active_raid_sheet_name is _RAID_FIELD_UNSET
+        raid_id_omitted = active_raid_sheet_id is _RAID_FIELD_UNSET
+        raid_season_omitted = active_raid_season is _RAID_FIELD_UNSET
         await self._connection.execute(
             """
             UPDATE sheet_bindings
@@ -400,9 +430,9 @@ class SheetBindingRepository:
                 active_cwl_sheet_name = ?,
                 active_cwl_sheet_id = ?,
                 active_cwl_season = ?,
-                active_raid_sheet_name = ?,
-                active_raid_sheet_id = ?,
-                active_raid_season = ?,
+                active_raid_sheet_name = CASE WHEN ? THEN active_raid_sheet_name ELSE ? END,
+                active_raid_sheet_id = CASE WHEN ? THEN active_raid_sheet_id ELSE ? END,
+                active_raid_season = CASE WHEN ? THEN active_raid_season ELSE ? END,
                 bot_state_sheet_name = ?,
                 bot_state_sheet_id = ?,
                 updated_at = ?
@@ -414,9 +444,12 @@ class SheetBindingRepository:
                 active_cwl_sheet_name,
                 active_cwl_sheet_id,
                 active_cwl_season,
-                active_raid_sheet_name,
-                active_raid_sheet_id,
-                active_raid_season,
+                int(raid_name_omitted),
+                "Рейды" if raid_name_omitted else active_raid_sheet_name,
+                int(raid_id_omitted),
+                None if raid_id_omitted else active_raid_sheet_id,
+                int(raid_season_omitted),
+                None if raid_season_omitted else active_raid_season,
                 bot_state_sheet_name,
                 bot_state_sheet_id,
                 now,

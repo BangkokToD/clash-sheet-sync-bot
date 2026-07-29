@@ -5,18 +5,42 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Any, Final
 
 import aiosqlite
 
 from .base import (
     as_int,
-    as_json_dict,
     as_optional_str,
     as_str,
     as_user_values,
     fetch_all,
     fetch_one,
 )
+
+RAID_TECHNICAL_FIELDS: Final[tuple[str, ...]] = (
+    "player_name",
+    "attacks",
+    "attack_limit",
+    "bonus_attack_limit",
+    "capital_resources_looted",
+    "weighted_damage_units",
+    "normal_points",
+    "coefficient",
+)
+RAID_INTEGER_FIELDS: Final[tuple[str, ...]] = (
+    "attacks",
+    "attack_limit",
+    "bonus_attack_limit",
+    "capital_resources_looted",
+    "weighted_damage_units",
+)
+RAID_DECIMAL_FIELDS: Final[tuple[str, ...]] = ("normal_points", "coefficient")
+
+
+class RaidDataError(RuntimeError):
+    """Ошибка канонического persisted raid state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +155,7 @@ class RaidPlayerStateRepository:
                 state.row_key,
                 state.clan_tag,
                 state.player_tag,
-                json.dumps(state.technical_values, ensure_ascii=False, separators=(",", ":")),
+                encode_raid_technical_values(state.technical_values),
                 json.dumps(state.user_values, ensure_ascii=False, separators=(",", ":")),
                 state.row_hash,
                 state.updated_at,
@@ -239,7 +263,9 @@ def _row_to_player_state(row: aiosqlite.Row) -> RaidPlayerState:
         row_key=as_str(row["row_key"], "row_key"),
         clan_tag=as_str(row["clan_tag"], "clan_tag"),
         player_tag=as_str(row["player_tag"], "player_tag"),
-        technical_values=as_json_dict(row["technical_values_json"], "technical_values_json"),
+        technical_values=decode_raid_technical_values(
+            as_str(row["technical_values_json"], "technical_values_json")
+        ),
         user_values=as_user_values(row["user_values_json"]),
         row_hash=as_optional_str(row["row_hash"], "row_hash"),
         updated_at=as_str(row["updated_at"], "updated_at"),
@@ -255,3 +281,123 @@ def _row_to_archive(row: aiosqlite.Row) -> RaidSheetArchive:
         sheet_id=as_int(row["sheet_id"], "sheet_id"),
         archived_at=as_str(row["archived_at"], "archived_at"),
     )
+
+
+def encode_raid_technical_values(values: dict[str, object]) -> str:
+    """Сериализует полный technical state в канонический JSON без float.
+
+    Decimal-поля записываются JSON-числами напрямую. Это сохраняет точность
+    строкового decimal-представления и не вводит промежуточный binary float.
+    """
+
+    normalized = _validate_raid_technical_values(values, require_decimal=True)
+    parts: list[str] = []
+    for field in RAID_TECHNICAL_FIELDS:
+        value = normalized[field]
+        key_json = json.dumps(field, ensure_ascii=False)
+        if isinstance(value, Decimal):
+            value_json = _decimal_json_number(value)
+        else:
+            value_json = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        parts.append(f"{key_json}:{value_json}")
+    return "{" + ",".join(parts) + "}"
+
+
+def decode_raid_technical_values(raw_json: str) -> dict[str, object]:
+    """Разбирает persisted technical JSON по строгому raid-контракту."""
+
+    try:
+        data = json.loads(
+            raw_json,
+            parse_float=Decimal,
+            parse_int=int,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except json.JSONDecodeError as exc:
+        raise RaidDataError("technical_values_json содержит битый JSON.") from exc
+    if not isinstance(data, dict):
+        raise RaidDataError("technical_values_json должен быть JSON-объектом.")
+    try:
+        return _validate_raid_technical_values(data, require_decimal=False)
+    except RaidDataError as exc:
+        raise RaidDataError(f"technical_values_json: {exc}") from exc
+
+
+def _validate_raid_technical_values(
+    values: dict[str, Any],
+    *,
+    require_decimal: bool,
+) -> dict[str, object]:
+    actual_fields = set(values)
+    required_fields = set(RAID_TECHNICAL_FIELDS)
+    missing = sorted(required_fields - actual_fields)
+    unknown = sorted(actual_fields - required_fields)
+    if missing:
+        raise RaidDataError(f"отсутствует обязательное поле {missing[0]}.")
+    if unknown:
+        raise RaidDataError(f"неизвестное поле {unknown[0]}.")
+
+    player_name = values["player_name"]
+    if not isinstance(player_name, str) or player_name.strip() == "":
+        raise RaidDataError("поле player_name должно быть непустой строкой.")
+
+    result: dict[str, object] = {"player_name": player_name}
+    for field in RAID_INTEGER_FIELDS:
+        value = values[field]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise RaidDataError(f"поле {field} должно быть целым JSON-числом.")
+        if value < 0:
+            raise RaidDataError(f"поле {field} не может быть отрицательным.")
+        result[field] = value
+
+    if int(result["attacks"]) > int(result["attack_limit"]) + int(
+        result["bonus_attack_limit"]
+    ):
+        raise RaidDataError("поле attacks превышает attack_limit + bonus_attack_limit.")
+
+    for field in RAID_DECIMAL_FIELDS:
+        raw_value = values[field]
+        if require_decimal:
+            if not isinstance(raw_value, Decimal):
+                raise RaidDataError(f"поле {field} должно иметь тип Decimal.")
+            value = raw_value
+        else:
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, Decimal)):
+                raise RaidDataError(f"поле {field} должно быть JSON-числом.")
+            try:
+                value = Decimal(raw_value)
+            except (InvalidOperation, ValueError) as exc:
+                raise RaidDataError(f"поле {field} содержит некорректное число.") from exc
+        if not value.is_finite() or value < 0:
+            raise RaidDataError(f"поле {field} должно быть конечным неотрицательным числом.")
+        result[field] = value
+
+    expected_normal_points = Decimal(int(result["weighted_damage_units"])) / Decimal(100)
+    if result["normal_points"] != expected_normal_points:
+        raise RaidDataError(
+            "поле normal_points не соответствует weighted_damage_units / 100."
+        )
+    return result
+
+
+def _decimal_json_number(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    normalized = format(value, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized or "0"
+
+
+def _reject_json_constant(value: str) -> None:
+    raise RaidDataError(f"недопустимая JSON-константа {value}.")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RaidDataError(f"technical_values_json содержит дубликат поля {key}.")
+        result[key] = value
+    return result

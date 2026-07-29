@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import aiosqlite
 import pytest
 
-from clash_sheet_sync_bot.migrations import SCHEMA_VERSION, apply_migrations
+from clash_sheet_sync_bot.migrations import (
+    MIGRATION_SQL_BY_VERSION,
+    SCHEMA_SQL,
+    SCHEMA_VERSION,
+    apply_migrations,
+)
+from clash_sheet_sync_bot.storage import Database
 
 NOW = "2026-07-09T12:00:00+00:00"
 
@@ -152,6 +160,112 @@ async def test_apply_migrations_records_current_schema_version(
 
     assert row is not None
     assert row["version"] == SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_4_upgrades_version_3_without_losing_existing_state(
+    tmp_path: Path,
+) -> None:
+    """Проверяет реальный upgrade v3 и сохранность прежних данных/профилей."""
+
+    database = Database(tmp_path / "version-3.db")
+    async with database.connect() as connection:
+        await connection.executescript(SCHEMA_SQL)
+        for version in (1, 2, 3):
+            if version > 1:
+                await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+            await connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (version,),
+            )
+        await _insert_chat(connection, chat_id=-4001)
+        await connection.execute(
+            """
+            INSERT INTO sheet_bindings(
+                chat_id, google_sheet_id, spreadsheet_url,
+                composition_sheet_name, composition_sheet_id,
+                active_cwl_sheet_name, active_cwl_sheet_id, active_cwl_season,
+                bot_state_sheet_name, bot_state_sheet_id, timezone,
+                is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                -4001,
+                "sheet-v3",
+                "https://example.test/sheet-v3",
+                "Состав",
+                111,
+                "CWL",
+                222,
+                "2026-07",
+                "_bot_state",
+                333,
+                "Europe/Kyiv",
+                NOW,
+                NOW,
+            ),
+        )
+        await _insert_column_profile(
+            connection,
+            chat_id=-4001,
+            table_type="composition_active",
+            column_key="user_custom",
+            title="Моя колонка",
+            kind="user",
+        )
+        await connection.execute(
+            """
+            INSERT INTO composition_player_state(
+                chat_id, player_tag, clan_tag, status, town_hall, nickname,
+                user_values_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (-4001, "#PLAYER", "#CLAN", "active", 16, "Player", '{"user_custom":"keep"}', NOW),
+        )
+        await connection.execute(
+            """
+            INSERT INTO cwl_row_state(
+                chat_id, season, row_key, clan_tag, round_number, attacker_tag,
+                marker, technical_values_json, user_values_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (-4001, "2026-07", "row", "#CLAN", 1, "#PLAYER", "ATTACK", "{}", "{}", NOW),
+        )
+        await connection.commit()
+
+        await apply_migrations(connection)
+        await apply_migrations(connection)
+
+        cursor = await connection.execute(
+            """
+            SELECT active_raid_sheet_name, active_raid_sheet_id, active_raid_season
+            FROM sheet_bindings WHERE chat_id = ?
+            """,
+            (-4001,),
+        )
+        binding = await cursor.fetchone()
+        assert tuple(binding) == ("Рейды", None, None)
+
+        cursor = await connection.execute(
+            "SELECT title FROM column_profiles WHERE chat_id = ? AND column_key = ?",
+            (-4001, "user_custom"),
+        )
+        assert (await cursor.fetchone())["title"] == "Моя колонка"
+        cursor = await connection.execute(
+            "SELECT user_values_json FROM composition_player_state WHERE chat_id = ?",
+            (-4001,),
+        )
+        assert (await cursor.fetchone())["user_values_json"] == '{"user_custom":"keep"}'
+        cursor = await connection.execute(
+            "SELECT season FROM cwl_row_state WHERE chat_id = ?",
+            (-4001,),
+        )
+        assert (await cursor.fetchone())["season"] == "2026-07"
+        cursor = await connection.execute(
+            "SELECT COUNT(*) AS count FROM column_profiles WHERE chat_id = ? AND table_type = 'raids'",
+            (-4001,),
+        )
+        assert (await cursor.fetchone())["count"] == 8
 
 
 @pytest.mark.asyncio

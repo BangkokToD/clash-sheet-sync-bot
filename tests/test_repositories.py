@@ -2,23 +2,89 @@
 
 from __future__ import annotations
 
+import json
+from decimal import Decimal
+
 import aiosqlite
 import pytest
 
 from clash_sheet_sync_bot.models import SheetBlock
 from clash_sheet_sync_bot.repositories import (
     CwlRowStateRepository,
+    RaidDataError,
     RaidPlayerState,
     RaidPlayerStateRepository,
     RaidSheetArchive,
     RaidSheetArchiveRepository,
+    RepositoryError,
     RuntimeConfigRepository,
+    SheetBindingRepository,
     SheetBlockRepository,
     SyncRunRepository,
     TelegramChatRepository,
+    as_column_value_type,
+    decode_raid_technical_values,
+    encode_raid_technical_values,
 )
 
 NOW = "2026-07-09T12:00:00+00:00"
+
+
+def _raid_state(
+    *,
+    chat_id: int = -1001,
+    season_key: str = "2026-07-24T07:00:00+00:00",
+    clan_tag: str = "#CLAN",
+    player_tag: str = "#PLAYER",
+) -> RaidPlayerState:
+    """Создаёт полный канонический raid snapshot."""
+
+    return RaidPlayerState(
+        chat_id=chat_id,
+        season_key=season_key,
+        season_start_at=season_key,
+        season_end_at="2026-07-27T07:00:00+00:00",
+        season_state="ended",
+        row_key=f"raid_row:{season_key}|{clan_tag}|{player_tag}",
+        clan_tag=clan_tag,
+        player_tag=player_tag,
+        technical_values={
+            "player_name": "Player",
+            "attacks": 6,
+            "attack_limit": 5,
+            "bonus_attack_limit": 1,
+            "capital_resources_looted": 12345,
+            "weighted_damage_units": 601,
+            "normal_points": Decimal("6.01"),
+            "coefficient": Decimal("1.001666666666666666666666667"),
+        },
+        user_values={"note": "manual", "hidden": "keep"},
+        row_hash="hash",
+        updated_at=NOW,
+    )
+
+
+def test_raid_technical_codec_round_trips_decimal_without_float() -> None:
+    """Проверяет канонический JSON-кодек отдельно от SQLite."""
+
+    technical_values = _raid_state().technical_values
+    raw = encode_raid_technical_values(technical_values)
+    restored = decode_raid_technical_values(raw)
+
+    assert restored == technical_values
+    assert isinstance(restored["normal_points"], Decimal)
+    assert isinstance(restored["coefficient"], Decimal)
+    assert not isinstance(restored["coefficient"], float)
+
+
+def test_raid_technical_codec_rejects_duplicate_json_field() -> None:
+    """Проверяет единственность каждого поля канонического JSON."""
+
+    raw = encode_raid_technical_values(_raid_state().technical_values)
+    duplicated = raw.replace('"attacks":6', '"attacks":6,"attacks":6')
+
+    with pytest.raises(RaidDataError, match="дубликат"):
+        decode_raid_technical_values(duplicated)
 
 
 async def _insert_chat(
@@ -524,26 +590,295 @@ async def test_raid_repositories_round_trip_and_archive_order(
     await _insert_chat(migrated_connection, chat_id=-1001)
     rows = RaidPlayerStateRepository(migrated_connection)
     archives = RaidSheetArchiveRepository(migrated_connection)
-    state = RaidPlayerState(
-        chat_id=-1001,
-        season_key="2026-07-24T07:00:00+00:00",
-        season_start_at="2026-07-24T07:00:00+00:00",
-        season_end_at="2026-07-27T07:00:00+00:00",
-        season_state="ended",
-        row_key="raid_row:season|#CLAN|#PLAYER",
-        clan_tag="#CLAN",
-        player_tag="#PLAYER",
-        technical_values={"weighted_damage_units": 600, "coefficient": 1.0},
-        user_values={"note": "manual"},
-        row_hash="hash",
-        updated_at=NOW,
-    )
+    state = _raid_state()
     await rows.upsert(state)
     assert await rows.list_for_season(chat_id=-1001, season_key=state.season_key) == (state,)
+
+    cursor = await migrated_connection.execute(
+        "SELECT technical_values_json FROM raid_player_state WHERE chat_id = ?",
+        (-1001,),
+    )
+    raw = (await cursor.fetchone())["technical_values_json"]
+    decoded = json.loads(raw, parse_float=Decimal)
+    assert decoded["normal_points"] == Decimal("6.01")
+    assert decoded["coefficient"] == Decimal("1.001666666666666666666666667")
+    assert not isinstance(decoded["normal_points"], float)
 
     older = RaidSheetArchive(-1001, "old", "2026-07-17", "Рейды 2026-07-17", 201, NOW)
     newer = RaidSheetArchive(-1001, "new", "2026-07-24", "Рейды 2026-07-24", 202, NOW)
     await archives.upsert(newer)
     await archives.upsert(older)
     assert await archives.list_ordered(-1001) == (older, newer)
+    assert await archives.get_by_season(chat_id=-1001, season_key="old") == older
     assert await archives.get_by_sheet_id(chat_id=-1001, sheet_id=202) == newer
+    await archives.delete(chat_id=-1001, season_key="old")
+    assert await archives.get_by_season(chat_id=-1001, season_key="old") is None
+    assert await archives.remove_stale(chat_id=-1001, existing_sheet_ids=()) == 1
+    assert await archives.list_ordered(-1001) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("attacks", True),
+        ("attacks", "6"),
+        ("attacks", -1),
+        ("normal_points", "6.01"),
+        ("normal_points", Decimal("-0.01")),
+        ("player_name", ""),
+    ),
+)
+@pytest.mark.asyncio
+async def test_raid_repository_rejects_malformed_technical_values(
+    migrated_connection: aiosqlite.Connection,
+    field: str,
+    value: object,
+) -> None:
+    """Проверяет строгий codec обязательных raid technical fields."""
+
+    await _insert_chat(migrated_connection, chat_id=-1001)
+    state = _raid_state()
+    state.technical_values[field] = value
+
+    with pytest.raises(RaidDataError, match=field):
+        await RaidPlayerStateRepository(migrated_connection).upsert(state)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "unknown"))
+@pytest.mark.asyncio
+async def test_raid_repository_rejects_missing_or_unknown_technical_fields(
+    migrated_connection: aiosqlite.Connection,
+    mutation: str,
+) -> None:
+    """Проверяет точный набор полей канонического technical JSON."""
+
+    await _insert_chat(migrated_connection, chat_id=-1001)
+    state = _raid_state()
+    if mutation == "missing":
+        del state.technical_values["attack_limit"]
+    else:
+        state.technical_values["unexpected"] = 1
+
+    with pytest.raises(RaidDataError, match=r"attack_limit|unexpected"):
+        await RaidPlayerStateRepository(migrated_connection).upsert(state)
+
+
+@pytest.mark.asyncio
+async def test_raid_repository_maps_corrupted_sqlite_json_to_domain_error(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет доменную ошибку для повреждённого persisted state."""
+
+    await _insert_chat(migrated_connection, chat_id=-1001)
+    state = _raid_state()
+    await RaidPlayerStateRepository(migrated_connection).upsert(state)
+    await migrated_connection.execute(
+        "UPDATE raid_player_state SET technical_values_json = ? WHERE chat_id = ?",
+        ('{"attacks":true}', -1001),
+    )
+
+    with pytest.raises(RaidDataError, match="technical_values_json"):
+        await RaidPlayerStateRepository(migrated_connection).list_for_season(
+            chat_id=-1001,
+            season_key=state.season_key,
+        )
+
+
+def test_number_column_value_type_parser_is_strict() -> None:
+    """Проверяет новый number и отклонение неизвестного value type."""
+
+    assert as_column_value_type("number") == "number"
+    with pytest.raises(RepositoryError, match="value_type"):
+        as_column_value_type("decimal")
+
+
+@pytest.mark.asyncio
+async def test_binding_updates_preserve_raid_fields_when_omitted_and_allow_explicit_null(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет различие omitted и явного NULL для auto-fix binding update."""
+
+    chat_id = -1101
+    await _insert_chat(migrated_connection, chat_id=chat_id)
+    await _insert_sheet_binding(migrated_connection, chat_id=chat_id)
+    repository = SheetBindingRepository(migrated_connection)
+    await repository.update_active_raid_binding(
+        chat_id=chat_id,
+        active_raid_sheet_name="Рейды active",
+        active_raid_sheet_id=444,
+        active_raid_season="2026-07-24T07:00:00+00:00",
+        now=NOW,
+    )
+
+    await repository.update_sheet_ids(
+        chat_id=chat_id,
+        composition_sheet_name="Состав",
+        composition_sheet_id=111,
+        active_cwl_sheet_name="CWL",
+        active_cwl_sheet_id=222,
+        active_cwl_season="2026-07",
+        bot_state_sheet_name="_bot_state",
+        bot_state_sheet_id=333,
+        now=NOW,
+    )
+    preserved = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(chat_id)
+    assert preserved is not None
+    assert (
+        preserved.active_raid_sheet_name,
+        preserved.active_raid_sheet_id,
+        preserved.active_raid_season,
+    ) == ("Рейды active", 444, "2026-07-24T07:00:00+00:00")
+
+    await repository.update_sheet_ids(
+        chat_id=chat_id,
+        composition_sheet_name="Состав",
+        composition_sheet_id=111,
+        active_cwl_sheet_name="CWL",
+        active_cwl_sheet_id=222,
+        active_cwl_season="2026-07",
+        active_raid_sheet_id=None,
+        active_raid_season=None,
+        bot_state_sheet_name="_bot_state",
+        bot_state_sheet_id=333,
+        now=NOW,
+    )
+    cleared = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(chat_id)
+    assert cleared is not None
+    assert cleared.active_raid_sheet_name == "Рейды active"
+    assert cleared.active_raid_sheet_id is None
+    assert cleared.active_raid_season is None
+
+
+@pytest.mark.asyncio
+async def test_binding_upsert_and_transfer_preserve_all_raid_fields(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет setup upsert и transfer без потери raid binding."""
+
+    source_chat_id = -1201
+    target_chat_id = -1202
+    await _insert_chat(migrated_connection, chat_id=source_chat_id)
+    await _insert_chat(migrated_connection, chat_id=target_chat_id)
+    repository = SheetBindingRepository(migrated_connection)
+    await repository.upsert_active_binding(
+        chat_id=source_chat_id,
+        google_sheet_id="sheet-id",
+        spreadsheet_url="https://example.test/sheet-id",
+        composition_sheet_name="Состав",
+        composition_sheet_id=111,
+        active_cwl_sheet_name="CWL",
+        active_cwl_sheet_id=222,
+        active_cwl_season="2026-07",
+        active_raid_sheet_name="Рейды active",
+        active_raid_sheet_id=444,
+        active_raid_season="2026-07-24T07:00:00+00:00",
+        bot_state_sheet_name="_bot_state",
+        bot_state_sheet_id=333,
+        timezone="Europe/Kyiv",
+        now=NOW,
+    )
+    await repository.upsert_active_binding(
+        chat_id=source_chat_id,
+        google_sheet_id="sheet-id",
+        spreadsheet_url="https://example.test/sheet-id",
+        composition_sheet_name="Состав 2",
+        composition_sheet_id=112,
+        active_cwl_sheet_name="CWL",
+        active_cwl_sheet_id=222,
+        active_cwl_season="2026-07",
+        bot_state_sheet_name="_bot_state",
+        bot_state_sheet_id=333,
+        timezone="Europe/Kyiv",
+        now=NOW,
+    )
+    await repository.transfer_binding_to_chat(
+        source_chat_id=source_chat_id,
+        target_chat_id=target_chat_id,
+        now=NOW,
+    )
+
+    transferred = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(
+        target_chat_id
+    )
+    assert transferred is not None
+    assert (
+        transferred.active_raid_sheet_name,
+        transferred.active_raid_sheet_id,
+        transferred.active_raid_season,
+    ) == ("Рейды active", 444, "2026-07-24T07:00:00+00:00")
+
+
+@pytest.mark.asyncio
+async def test_raid_archive_constraints_reject_duplicate_season_and_sheet_id(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет оба UNIQUE registry рейдовых архивов."""
+
+    await _insert_chat(migrated_connection, chat_id=-1301)
+    await migrated_connection.execute(
+        """
+        INSERT INTO raid_sheet_archives(
+            chat_id, season_key, season_start_at, sheet_name, sheet_id, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (-1301, "season-1", "2026-07-01", "Archive 1", 501, NOW),
+    )
+    with pytest.raises(aiosqlite.IntegrityError):
+        await migrated_connection.execute(
+            """
+            INSERT INTO raid_sheet_archives(
+                chat_id, season_key, season_start_at, sheet_name, sheet_id, archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (-1301, "season-1", "2026-07-02", "Archive 2", 502, NOW),
+        )
+    with pytest.raises(aiosqlite.IntegrityError):
+        await migrated_connection.execute(
+            """
+            INSERT INTO raid_sheet_archives(
+                chat_id, season_key, season_start_at, sheet_name, sheet_id, archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (-1301, "season-2", "2026-07-02", "Archive 2", 501, NOW),
+        )
+
+
+@pytest.mark.asyncio
+async def test_rebind_and_delete_touch_only_selected_raid_blocks(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет физический sheet ID и raid-prefix при metadata операциях."""
+
+    chat_id = -1401
+    await _insert_chat(migrated_connection, chat_id=chat_id)
+    for sheet_name, block_key, start_cell in (
+        ("Рейды", "raid:#ONE", "A1"),
+        ("Рейды", "raid_message:#TWO", "A10"),
+        ("Рейды", "cwl:#KEEP", "A20"),
+    ):
+        await _insert_sheet_block(
+            migrated_connection,
+            chat_id=chat_id,
+            sheet_name=sheet_name,
+            block_key=block_key,
+            start_cell=start_cell,
+        )
+    repository = SheetBlockRepository(migrated_connection)
+    await repository.rebind_blocks(
+        chat_id=chat_id,
+        old_sheet_name="Рейды",
+        new_sheet_name="Рейды 2026-07-24",
+        sheet_id=111,
+        block_key_prefixes=("raid:", "raid_message:"),
+        updated_at=NOW,
+    )
+    await repository.delete_blocks(
+        chat_id=chat_id,
+        sheet_id=111,
+        block_key_prefixes=("raid:", "raid_message:"),
+    )
+
+    remaining = await repository.list_blocks(chat_id)
+    assert [(block.sheet_name, block.block_key) for block in remaining] == [
+        ("Рейды", "cwl:#KEEP")
+    ]
