@@ -42,20 +42,24 @@ SETTINGS_SECTIONS: Final = {
     "composition_active_columns": "Колонки активного состава",
     "composition_exited_columns": "Колонки вышедших",
     "cwl_columns": "Колонки CWL",
+    "raids_columns": "Колонки рейдов",
 }
 
 TABLE_TYPE_CALLBACK_PAYLOADS: Final[dict[TableType, str]] = {
     "composition_active": "ca",
     "composition_exited": "ce",
     "cwl": "c",
+    "raids": "r",
 }
 CALLBACK_PAYLOAD_TABLE_TYPES: Final[dict[str, TableType]] = {
     "ca": "composition_active",
     "ce": "composition_exited",
     "c": "cwl",
+    "r": "raids",
     "composition_active": "composition_active",
     "composition_exited": "composition_exited",
     "cwl": "cwl",
+    "raids": "raids",
 }
 
 

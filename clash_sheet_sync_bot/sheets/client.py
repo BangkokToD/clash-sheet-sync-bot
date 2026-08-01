@@ -253,6 +253,97 @@ class SheetsClient:
 
         raise GoogleSheetsReadError(f"Лист {sheet_name} не найден.")
 
+    async def is_column_hidden(
+        self,
+        *,
+        sheet_id: int,
+        sheet_name: str,
+        column_index: int,
+    ) -> bool:
+        """Проверяет explicit hiddenByUser одной физической колонки.
+
+        Args:
+            sheet_id: Ожидаемый физический ID листа.
+            sheet_name: Точное название листа для ограниченного A1 range.
+            column_index: Zero-based индекс проверяемой колонки.
+
+        Returns:
+            `True`, если колонка явно скрыта пользователем или ботом.
+
+        Raises:
+            GoogleSheetsReadError: Если identity или metadata колонки невалидны.
+        """
+
+        if not isinstance(sheet_id, int) or isinstance(sheet_id, bool) or sheet_id < 0:
+            raise GoogleSheetsReadError("sheet_id скрытой колонки должен быть целым числом.")
+        if not isinstance(column_index, int) or isinstance(column_index, bool) or column_index < 0:
+            raise GoogleSheetsReadError("column_index должен быть неотрицательным целым числом.")
+        column_name = _number_to_column(column_index + 1)
+        query = urlencode(
+            {
+                "ranges": build_sheet_range(sheet_name, f"{column_name}:{column_name}"),
+                "fields": (
+                    "sheets(properties(sheetId),data(startColumn,columnMetadata(hiddenByUser)))"
+                ),
+            },
+        )
+        data = await self._request_json(
+            method="GET",
+            path=f"/{self._sheet_id}?{query}",
+            error_cls=GoogleSheetsReadError,
+        )
+        raw_sheets = data.get("sheets")
+        if not isinstance(raw_sheets, list):
+            raise GoogleSheetsReadError("Column metadata не содержит sheets.")
+        matches: list[JsonObject] = []
+        for raw_sheet in raw_sheets:
+            if not isinstance(raw_sheet, dict):
+                raise GoogleSheetsReadError("Column metadata sheet должен быть объектом.")
+            properties = raw_sheet.get("properties")
+            if not isinstance(properties, dict):
+                raise GoogleSheetsReadError("Column metadata не содержит sheet properties.")
+            metadata_sheet_id = properties.get("sheetId")
+            if (
+                not isinstance(metadata_sheet_id, int)
+                or isinstance(metadata_sheet_id, bool)
+                or metadata_sheet_id < 0
+            ):
+                raise GoogleSheetsReadError("Column metadata sheetId некорректен.")
+            if metadata_sheet_id == sheet_id:
+                matches.append(raw_sheet)
+        if len(matches) != 1:
+            raise GoogleSheetsReadError(
+                f"Column metadata для sheet_id={sheet_id} должна быть однозначной.",
+            )
+
+        raw_grid_data = matches[0].get("data", [])
+        if not isinstance(raw_grid_data, list):
+            raise GoogleSheetsReadError("Column metadata data должно быть списком.")
+        for raw_grid in raw_grid_data:
+            if not isinstance(raw_grid, dict):
+                raise GoogleSheetsReadError("Column metadata grid должен быть объектом.")
+            start_column = raw_grid.get("startColumn", 0)
+            if (
+                not isinstance(start_column, int)
+                or isinstance(start_column, bool)
+                or start_column < 0
+            ):
+                raise GoogleSheetsReadError("Column metadata startColumn некорректен.")
+            raw_columns = raw_grid.get("columnMetadata", [])
+            if not isinstance(raw_columns, list):
+                raise GoogleSheetsReadError("columnMetadata должно быть списком.")
+            offset = column_index - start_column
+            if not 0 <= offset < len(raw_columns):
+                continue
+            raw_column = raw_columns[offset]
+            if not isinstance(raw_column, dict):
+                raise GoogleSheetsReadError("DimensionProperties должен быть объектом.")
+            hidden = raw_column.get("hiddenByUser", False)
+            if not isinstance(hidden, bool):
+                raise GoogleSheetsReadError("hiddenByUser должен быть bool.")
+            return hidden
+        return False
+
     async def read_values(self, sheet_name: str, range_a1: str) -> list[list[CellValue]]:
         """Читает значения из A1-диапазона.
 

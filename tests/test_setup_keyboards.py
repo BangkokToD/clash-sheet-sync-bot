@@ -6,7 +6,12 @@ from collections.abc import Iterator
 from typing import Any
 
 from clash_sheet_sync_bot.models import ColumnProfile, TableType
-from clash_sheet_sync_bot.setup.keyboards import columns_section_keyboard
+from clash_sheet_sync_bot.setup.keyboards import (
+    columns_section_keyboard,
+    settings_menu_keyboard,
+    table_type_from_payload,
+    table_type_payload,
+)
 from clash_sheet_sync_bot.sheets.column_profiles import default_columns
 
 TELEGRAM_CALLBACK_DATA_LIMIT = 64
@@ -24,7 +29,12 @@ def test_column_keyboard_callback_data_fits_telegram_limit() -> None:
     """Проверяет, что callback_data кнопок колонок не превышает лимит Telegram."""
 
     chat_id = -1001234567890
-    table_types: tuple[TableType, ...] = ("composition_active", "composition_exited", "cwl")
+    table_types: tuple[TableType, ...] = (
+        "composition_active",
+        "composition_exited",
+        "cwl",
+        "raids",
+    )
 
     for table_type in table_types:
         columns = tuple(
@@ -48,3 +58,23 @@ def test_column_keyboard_callback_data_fits_telegram_limit() -> None:
             len(callback_data.encode("utf-8")) <= TELEGRAM_CALLBACK_DATA_LIMIT
             for callback_data in callback_data_items
         )
+
+
+def test_raid_column_payload_is_short_and_round_trips() -> None:
+    """Проверяет стабильный короткий callback payload рейдовых колонок."""
+
+    assert table_type_payload("raids") == "r"
+    assert table_type_from_payload("r") == "raids"
+    assert table_type_from_payload("raids") == "raids"
+    assert table_type_from_payload("raid") is None
+
+
+def test_settings_menu_contains_raid_columns_section() -> None:
+    """Проверяет отдельный раздел настройки рейдовых колонок."""
+
+    markup = settings_menu_keyboard(-1001)
+
+    assert {
+        "text": "Колонки рейдов",
+        "callback_data": "settings:section:-1001:raids_columns",
+    } in [button for row in markup["inline_keyboard"] for button in row]
