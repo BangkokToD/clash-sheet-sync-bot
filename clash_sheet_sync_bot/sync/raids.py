@@ -66,11 +66,10 @@ RAID_BLOCK_GAP_ROWS: Final = 1
 
 WHITE_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
 BLACK_RGB: Final = {"red": 0.0, "green": 0.0, "blue": 0.0}
-DARK_HEADER_RGB: Final = {"red": 0.20, "green": 0.24, "blue": 0.29}
-HEADER_RGB: Final = {"red": 0.78, "green": 0.82, "blue": 0.86}
-LIGHT_BAND_RGB: Final = {"red": 0.96, "green": 0.96, "blue": 0.96}
+DARK_GREEN_RGB: Final = {"red": 0.12, "green": 0.32, "blue": 0.24}
+GREEN_RGB: Final = {"red": 0.18, "green": 0.42, "blue": 0.31}
+LIGHT_BAND_RGB: Final = {"red": 0.95, "green": 0.97, "blue": 0.96}
 SOFT_PINK_RGB: Final = {"red": 0.98, "green": 0.86, "blue": 0.88}
-WHITE_TEXT_RGB: Final = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
 RaidSeasonState = Literal["ongoing", "ended"]
 RaidDistrictKind = Literal["normal", "capital"]
@@ -1325,9 +1324,9 @@ def _raid_title_cell_format() -> JsonObject:
 
     return {
         "userEnteredFormat": {
-            "backgroundColorStyle": {"rgbColor": DARK_HEADER_RGB},
+            "backgroundColorStyle": {"rgbColor": DARK_GREEN_RGB},
             "textFormat": {
-                "foregroundColorStyle": {"rgbColor": WHITE_TEXT_RGB},
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
                 "bold": True,
             },
             "verticalAlignment": "MIDDLE",
@@ -1341,9 +1340,9 @@ def _raid_header_cell_format() -> JsonObject:
 
     return {
         "userEnteredFormat": {
-            "backgroundColorStyle": {"rgbColor": HEADER_RGB},
+            "backgroundColorStyle": {"rgbColor": GREEN_RGB},
             "textFormat": {
-                "foregroundColorStyle": {"rgbColor": BLACK_RGB},
+                "foregroundColorStyle": {"rgbColor": WHITE_RGB},
                 "bold": True,
             },
             "verticalAlignment": "MIDDLE",

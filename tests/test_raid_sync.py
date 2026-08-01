@@ -1989,6 +1989,134 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
 
 
 @pytest.mark.asyncio
+async def test_apply_raid_uses_composition_and_cwl_green_palette() -> None:
+    """Проверяет общую зелёную палитру managed raid block."""
+
+    rows = (
+        _planned_raid_row(player_tag="#P1", rank=1, attacks=6),
+        _planned_raid_row(player_tag="#P2", rank=2, attacks=6),
+    )
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=_prepared_raid_apply(
+            state="ongoing",
+            blocks=(RaidClanBlock(clan_tag="#AAA111", clan_name="Alpha", rows=rows),),
+        ),
+    )
+
+    full_format_fields = (
+        "userEnteredFormat(backgroundColorStyle,textFormat,verticalAlignment,wrapStrategy)"
+    )
+    full_format_requests = [
+        request["repeatCell"]
+        for request in sheets.spreadsheet_requests[0]
+        if request.get("repeatCell", {}).get("fields") == full_format_fields
+    ]
+    assert full_format_requests == [
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=0,
+                end_row=4,
+                start_column=0,
+                end_column=8,
+            ),
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColorStyle": {
+                        "rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                    },
+                    "textFormat": {
+                        "foregroundColorStyle": {
+                            "rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0},
+                        },
+                        "bold": False,
+                    },
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "WRAP",
+                },
+            },
+            "fields": full_format_fields,
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=0,
+                end_row=1,
+                start_column=0,
+                end_column=8,
+            ),
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColorStyle": {
+                        "rgbColor": {"red": 0.12, "green": 0.32, "blue": 0.24},
+                    },
+                    "textFormat": {
+                        "foregroundColorStyle": {
+                            "rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                        },
+                        "bold": True,
+                    },
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "WRAP",
+                },
+            },
+            "fields": full_format_fields,
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=1,
+                end_row=2,
+                start_column=0,
+                end_column=8,
+            ),
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColorStyle": {
+                        "rgbColor": {"red": 0.18, "green": 0.42, "blue": 0.31},
+                    },
+                    "textFormat": {
+                        "foregroundColorStyle": {
+                            "rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                        },
+                        "bold": True,
+                    },
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "WRAP",
+                },
+            },
+            "fields": full_format_fields,
+        },
+    ]
+
+    band_requests = [
+        request["repeatCell"]
+        for request in sheets.spreadsheet_requests[0]
+        if request.get("repeatCell", {}).get("fields") == "userEnteredFormat.backgroundColorStyle"
+    ]
+    assert band_requests == [
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=3,
+                end_row=4,
+                start_column=0,
+                end_column=8,
+            ),
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColorStyle": {
+                        "rgbColor": {"red": 0.95, "green": 0.97, "blue": 0.96},
+                    },
+                },
+            },
+            "fields": "userEnteredFormat.backgroundColorStyle",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_ongoing_raid_uses_configured_target_without_status_fill() -> None:
     """Покрывает target из AppConfig и отсутствие ongoing status fill."""
 
