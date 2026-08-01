@@ -37,6 +37,7 @@ from clash_sheet_sync_bot.sheets.client import (
     SheetMetadata,
     SheetsClient,
     SheetValues,
+    SpreadsheetMetadata,
     range_from_start_cell,
 )
 from clash_sheet_sync_bot.sheets.column_profiles import (
@@ -2202,33 +2203,100 @@ async def _resolve_active_cwl_sheet(
     """Находит активный CWL-лист, учитывая незавершённую ротацию."""
 
     metadata = await sheets_client.get_spreadsheet_metadata()
-    configured_title = runtime_config.sheet_binding.active_cwl_sheet_name
-    sheet_by_configured_title = next(
-        (sheet for sheet in metadata.sheets if sheet.title == configured_title),
-        None,
+    active_sheet = resolve_active_cwl_sheet_metadata(
+        metadata,
+        configured_title=runtime_config.sheet_binding.active_cwl_sheet_name,
+        active_sheet_id=runtime_config.sheet_binding.active_cwl_sheet_id,
+        error_cls=CwlDataError,
     )
-    canonical_sheet = next(
-        (sheet for sheet in metadata.sheets if sheet.title == CWL_ACTIVE_SHEET_NAME),
-        None,
-    )
-    active_sheet_id = runtime_config.sheet_binding.active_cwl_sheet_id
-    if active_sheet_id is not None:
-        sheet_by_id = next(
-            (sheet for sheet in metadata.sheets if sheet.sheet_id == active_sheet_id),
-            None,
-        )
-        if sheet_by_id is not None:
-            if sheet_by_id.title == configured_title:
-                return sheet_by_id
-            if canonical_sheet is None:
-                return sheet_by_id
-
-    if sheet_by_configured_title is not None:
-        return sheet_by_configured_title
-    if canonical_sheet is not None:
-        return canonical_sheet
+    if active_sheet is not None:
+        return active_sheet
 
     return await sheets_client.add_sheet(CWL_ACTIVE_SHEET_NAME)
+
+
+def resolve_active_cwl_sheet_metadata(
+    metadata: SpreadsheetMetadata,
+    *,
+    configured_title: str,
+    active_sheet_id: int | None,
+    error_cls: type[Exception],
+) -> SheetMetadata | None:
+    """Выбирает metadata физического активного CWL-листа без Sheets-операций.
+
+    Args:
+        metadata: Актуальная metadata таблицы с физическими листами.
+        configured_title: Точное имя активного CWL-листа из binding.
+        active_sheet_id: Физический ID активного CWL-листа из binding.
+        error_cls: Доменный тип ошибки для неоднозначного безопасного active CWL.
+
+    Returns:
+        Metadata выбранного активного CWL-листа или ``None``, если безопасный
+        active CWL отсутствует и вызывающий контекст должен обработать это.
+
+    Raises:
+        error_cls: Если metadata безопасного active CWL неоднозначна. При его
+            отсутствии обязательный физический лист отклоняется тем же доменным
+            типом ошибки в вызывающем контексте.
+    """
+
+    canonical_matches = tuple(
+        sheet for sheet in metadata.sheets if sheet.title == CWL_ACTIVE_SHEET_NAME
+    )
+    canonical = _unique_cwl_sheet_match(
+        canonical_matches,
+        criterion=f"canonical title={CWL_ACTIVE_SHEET_NAME!r}",
+        error_cls=error_cls,
+    )
+    if canonical is not None:
+        return canonical
+
+    if active_sheet_id is not None:
+        id_matches = tuple(sheet for sheet in metadata.sheets if sheet.sheet_id == active_sheet_id)
+        sheet_by_id = _unique_cwl_sheet_match(
+            id_matches,
+            criterion=f"sheet_id={active_sheet_id}",
+            error_cls=error_cls,
+        )
+        if (
+            sheet_by_id is not None
+            and sheet_by_id.title == configured_title
+            and _is_allowed_active_cwl_title(sheet_by_id.title)
+        ):
+            return sheet_by_id
+
+    title_matches = tuple(sheet for sheet in metadata.sheets if sheet.title == configured_title)
+    sheet_by_title = _unique_cwl_sheet_match(
+        title_matches,
+        criterion=f"binding title={configured_title!r}",
+        error_cls=error_cls,
+    )
+    if sheet_by_title is not None and _is_allowed_active_cwl_title(
+        sheet_by_title.title,
+    ):
+        return sheet_by_title
+    return None
+
+
+def _unique_cwl_sheet_match(
+    matches: Sequence[SheetMetadata],
+    *,
+    criterion: str,
+    error_cls: type[Exception],
+) -> SheetMetadata | None:
+    """Возвращает единственный exact CWL match или отклоняет ambiguity."""
+
+    if len(matches) > 1:
+        raise error_cls(
+            f"Неоднозначный active CWL для {criterion}: найдено {len(matches)} листа.",
+        )
+    return matches[0] if matches else None
+
+
+def _is_allowed_active_cwl_title(title: str) -> bool:
+    """Запрещает service-looking CWL staging/archive как active fallback."""
+
+    return title == CWL_ACTIVE_SHEET_NAME or not title.startswith(CWL_ACTIVE_SHEET_NAME)
 
 
 async def _move_cwl_before_composition(

@@ -94,6 +94,14 @@ class GoogleSheetsWriteError(GoogleSheetsError):
     """Ошибка записи Google Sheets."""
 
 
+def validate_sheet_id(sheet_id: object) -> int:
+    """Возвращает допустимый physical sheet ID или поднимает write error."""
+
+    if not isinstance(sheet_id, int) or isinstance(sheet_id, bool) or sheet_id < 0:
+        raise GoogleSheetsWriteError("sheet_id для удаления должен быть целым числом.")
+    return sheet_id
+
+
 class GoogleAccessTokenProvider:
     """Поставщик access token для Google Sheets API.
 
@@ -429,6 +437,27 @@ class SheetsClient:
             ],
         )
         return _read_sheet_metadata_from_reply(data, "duplicateSheet")
+
+    async def delete_sheet(self, sheet_id: int) -> None:
+        """Удаляет лист только по конкретному физическому ID.
+
+        Args:
+            sheet_id: Числовой ID bot-owned листа.
+
+        Raises:
+            GoogleSheetsWriteError: Если ID не является неотрицательным целым.
+        """
+
+        validated_sheet_id = validate_sheet_id(sheet_id)
+        await self.batch_update_spreadsheet(
+            [
+                {
+                    "deleteSheet": {
+                        "sheetId": validated_sheet_id,
+                    },
+                },
+            ],
+        )
 
     async def rename_sheet(self, sheet_id: int, title: str) -> None:
         """Переименовывает лист.

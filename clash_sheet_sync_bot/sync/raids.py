@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final, Literal
@@ -20,10 +20,13 @@ from clash_sheet_sync_bot.models import (
     TrackedClan,
     normalize_tag,
 )
+from clash_sheet_sync_bot.repositories.bindings import SheetBindingRepository
 from clash_sheet_sync_bot.repositories.raid_state import (
     RaidDataError,
     RaidPlayerState,
     RaidPlayerStateRepository,
+    RaidSheetArchive,
+    RaidSheetArchiveRepository,
     decode_raid_technical_values,
     encode_raid_technical_values,
     validate_raid_player_state,
@@ -31,9 +34,11 @@ from clash_sheet_sync_bot.repositories.raid_state import (
 from clash_sheet_sync_bot.repositories.sheet_blocks import SheetBlockRepository
 from clash_sheet_sync_bot.sheets.client import (
     CellValue,
+    GoogleSheetsWriteError,
     SheetMetadata,
     SheetsClient,
     SheetValues,
+    SpreadsheetMetadata,
     range_from_start_cell,
 )
 from clash_sheet_sync_bot.sheets.column_profiles import (
@@ -46,11 +51,14 @@ from clash_sheet_sync_bot.sheets.ranges import (
     offset_cell,
 )
 from clash_sheet_sync_bot.sync.composition import PlannedPlayerState
+from clash_sheet_sync_bot.sync.cwl import resolve_active_cwl_sheet_metadata
 
 CAPITAL_PEAK_DISTRICT_ID: Final = 70_000_000
 CAPITAL_PEAK_NAME: Final = "Capital Peak"
 RAID_TABLE: Final[TableType] = "raids"
 RAID_ACTIVE_SHEET_NAME: Final = "Рейды"
+RAID_STAGING_SHEET_PREFIX: Final = "Рейды - staging - "
+RAID_ARCHIVE_SHEET_PREFIX: Final = "Рейды "
 RAID_BLOCK_PREFIX: Final = "raid:"
 RAID_MESSAGE_BLOCK_PREFIX: Final = "raid_message:"
 RAID_TITLE_ROWS_COUNT: Final = 2
@@ -208,6 +216,9 @@ class RaidSheetSyncResult:
     rows_count: int
     blocks_count: int
     warnings: tuple[str, ...] = ()
+    archived_previous_season: bool = False
+    archive_sheet_name: str | None = None
+    pruned_archive_sheet_names: tuple[str, ...] = ()
 
 
 async def apply_public_raid_sync(
@@ -215,65 +226,128 @@ async def apply_public_raid_sync(
     runtime_config: RuntimeChatConfig,
     sheets_client: SheetsClient,
     raid_player_state_repository: RaidPlayerStateRepository,
+    raid_sheet_archive_repository: RaidSheetArchiveRepository,
     sheet_block_repository: SheetBlockRepository,
+    sheet_binding_repository: SheetBindingRepository,
     config: AppConfig,
     prepared: PreparedRaidSync,
+    sync_run_id: int,
 ) -> RaidSheetSyncResult:
-    """Записывает первый или неизменившийся active raid season.
-
-    Смена сезона намеренно не выполняется здесь: staging, архивирование и
-    ротация относятся к следующему пункту плана.
-    """
+    """Записывает active raid season с recoverable staging-ротацией."""
 
     selected = prepared.selected_season
     active_season_key = runtime_config.sheet_binding.active_raid_season
-    if active_season_key is not None and (
-        selected is None or selected.season_key != active_season_key
-    ):
+    if active_season_key is not None and selected is None:
         raise RaidDataError(
-            "Смена active raid season требует ротации, которая не входит в текущий apply.",
+            "Известный active raid season нельзя заменить пустым состоянием.",
         )
 
     columns = _physical_raid_columns(runtime_config.column_profiles)
-    active_sheet = await _resolve_active_raid_sheet(runtime_config, sheets_client)
-    built_blocks = build_raid_sheet_blocks(
-        runtime_config=runtime_config,
-        sheet_name=active_sheet.title,
-        sheet_id=active_sheet.sheet_id,
-        prepared=prepared,
-        columns=columns,
-        attacks_target=config.raid_attacks_target,
+    metadata = await sheets_client.get_spreadsheet_metadata()
+    active_sheet = await _resolve_active_raid_sheet(
+        runtime_config,
+        sheets_client,
+        metadata=metadata,
     )
     registered_blocks = await sheet_block_repository.list_blocks(runtime_config.chat_id)
-    previous_blocks = _registered_blocks_for_active_raid_sheet(
-        registered_blocks=registered_blocks,
-        active_sheet=active_sheet,
+    season_changed = (
+        active_season_key is not None
+        and selected is not None
+        and selected.season_key != active_season_key
     )
+    old_archive_sheet: SheetMetadata | None = None
+    archive_sheet_name: str | None = None
+    old_blocks: tuple[SheetBlock, ...] = ()
+    archive_built_blocks: tuple[BuiltRaidBlock, ...] = ()
+    active_previous_blocks: tuple[SheetBlock, ...] = ()
 
-    await _rewrite_raid_values(
-        sheets_client=sheets_client,
-        sheet_name=active_sheet.title,
-        previous_blocks=previous_blocks,
-        built_blocks=built_blocks,
-    )
-    await _format_raid_sheet(
-        sheets_client=sheets_client,
-        sheet_id=active_sheet.sheet_id,
-        previous_blocks=previous_blocks,
-        built_blocks=built_blocks,
-        columns=columns,
-        season_state=None if selected is None else selected.state,
-        attacks_target=config.raid_attacks_target,
-    )
-    await sheets_client.hide_dimension(
-        sheet_id=active_sheet.sheet_id,
-        dimension="COLUMNS",
-        start_index=0,
-        end_index=1,
-        hidden=True,
-    )
+    if season_changed:
+        previous_active = prepared.previous_active_season
+        if previous_active is None or previous_active.season_key != active_season_key:
+            raise RaidDataError(
+                "Preparation не содержит состояние известного old active raid season.",
+            )
+        bound_sheet = _bound_active_raid_sheet(runtime_config, metadata)
+        recovery = (
+            active_sheet.title == RAID_ACTIVE_SHEET_NAME
+            and active_sheet.sheet_id != runtime_config.sheet_binding.active_raid_sheet_id
+            and bound_sheet is not None
+            and not _is_raid_staging_sheet(bound_sheet)
+        )
+        if recovery:
+            old_archive_sheet = bound_sheet
+            archive_sheet_name = bound_sheet.title
+            old_blocks = _registered_raid_blocks_for_sheet_id(
+                registered_blocks,
+                bound_sheet.sheet_id,
+            )
+            archive_built_blocks = build_raid_sheet_blocks(
+                runtime_config=runtime_config,
+                sheet_name=bound_sheet.title,
+                sheet_id=bound_sheet.sheet_id,
+                prepared=PreparedRaidSync(
+                    selected_season=previous_active,
+                    previous_active_season=None,
+                ),
+                columns=columns,
+                attacks_target=config.raid_attacks_target,
+            )
+            active_previous_blocks = _registered_blocks_for_active_raid_sheet(
+                registered_blocks=registered_blocks,
+                active_sheet=active_sheet,
+            )
+            built_blocks = await _write_raid_sheet_content(
+                runtime_config=runtime_config,
+                sheets_client=sheets_client,
+                active_sheet=active_sheet,
+                prepared=prepared,
+                columns=columns,
+                previous_blocks=active_previous_blocks,
+                attacks_target=config.raid_attacks_target,
+            )
+        else:
+            (
+                active_sheet,
+                built_blocks,
+                old_archive_sheet,
+                archive_sheet_name,
+                old_blocks,
+                archive_built_blocks,
+            ) = await _rotate_raid_sheet(
+                runtime_config=runtime_config,
+                sheets_client=sheets_client,
+                prepared=prepared,
+                columns=columns,
+                registered_blocks=registered_blocks,
+                metadata=metadata,
+                old_active=active_sheet,
+                previous_active=previous_active,
+                attacks_target=config.raid_attacks_target,
+                sync_run_id=sync_run_id,
+            )
+    else:
+        active_previous_blocks = _registered_blocks_for_active_raid_sheet(
+            registered_blocks=registered_blocks,
+            active_sheet=active_sheet,
+        )
+        built_blocks = await _write_raid_sheet_content(
+            runtime_config=runtime_config,
+            sheets_client=sheets_client,
+            active_sheet=active_sheet,
+            prepared=prepared,
+            columns=columns,
+            previous_blocks=active_previous_blocks,
+            attacks_target=config.raid_attacks_target,
+        )
 
     updated_at = utc_now_iso()
+    if season_changed and prepared.previous_active_season is not None:
+        await _store_raid_player_states(
+            runtime_config=runtime_config,
+            repository=raid_player_state_repository,
+            season=prepared.previous_active_season,
+            updated_at=updated_at,
+        )
     if selected is not None:
         await _store_raid_player_states(
             runtime_config=runtime_config,
@@ -281,14 +355,70 @@ async def apply_public_raid_sync(
             season=selected,
             updated_at=updated_at,
         )
+
+    if season_changed:
+        if old_archive_sheet is None or archive_sheet_name is None:
+            raise RaidDataError("Rotation завершилась без identity старого archive sheet.")
+        existing_archives = await raid_sheet_archive_repository.list_ordered(
+            runtime_config.chat_id,
+        )
+        existing_archive = next(
+            (
+                archive
+                for archive in existing_archives
+                if archive.season_key == active_season_key
+                and archive.sheet_id == old_archive_sheet.sheet_id
+            ),
+            None,
+        )
+        await raid_sheet_archive_repository.upsert(
+            RaidSheetArchive(
+                chat_id=runtime_config.chat_id,
+                season_key=active_season_key,
+                season_start_at=prepared.previous_active_season.start_time,
+                sheet_name=archive_sheet_name,
+                sheet_id=old_archive_sheet.sheet_id,
+                archived_at=(
+                    existing_archive.archived_at if existing_archive is not None else updated_at
+                ),
+            ),
+        )
+        await _replace_raid_block_metadata(
+            runtime_config=runtime_config,
+            repository=sheet_block_repository,
+            active_sheet=old_archive_sheet,
+            previous_blocks=old_blocks,
+            built_blocks=archive_built_blocks,
+            updated_at=updated_at,
+        )
+
     await _replace_raid_block_metadata(
         runtime_config=runtime_config,
         repository=sheet_block_repository,
         active_sheet=active_sheet,
-        previous_blocks=previous_blocks,
+        previous_blocks=active_previous_blocks,
         built_blocks=built_blocks,
         updated_at=updated_at,
     )
+
+    if selected is not None:
+        await sheet_binding_repository.update_active_raid_binding(
+            chat_id=runtime_config.chat_id,
+            active_raid_sheet_name=active_sheet.title,
+            active_raid_sheet_id=active_sheet.sheet_id,
+            active_raid_season=selected.season_key,
+            now=updated_at,
+        )
+
+    pruned_names, cleanup_warnings = await _prune_raid_archives(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        raid_sheet_archive_repository=raid_sheet_archive_repository,
+        sheet_block_repository=sheet_block_repository,
+        active_sheet_id=active_sheet.sheet_id,
+        archive_limit=config.raid_archive_sheets_limit,
+    )
+    warnings = (*prepared.warnings, *cleanup_warnings)
 
     return RaidSheetSyncResult(
         season_key=None if selected is None else selected.season_key,
@@ -297,40 +427,22 @@ async def apply_public_raid_sync(
         sheet_id=active_sheet.sheet_id,
         rows_count=sum(len(block.rows) for block in built_blocks),
         blocks_count=len(built_blocks),
-        warnings=prepared.warnings,
+        warnings=warnings,
+        archived_previous_season=season_changed,
+        archive_sheet_name=archive_sheet_name,
+        pruned_archive_sheet_names=pruned_names,
     )
 
 
 async def _resolve_active_raid_sheet(
     runtime_config: RuntimeChatConfig,
     sheets_client: SheetsClient,
+    *,
+    metadata: SpreadsheetMetadata | None = None,
 ) -> SheetMetadata:
-    """Разрешает active raid sheet по ID, binding title и canonical title."""
+    """Разрешает active raid sheet, предпочитая canonical после rotation."""
 
-    metadata = await sheets_client.get_spreadsheet_metadata()
-    active_sheet_id = runtime_config.sheet_binding.active_raid_sheet_id
-    if active_sheet_id is not None:
-        matches_by_id = tuple(
-            sheet for sheet in metadata.sheets if sheet.sheet_id == active_sheet_id
-        )
-        sheet_by_id = _unique_active_raid_sheet_match(
-            matches_by_id,
-            criterion=f"sheet_id={active_sheet_id}",
-        )
-        if sheet_by_id is not None:
-            return sheet_by_id
-
-    configured_title = runtime_config.sheet_binding.active_raid_sheet_name
-    matches_by_configured_title = tuple(
-        sheet for sheet in metadata.sheets if sheet.title == configured_title
-    )
-    sheet_by_configured_title = _unique_active_raid_sheet_match(
-        matches_by_configured_title,
-        criterion=f"binding title={configured_title!r}",
-    )
-    if sheet_by_configured_title is not None:
-        return sheet_by_configured_title
-
+    metadata = metadata or await sheets_client.get_spreadsheet_metadata()
     matches_by_canonical_title = tuple(
         sheet for sheet in metadata.sheets if sheet.title == RAID_ACTIVE_SHEET_NAME
     )
@@ -338,6 +450,35 @@ async def _resolve_active_raid_sheet(
         matches_by_canonical_title,
         criterion=f"canonical title={RAID_ACTIVE_SHEET_NAME!r}",
     )
+
+    configured_title = runtime_config.sheet_binding.active_raid_sheet_name
+    active_sheet_id = runtime_config.sheet_binding.active_raid_sheet_id
+    if active_sheet_id is not None:
+        matches_by_id = tuple(
+            sheet
+            for sheet in metadata.sheets
+            if sheet.sheet_id == active_sheet_id and not _is_raid_staging_sheet(sheet)
+        )
+        sheet_by_id = _unique_active_raid_sheet_match(
+            matches_by_id,
+            criterion=f"sheet_id={active_sheet_id}",
+        )
+        if sheet_by_id is not None:
+            if sheet_by_id.title == configured_title or canonical_sheet is None:
+                return sheet_by_id
+            return canonical_sheet
+
+    matches_by_configured_title = tuple(
+        sheet
+        for sheet in metadata.sheets
+        if sheet.title == configured_title and not _is_raid_staging_sheet(sheet)
+    )
+    sheet_by_configured_title = _unique_active_raid_sheet_match(
+        matches_by_configured_title,
+        criterion=f"binding title={configured_title!r}",
+    )
+    if sheet_by_configured_title is not None:
+        return sheet_by_configured_title
     if canonical_sheet is not None:
         return canonical_sheet
     return await sheets_client.add_sheet(RAID_ACTIVE_SHEET_NAME)
@@ -355,6 +496,336 @@ def _unique_active_raid_sheet_match(
             f"Неоднозначный active raid sheet для {criterion}: найдено {len(matches)} листа.",
         )
     return matches[0] if matches else None
+
+
+def _is_raid_staging_sheet(sheet: SheetMetadata) -> bool:
+    """Проверяет служебный staging title без признания его active."""
+
+    return sheet.title.startswith(RAID_STAGING_SHEET_PREFIX)
+
+
+def _bound_active_raid_sheet(
+    runtime_config: RuntimeChatConfig,
+    metadata: SpreadsheetMetadata,
+) -> SheetMetadata | None:
+    """Возвращает физический лист binding без title fallback."""
+
+    sheet_id = runtime_config.sheet_binding.active_raid_sheet_id
+    if sheet_id is None:
+        return None
+    matches = tuple(sheet for sheet in metadata.sheets if sheet.sheet_id == sheet_id)
+    return _unique_active_raid_sheet_match(
+        matches,
+        criterion=f"binding sheet_id={sheet_id}",
+    )
+
+
+async def _write_raid_sheet_content(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    active_sheet: SheetMetadata,
+    prepared: PreparedRaidSync,
+    columns: Sequence[ColumnProfile],
+    previous_blocks: Sequence[SheetBlock],
+    attacks_target: int,
+) -> tuple[BuiltRaidBlock, ...]:
+    """Полностью записывает, форматирует и скрывает key одного raid-листа."""
+
+    built_blocks = build_raid_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name=active_sheet.title,
+        sheet_id=active_sheet.sheet_id,
+        prepared=prepared,
+        columns=columns,
+        attacks_target=attacks_target,
+    )
+    await _rewrite_raid_values(
+        sheets_client=sheets_client,
+        sheet_name=active_sheet.title,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+    )
+    await _format_raid_sheet(
+        sheets_client=sheets_client,
+        sheet_id=active_sheet.sheet_id,
+        previous_blocks=previous_blocks,
+        built_blocks=built_blocks,
+        columns=columns,
+        season_state=prepared.season_state,
+        attacks_target=attacks_target,
+    )
+    await sheets_client.hide_dimension(
+        sheet_id=active_sheet.sheet_id,
+        dimension="COLUMNS",
+        start_index=0,
+        end_index=1,
+        hidden=True,
+    )
+    return built_blocks
+
+
+async def _rotate_raid_sheet(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    prepared: PreparedRaidSync,
+    columns: Sequence[ColumnProfile],
+    registered_blocks: Sequence[SheetBlock],
+    metadata: SpreadsheetMetadata,
+    old_active: SheetMetadata,
+    previous_active: PreparedRaidSeason,
+    attacks_target: int,
+    sync_run_id: int,
+) -> tuple[
+    SheetMetadata,
+    tuple[BuiltRaidBlock, ...],
+    SheetMetadata,
+    str,
+    tuple[SheetBlock, ...],
+    tuple[BuiltRaidBlock, ...],
+]:
+    """Готовит staging, финализирует old active и выполняет atomic rotation."""
+
+    cwl_index = _resolve_cwl_sheet_index(runtime_config, metadata)
+    existing_titles = {sheet.title for sheet in metadata.sheets}
+    staging_title = _unique_sheet_title(
+        base_title=f"{RAID_STAGING_SHEET_PREFIX}{sync_run_id}",
+        existing_titles=existing_titles,
+    )
+    staging = await sheets_client.add_sheet(staging_title)
+    await _write_raid_sheet_content(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        active_sheet=staging,
+        prepared=prepared,
+        columns=columns,
+        previous_blocks=(),
+        attacks_target=attacks_target,
+    )
+
+    old_blocks = _registered_blocks_for_active_raid_sheet(
+        registered_blocks=registered_blocks,
+        active_sheet=old_active,
+    )
+    previous_prepared = PreparedRaidSync(
+        selected_season=previous_active,
+        previous_active_season=None,
+    )
+    finalized_old_blocks = await _write_raid_sheet_content(
+        runtime_config=runtime_config,
+        sheets_client=sheets_client,
+        active_sheet=old_active,
+        prepared=previous_prepared,
+        columns=columns,
+        previous_blocks=old_blocks,
+        attacks_target=attacks_target,
+    )
+
+    current_metadata = await sheets_client.get_spreadsheet_metadata()
+    archive_title = _unique_sheet_title(
+        base_title=f"{RAID_ARCHIVE_SHEET_PREFIX}{previous_active.start_time[:10]}",
+        existing_titles={
+            sheet.title
+            for sheet in current_metadata.sheets
+            if sheet.sheet_id != old_active.sheet_id
+        },
+    )
+    await sheets_client.batch_update_spreadsheet(
+        [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": old_active.sheet_id,
+                        "title": archive_title,
+                    },
+                    "fields": "title",
+                },
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": staging.sheet_id,
+                        "title": RAID_ACTIVE_SHEET_NAME,
+                    },
+                    "fields": "title",
+                },
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": staging.sheet_id,
+                        "index": cwl_index,
+                    },
+                    "fields": "index",
+                },
+            },
+        ],
+    )
+    new_active = SheetMetadata(
+        sheet_id=staging.sheet_id,
+        title=RAID_ACTIVE_SHEET_NAME,
+        index=cwl_index,
+    )
+    archived_old = SheetMetadata(
+        sheet_id=old_active.sheet_id,
+        title=archive_title,
+        index=old_active.index,
+    )
+    built_blocks = build_raid_sheet_blocks(
+        runtime_config=runtime_config,
+        sheet_name=new_active.title,
+        sheet_id=new_active.sheet_id,
+        prepared=prepared,
+        columns=columns,
+        attacks_target=attacks_target,
+    )
+    archive_built_blocks = _retarget_built_raid_blocks(
+        finalized_old_blocks,
+        sheet_name=archive_title,
+        sheet_id=old_active.sheet_id,
+    )
+    return (
+        new_active,
+        built_blocks,
+        archived_old,
+        archive_title,
+        old_blocks,
+        archive_built_blocks,
+    )
+
+
+def _resolve_cwl_sheet_index(
+    runtime_config: RuntimeChatConfig,
+    metadata: SpreadsheetMetadata,
+) -> int:
+    """Находит целевую позицию нового raid active непосредственно перед CWL."""
+
+    binding = runtime_config.sheet_binding
+    cwl_sheet = resolve_active_cwl_sheet_metadata(
+        metadata,
+        configured_title=binding.active_cwl_sheet_name,
+        active_sheet_id=binding.active_cwl_sheet_id,
+        error_cls=RaidDataError,
+    )
+    if cwl_sheet is None or cwl_sheet.index is None:
+        raise RaidDataError("Не удалось определить позицию active CWL для raid rotation.")
+    return cwl_sheet.index
+
+
+def _retarget_built_raid_blocks(
+    built_blocks: Sequence[BuiltRaidBlock],
+    *,
+    sheet_name: str,
+    sheet_id: int,
+) -> tuple[BuiltRaidBlock, ...]:
+    """Переносит фактическую built metadata на финальный title/physical ID."""
+
+    return tuple(
+        replace(
+            built,
+            block=replace(
+                built.block,
+                sheet_name=sheet_name,
+                sheet_id=sheet_id,
+            ),
+        )
+        for built in built_blocks
+    )
+
+
+def _unique_sheet_title(*, base_title: str, existing_titles: set[str]) -> str:
+    """Подбирает свободное название с безопасным суффиксом ` - N`."""
+
+    if base_title not in existing_titles:
+        return base_title
+    suffix = 2
+    while True:
+        title = f"{base_title} - {suffix}"
+        if title not in existing_titles:
+            return title
+        suffix += 1
+
+
+def _registered_raid_blocks_for_sheet_id(
+    registered_blocks: Sequence[SheetBlock],
+    sheet_id: int,
+) -> tuple[SheetBlock, ...]:
+    """Выбирает raid metadata только конкретного физического листа."""
+
+    return tuple(
+        block
+        for block in registered_blocks
+        if block.sheet_id == sheet_id
+        and (
+            block.block_key.startswith(RAID_BLOCK_PREFIX)
+            or block.block_key.startswith(RAID_MESSAGE_BLOCK_PREFIX)
+        )
+    )
+
+
+async def _prune_raid_archives(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+    raid_sheet_archive_repository: RaidSheetArchiveRepository,
+    sheet_block_repository: SheetBlockRepository,
+    active_sheet_id: int,
+    archive_limit: int,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Удаляет oldest registry archives и возвращает recoverable warnings."""
+
+    archives = [
+        archive
+        for archive in await raid_sheet_archive_repository.list_ordered(
+            runtime_config.chat_id,
+        )
+        if archive.sheet_id != active_sheet_id
+    ]
+    pruned: list[str] = []
+    warnings: list[str] = []
+    while len(archives) > archive_limit:
+        oldest = archives[0]
+        metadata = await sheets_client.get_spreadsheet_metadata()
+        physical_matches = tuple(
+            sheet for sheet in metadata.sheets if sheet.sheet_id == oldest.sheet_id
+        )
+        if len(physical_matches) > 1:
+            raise RaidDataError(
+                "Неоднозначный physical raid archive для "
+                f"registry sheet_id={oldest.sheet_id}: найдено {len(physical_matches)} листа.",
+            )
+        physical = physical_matches[0] if physical_matches else None
+        if (
+            physical is None
+            or physical.sheet_id == active_sheet_id
+            or _is_raid_staging_sheet(physical)
+        ):
+            warnings.append(
+                "Raid cleanup не выполнен: oldest archive registry не подтверждён "
+                f"безопасным физическим sheet_id={oldest.sheet_id}.",
+            )
+            break
+        try:
+            await sheets_client.delete_sheet(oldest.sheet_id)
+        except GoogleSheetsWriteError:
+            warnings.append(
+                "Raid cleanup не завершён: не удалось удалить зарегистрированный "
+                f"архив {oldest.sheet_name!r}; pruning будет повторён.",
+            )
+            break
+        await raid_sheet_archive_repository.delete(
+            chat_id=runtime_config.chat_id,
+            season_key=oldest.season_key,
+        )
+        await sheet_block_repository.delete_blocks(
+            chat_id=runtime_config.chat_id,
+            sheet_id=oldest.sheet_id,
+            block_key_prefixes=(RAID_BLOCK_PREFIX, RAID_MESSAGE_BLOCK_PREFIX),
+        )
+        pruned.append(oldest.sheet_name)
+        archives.pop(0)
+    return tuple(pruned), tuple(warnings)
 
 
 def build_raid_sheet_blocks(

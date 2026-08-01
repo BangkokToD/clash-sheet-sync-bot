@@ -9,17 +9,32 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
 import httpx
 import pytest
 
 from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError, ClashClient
-from clash_sheet_sync_bot.repositories import RaidDataError, RaidPlayerState
-from clash_sheet_sync_bot.sheets.client import SheetMetadata
+from clash_sheet_sync_bot.repositories import (
+    RaidDataError,
+    RaidPlayerState,
+    RaidPlayerStateRepository,
+    RaidSheetArchive,
+    RaidSheetArchiveRepository,
+    RuntimeConfigRepository,
+    SheetBindingRepository,
+    SheetBlockRepository,
+)
+from clash_sheet_sync_bot.sheets.client import (
+    GoogleSheetsWriteError,
+    SheetMetadata,
+    SheetsClient,
+)
 from clash_sheet_sync_bot.sheets.column_profiles import default_columns
 from clash_sheet_sync_bot.sync.composition import PlannedPlayerState
 from clash_sheet_sync_bot.sync.raids import (
     CAPITAL_PEAK_DISTRICT_ID,
     RAID_ACTIVE_SHEET_NAME,
+    RAID_ARCHIVE_SHEET_PREFIX,
     RAID_BLOCK_PREFIX,
     RAID_MESSAGE_BLOCK_PREFIX,
     SOFT_PINK_RGB,
@@ -48,11 +63,14 @@ from tests.fakes.factories import (
 from tests.fakes.sheets import (
     FakeSheetsClient,
     RecordingRaidPlayerStateRepository,
+    RecordingRaidSheetArchiveRepository,
+    RecordingSheetBindingRepository,
     RecordingSheetBlockRepository,
 )
 
 JsonObject = dict[str, Any]
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+TEST_NOW = "2026-07-29T00:00:00+00:00"
 
 
 def _member(
@@ -1450,6 +1468,7 @@ RAID_SEASON_END = "2026-07-27T07:00:00+00:00"
 
 def _planned_raid_row(
     *,
+    season_key: str = RAID_SEASON_KEY,
     clan_tag: str = "#AAA111",
     player_tag: str = "#PLAYER",
     player_name: str = "Player",
@@ -1462,8 +1481,8 @@ def _planned_raid_row(
     """Создаёт готовую raid row для apply-контрактов."""
 
     return RaidPlannedRow(
-        row_key=f"raid_row:{RAID_SEASON_KEY}|{clan_tag}|{player_tag}",
-        season_key=RAID_SEASON_KEY,
+        row_key=f"raid_row:{season_key}|{clan_tag}|{player_tag}",
+        season_key=season_key,
         clan_tag=clan_tag,
         rank=rank,
         technical_values=RaidTechnicalValues(
@@ -1483,27 +1502,30 @@ def _planned_raid_row(
 
 def _prepared_raid_apply(
     *,
+    season_key: str = RAID_SEASON_KEY,
+    end_time: str = RAID_SEASON_END,
     state: str = "ended",
     blocks: tuple[RaidClanBlock, ...] | None = None,
+    previous_active_season: PreparedRaidSeason | None = None,
 ) -> PreparedRaidSync:
     """Создаёт результат preparation для изолированного apply."""
 
     return PreparedRaidSync(
         selected_season=PreparedRaidSeason(
-            season_key=RAID_SEASON_KEY,
-            start_time=RAID_SEASON_KEY,
-            end_time=RAID_SEASON_END,
+            season_key=season_key,
+            start_time=season_key,
+            end_time=end_time,
             state=state,  # type: ignore[arg-type]
             blocks=blocks
             or (
                 RaidClanBlock(
                     clan_tag="#AAA111",
                     clan_name="Alpha",
-                    rows=(_planned_raid_row(),),
+                    rows=(_planned_raid_row(season_key=season_key),),
                 ),
             ),
         ),
-        previous_active_season=None,
+        previous_active_season=previous_active_season,
     )
 
 
@@ -1514,7 +1536,10 @@ async def _apply_raid(
     sheets: FakeSheetsClient | None = None,
     blocks: RecordingSheetBlockRepository | None = None,
     states: RecordingRaidPlayerStateRepository | None = None,
+    archives: RecordingRaidSheetArchiveRepository | None = None,
+    bindings: RecordingSheetBindingRepository | None = None,
     config: Any | None = None,
+    sync_run_id: int = 77,
 ) -> tuple[
     RaidSheetSyncResult,
     FakeSheetsClient,
@@ -1526,13 +1551,18 @@ async def _apply_raid(
     sheets = sheets or FakeSheetsClient()
     blocks = blocks or RecordingSheetBlockRepository()
     states = states or RecordingRaidPlayerStateRepository()
+    archives = archives or RecordingRaidSheetArchiveRepository()
+    bindings = bindings or RecordingSheetBindingRepository()
     result = await apply_public_raid_sync(
         runtime_config=runtime,
         sheets_client=sheets,  # type: ignore[arg-type]
         raid_player_state_repository=states,  # type: ignore[arg-type]
+        raid_sheet_archive_repository=archives,  # type: ignore[arg-type]
         sheet_block_repository=blocks,  # type: ignore[arg-type]
+        sheet_binding_repository=bindings,  # type: ignore[arg-type]
         config=config or make_app_config(),
         prepared=prepared,
+        sync_run_id=sync_run_id,
     )
     return result, sheets, blocks, states
 
@@ -1860,7 +1890,17 @@ async def test_apply_ongoing_raid_uses_configured_target_without_status_fill() -
                 SheetMetadata(sheet_id=444, title="Рейды", index=0),
                 SheetMetadata(sheet_id=777, title="Переименованный active", index=1),
             ),
-            "Переименованный active",
+            "Рейды",
+            444,
+        ),
+        (
+            "Мои рейды",
+            777,
+            (
+                SheetMetadata(sheet_id=444, title="Рейды", index=0),
+                SheetMetadata(sheet_id=777, title="Мои рейды", index=1),
+            ),
+            "Мои рейды",
             777,
         ),
         (
@@ -1879,14 +1919,14 @@ async def test_apply_ongoing_raid_uses_configured_target_without_status_fill() -
         ),
     ),
 )
-async def test_apply_resolves_active_raid_sheet_by_id_binding_title_then_canonical(
+async def test_apply_resolves_active_raid_sheet_with_canonical_recovery_priority(
     binding_title: str,
     binding_id: int,
     metadata_sheets: tuple[SheetMetadata, ...],
     expected_title: str,
     expected_id: int,
 ) -> None:
-    """Проверяет resolver active-листа без staging/rotation."""
+    """Проверяет canonical recovery, затем binding ID/title fallback."""
 
     sheets = FakeSheetsClient(metadata_sheets=metadata_sheets)
     result, sheets, _blocks, _states = await _apply_raid(
@@ -2475,14 +2515,14 @@ async def test_apply_keeps_saved_ended_raid_visible_between_api_events() -> None
 
 
 @pytest.mark.asyncio
-async def test_apply_rejects_season_change_without_sheet_or_state_writes() -> None:
-    """Фиксирует границу commit 4: смена сезона требует будущей rotation."""
+async def test_apply_rejects_season_change_without_previous_state_before_writes() -> None:
+    """Проверяет обязательное old active state для безопасной rotation."""
 
     sheets = FakeSheetsClient()
     blocks = RecordingSheetBlockRepository()
     states = RecordingRaidPlayerStateRepository()
 
-    with pytest.raises(RaidDataError, match="ротац"):
+    with pytest.raises(RaidDataError, match="old active"):
         await _apply_raid(
             runtime=_runtime(active_raid_season="2026-07-17T07:00:00+00:00"),
             prepared=_prepared_raid_apply(),
@@ -2497,3 +2537,1686 @@ async def test_apply_rejects_season_change_without_sheet_or_state_writes() -> No
     assert sheets.added_sheets == []
     assert blocks.replace_calls == []
     assert states.upserted_states == []
+
+
+OLD_RAID_SEASON_KEY = "2026-07-17T07:00:00+00:00"
+OLD_RAID_SEASON_END = "2026-07-20T07:00:00+00:00"
+
+
+def _prepared_raid_rotation() -> PreparedRaidSync:
+    """Создаёт preparation смены old active на новый выбранный сезон."""
+
+    previous = PreparedRaidSeason(
+        season_key=OLD_RAID_SEASON_KEY,
+        start_time=OLD_RAID_SEASON_KEY,
+        end_time=OLD_RAID_SEASON_END,
+        state="ended",
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(
+                    _planned_raid_row(
+                        season_key=OLD_RAID_SEASON_KEY,
+                        player_tag="#OLD",
+                        player_name="Old",
+                        attacks=5,
+                    ),
+                ),
+            ),
+        ),
+    )
+    return _prepared_raid_apply(previous_active_season=previous)
+
+
+def _prepared_raid_rotation_layout(
+    *,
+    previous_rows: tuple[RaidPlannedRow, ...] = (),
+    previous_message: str | None = None,
+) -> PreparedRaidSync:
+    """Создаёт смену сезона с управляемым финальным layout архива."""
+
+    previous = PreparedRaidSeason(
+        season_key=OLD_RAID_SEASON_KEY,
+        start_time=OLD_RAID_SEASON_KEY,
+        end_time=OLD_RAID_SEASON_END,
+        state="ended",
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=previous_rows,
+                message=previous_message,
+            ),
+        ),
+    )
+    return _prepared_raid_apply(previous_active_season=previous)
+
+
+def _raid_archive(
+    number: int,
+    *,
+    chat_id: int = -1001,
+    sheet_id: int | None = None,
+    sheet_name: str | None = None,
+) -> RaidSheetArchive:
+    """Создаёт ordered archive registry item."""
+
+    day = number + 1
+    season_key = f"2026-06-{day:02d}T07:00:00+00:00"
+    return RaidSheetArchive(
+        chat_id=chat_id,
+        season_key=season_key,
+        season_start_at=season_key,
+        sheet_name=sheet_name or f"Рейды 2026-06-{day:02d}",
+        sheet_id=sheet_id if sheet_id is not None else 500 + number,
+        archived_at=f"2026-07-{day:02d}T00:00:00+00:00",
+    )
+
+
+def _rotation_metadata(
+    *archives: RaidSheetArchive,
+) -> tuple[SheetMetadata, ...]:
+    """Создаёт metadata active, CWL и зарегистрированных архивов."""
+
+    return (
+        SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+        SheetMetadata(sheet_id=222, title="CWL", index=1),
+        *(
+            SheetMetadata(
+                sheet_id=archive.sheet_id,
+                title=archive.sheet_name,
+                index=index + 2,
+            )
+            for index, archive in enumerate(archives)
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_first_season_updates_binding_without_archive_or_staging() -> None:
+    """Проверяет первый season поверх message-only active без архива."""
+
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata())
+    archives = RecordingRaidSheetArchiveRepository()
+    bindings = RecordingSheetBindingRepository()
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=None),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        archives=archives,
+        bindings=bindings,
+    )
+
+    assert result.archived_previous_season is False
+    assert sheets.added_sheets == []
+    assert archives.upserted_archives == []
+    assert bindings.update_calls[-1]["active_raid_season"] == RAID_SEASON_KEY
+    assert bindings.update_calls[-1]["active_raid_sheet_id"] == 444
+
+
+@pytest.mark.asyncio
+async def test_apply_rotation_prepares_staging_then_uses_one_atomic_rename_move_request() -> None:
+    """Проверяет полный staging до единого atomic rename/move batch."""
+
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata())
+    old_block = make_sheet_block(
+        sheet_name=RAID_ACTIVE_SHEET_NAME,
+        sheet_id=444,
+        block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+        start_cell="A1",
+        rows_count=3,
+        columns_count=8,
+    )
+    blocks = RecordingSheetBlockRepository(blocks=(old_block,))
+    archives = RecordingRaidSheetArchiveRepository()
+    bindings = RecordingSheetBindingRepository()
+    states = RecordingRaidPlayerStateRepository()
+
+    result, sheets, blocks, states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        blocks=blocks,
+        states=states,
+        archives=archives,
+        bindings=bindings,
+        sync_run_id=77,
+    )
+
+    staging_title = "Рейды - staging - 77"
+    assert sheets.added_sheets == [staging_title]
+    assert sheets.operation_log[:8] == [
+        "add_sheet",
+        "values",
+        "format",
+        "hide",
+        "values",
+        "format",
+        "hide",
+        "atomic_rotation",
+    ]
+    atomic_batches = [
+        batch
+        for batch in sheets.spreadsheet_requests
+        if any(
+            request.get("updateSheetProperties", {}).get("fields") == "index" for request in batch
+        )
+    ]
+    assert atomic_batches == [
+        [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": 444,
+                        "title": "Рейды 2026-07-17",
+                    },
+                    "fields": "title",
+                },
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": 445,
+                        "title": RAID_ACTIVE_SHEET_NAME,
+                    },
+                    "fields": "title",
+                },
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": 445, "index": 1},
+                    "fields": "index",
+                },
+            },
+        ],
+    ]
+    assert result.archived_previous_season is True
+    assert result.archive_sheet_name == "Рейды 2026-07-17"
+    assert archives.upserted_archives == [
+        RaidSheetArchive(
+            chat_id=-1001,
+            season_key=OLD_RAID_SEASON_KEY,
+            season_start_at=OLD_RAID_SEASON_KEY,
+            sheet_name="Рейды 2026-07-17",
+            sheet_id=444,
+            archived_at=archives.upserted_archives[0].archived_at,
+        ),
+    ]
+    assert blocks.rebind_calls == []
+    assert blocks.replace_calls[1]["blocks"] == (
+        make_sheet_block(
+            sheet_name="Рейды 2026-07-17",
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+    )
+    assert blocks.replace_calls[-1]["blocks"] == (
+        make_sheet_block(
+            sheet_name=RAID_ACTIVE_SHEET_NAME,
+            sheet_id=445,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+    )
+    assert bindings.update_calls[-1]["active_raid_sheet_id"] == 445
+    assert bindings.update_calls[-1]["active_raid_season"] == RAID_SEASON_KEY
+    assert {state.season_key for state in states.upserted_states} == {
+        OLD_RAID_SEASON_KEY,
+        RAID_SEASON_KEY,
+    }
+    assert states.commit_calls == 0
+    assert blocks.commit_calls == 0
+    assert archives.commit_calls == 0
+    assert bindings.commit_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_rotation_uses_unique_archive_suffix() -> None:
+    """Проверяет безопасный suffix при конфликтующих пользовательских titles."""
+
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            *_rotation_metadata(),
+            SheetMetadata(sheet_id=600, title="Рейды 2026-07-17", index=2),
+            SheetMetadata(sheet_id=601, title="Рейды 2026-07-17 - 2", index=3),
+        ),
+    )
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+    )
+
+    assert result.archive_sheet_name == "Рейды 2026-07-17 - 3"
+    assert sheets.deleted_sheet_ids == []
+
+
+@pytest.mark.asyncio
+async def test_apply_rotation_uses_unique_sync_run_staging_title() -> None:
+    """Проверяет безопасный suffix leftover staging того же sync_run_id."""
+
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            *_rotation_metadata(),
+            SheetMetadata(
+                sheet_id=700,
+                title="Рейды - staging - 77",
+                index=2,
+            ),
+        ),
+    )
+
+    await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        sync_run_id=77,
+    )
+
+    assert sheets.added_sheets == ["Рейды - staging - 77 - 2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "previous_rows",
+        "previous_message",
+        "old_block_key",
+        "old_rows_count",
+        "expected_block_key",
+        "expected_rows_count",
+    ),
+    (
+        (
+            (
+                _planned_raid_row(
+                    season_key=OLD_RAID_SEASON_KEY,
+                    player_tag="#OLD1",
+                    rank=1,
+                ),
+                _planned_raid_row(
+                    season_key=OLD_RAID_SEASON_KEY,
+                    player_tag="#OLD2",
+                    rank=2,
+                ),
+            ),
+            None,
+            f"{RAID_BLOCK_PREFIX}#AAA111",
+            3,
+            f"{RAID_BLOCK_PREFIX}#AAA111",
+            4,
+        ),
+        (
+            (
+                _planned_raid_row(
+                    season_key=OLD_RAID_SEASON_KEY,
+                    player_tag="#OLD1",
+                ),
+            ),
+            None,
+            f"{RAID_BLOCK_PREFIX}#AAA111",
+            6,
+            f"{RAID_BLOCK_PREFIX}#AAA111",
+            3,
+        ),
+        (
+            (),
+            "Нет данных завершённого сезона",
+            f"{RAID_BLOCK_PREFIX}#AAA111",
+            5,
+            f"{RAID_MESSAGE_BLOCK_PREFIX}#AAA111",
+            2,
+        ),
+        (
+            (
+                _planned_raid_row(
+                    season_key=OLD_RAID_SEASON_KEY,
+                    player_tag="#OLD1",
+                ),
+            ),
+            None,
+            f"{RAID_MESSAGE_BLOCK_PREFIX}#AAA111",
+            2,
+            f"{RAID_BLOCK_PREFIX}#AAA111",
+            3,
+        ),
+    ),
+    ids=("players-grow", "players-shrink", "rows-to-message", "message-to-rows"),
+)
+async def test_rotation_registers_finalized_archive_block_layout(
+    previous_rows: tuple[RaidPlannedRow, ...],
+    previous_message: str | None,
+    old_block_key: str,
+    old_rows_count: int,
+    expected_block_key: str,
+    expected_rows_count: int,
+) -> None:
+    """Проверяет archive metadata по фактически финализированной матрице."""
+
+    stale = make_sheet_block(
+        sheet_name=RAID_ACTIVE_SHEET_NAME,
+        sheet_id=444,
+        block_key=old_block_key,
+        start_cell="A1",
+        rows_count=old_rows_count,
+        columns_count=8,
+    )
+    unrelated = make_sheet_block(
+        sheet_name=RAID_ACTIVE_SHEET_NAME,
+        sheet_id=444,
+        block_key="user:keep",
+        start_cell="K20",
+        rows_count=7,
+        columns_count=3,
+    )
+    blocks = RecordingSheetBlockRepository(blocks=(stale, unrelated))
+
+    result, _sheets, blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation_layout(
+            previous_rows=previous_rows,
+            previous_message=previous_message,
+        ),
+        sheets=FakeSheetsClient(metadata_sheets=_rotation_metadata()),
+        blocks=blocks,
+    )
+
+    archive_blocks = tuple(
+        block
+        for block in blocks.blocks
+        if block.sheet_id == 444
+        and (
+            block.block_key.startswith(RAID_BLOCK_PREFIX)
+            or block.block_key.startswith(RAID_MESSAGE_BLOCK_PREFIX)
+        )
+    )
+    assert archive_blocks == (
+        make_sheet_block(
+            sheet_name=result.archive_sheet_name or "",
+            sheet_id=444,
+            block_key=expected_block_key,
+            start_cell="A1",
+            rows_count=expected_rows_count,
+            columns_count=8,
+        ),
+    )
+    assert unrelated in blocks.blocks
+
+
+@pytest.mark.asyncio
+async def test_rotation_keeps_four_registered_archives_without_pruning() -> None:
+    """Проверяет лимит четыре после добавления нового архива."""
+
+    existing = tuple(_raid_archive(index) for index in range(3))
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata(*existing))
+    archives = RecordingRaidSheetArchiveRepository(archives=existing)
+
+    await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        archives=archives,
+    )
+
+    assert len(archives.archives) == 4
+    assert sheets.deleted_sheet_ids == []
+
+
+@pytest.mark.asyncio
+async def test_rotation_fifth_archive_deletes_only_oldest_registered_sheet() -> None:
+    """Проверяет pruning пятого архива по каноническому порядку."""
+
+    existing = tuple(_raid_archive(index) for index in range(4))
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            *_rotation_metadata(*existing),
+            SheetMetadata(sheet_id=900, title="Рейды 2026-06-01 user copy", index=8),
+        ),
+    )
+    archives = RecordingRaidSheetArchiveRepository(archives=existing)
+    preserved_state = _saved_raid_state(
+        season_key=existing[0].season_key,
+        season_end_at="2026-06-04T07:00:00+00:00",
+        clan_tag="#AAA111",
+        player_tag="#PRESERVED",
+    )
+    states = RecordingRaidPlayerStateRepository(upserted_states=[preserved_state])
+    blocks = RecordingSheetBlockRepository(
+        blocks=(
+            make_sheet_block(
+                sheet_name=existing[0].sheet_name,
+                sheet_id=existing[0].sheet_id,
+                block_key=f"{RAID_BLOCK_PREFIX}#OLD",
+                start_cell="A1",
+            ),
+        ),
+    )
+
+    _result, sheets, blocks, states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        blocks=blocks,
+        states=states,
+        archives=archives,
+    )
+
+    assert sheets.deleted_sheet_ids == [existing[0].sheet_id]
+    assert 900 not in sheets.deleted_sheet_ids
+    assert archives.deleted_seasons == [(-1001, existing[0].season_key)]
+    assert blocks.delete_calls[-1]["sheet_id"] == existing[0].sheet_id
+    assert preserved_state in states.upserted_states
+
+
+@pytest.mark.asyncio
+async def test_apply_prunes_multiple_excess_archives_to_configured_limit() -> None:
+    """Проверяет последовательное удаление нескольких oldest registry items."""
+
+    existing = tuple(_raid_archive(index) for index in range(7))
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata(*existing))
+    archives = RecordingRaidSheetArchiveRepository(archives=existing)
+
+    await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        archives=archives,
+    )
+
+    assert sheets.deleted_sheet_ids == [500, 501, 502]
+    assert len(archives.archives) == 4
+
+
+@pytest.mark.asyncio
+async def test_pruning_never_deletes_active_staging_or_title_only_match() -> None:
+    """Проверяет запрет delete active/staging и разрешения registry по title."""
+
+    unsafe = (
+        _raid_archive(0, sheet_id=444, sheet_name=RAID_ACTIVE_SHEET_NAME),
+        _raid_archive(1, sheet_id=700, sheet_name="Рейды - staging - orphan"),
+        _raid_archive(2, sheet_id=999, sheet_name="Рейды 2026-06-03"),
+        _raid_archive(3),
+        _raid_archive(4),
+        _raid_archive(5),
+    )
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            *_rotation_metadata(),
+            SheetMetadata(sheet_id=700, title="Рейды - staging - orphan", index=2),
+            SheetMetadata(sheet_id=777, title="Рейды 2026-06-03", index=3),
+            SheetMetadata(sheet_id=503, title=unsafe[3].sheet_name, index=4),
+            SheetMetadata(sheet_id=504, title=unsafe[4].sheet_name, index=5),
+            SheetMetadata(sheet_id=505, title=unsafe[5].sheet_name, index=6),
+        ),
+    )
+    archives = RecordingRaidSheetArchiveRepository(archives=unsafe)
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        archives=archives,
+    )
+
+    assert sheets.deleted_sheet_ids == []
+    assert 444 not in sheets.deleted_sheet_ids
+    assert 700 not in sheets.deleted_sheet_ids
+    assert 777 not in sheets.deleted_sheet_ids
+    assert any("cleanup" in warning.casefold() for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("unsafe_sheet_id", "unsafe_title"),
+    (
+        (444, RAID_ACTIVE_SHEET_NAME),
+        (700, "Рейды - staging - orphan"),
+    ),
+    ids=("active", "staging"),
+)
+async def test_pruning_rejects_active_and_staging_registry_entries(
+    unsafe_sheet_id: int,
+    unsafe_title: str,
+) -> None:
+    """Проверяет каждый запрещённый physical ID как oldest registry item."""
+
+    unsafe = _raid_archive(0, sheet_id=unsafe_sheet_id, sheet_name=unsafe_title)
+    safe = tuple(_raid_archive(index) for index in range(1, 5))
+    metadata = list(_rotation_metadata(*safe))
+    if unsafe_sheet_id != 444:
+        metadata.append(SheetMetadata(sheet_id=unsafe_sheet_id, title=unsafe_title, index=8))
+    sheets = FakeSheetsClient(metadata_sheets=tuple(metadata))
+    archives = RecordingRaidSheetArchiveRepository(archives=(unsafe, *safe))
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        archives=archives,
+    )
+
+    assert sheets.deleted_sheet_ids == []
+    if unsafe_sheet_id == 444:
+        assert result.warnings == ()
+    else:
+        assert any("cleanup" in warning.casefold() for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_pruning_does_not_resolve_missing_registry_sheet_id_by_title() -> None:
+    """Проверяет запрет удаления похожего листа при stale registry sheet ID."""
+
+    missing = _raid_archive(0, sheet_id=999, sheet_name="Рейды 2026-06-01")
+    safe = tuple(_raid_archive(index) for index in range(1, 5))
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            *_rotation_metadata(*safe),
+            SheetMetadata(sheet_id=777, title=missing.sheet_name, index=8),
+        ),
+    )
+    archives = RecordingRaidSheetArchiveRepository(archives=(missing, *safe))
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        archives=archives,
+    )
+
+    assert sheets.deleted_sheet_ids == []
+    assert 777 not in sheets.deleted_sheet_ids
+    assert archives.deleted_seasons == []
+    assert any("sheet_id=999" in warning for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_pruning_failure_returns_cleanup_warning_and_retries_next_apply() -> None:
+    """Проверяет successful rotation, cleanup warning и повторный pruning."""
+
+    existing = tuple(_raid_archive(index) for index in range(4))
+    delete_error = GoogleSheetsWriteError("delete failed")
+    sheets = FakeSheetsClient(
+        metadata_sheets=_rotation_metadata(*existing),
+        fail_delete_sheet=delete_error,
+    )
+    archives = RecordingRaidSheetArchiveRepository(archives=existing)
+    bindings = RecordingSheetBindingRepository()
+
+    first, sheets, blocks, states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        archives=archives,
+        bindings=bindings,
+    )
+
+    assert first.season_key == RAID_SEASON_KEY
+    assert first.archived_previous_season is True
+    assert any("cleanup" in warning.casefold() for warning in first.warnings)
+    assert all("частично обновлена" not in warning for warning in first.warnings)
+    assert len(archives.archives) == 5
+    assert any(archive.sheet_id == 444 for archive in archives.archives)
+    assert bindings.update_calls
+
+    sheets.fail_delete_sheet = None
+    second, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(
+            active_raid_season=RAID_SEASON_KEY,
+            active_raid_sheet_id=first.sheet_id,
+        ),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        blocks=blocks,
+        states=states,
+        archives=archives,
+        bindings=bindings,
+    )
+
+    assert second.season_key == RAID_SEASON_KEY
+    assert sheets.deleted_sheet_ids == [500, 500]
+    assert len(archives.archives) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    (
+        RuntimeError("runtime delete failure"),
+        TypeError("type delete failure"),
+        AssertionError("assert delete failure"),
+        RaidDataError("contract delete failure"),
+    ),
+    ids=("runtime", "type", "assertion", "raid-data"),
+)
+async def test_pruning_propagates_unexpected_delete_exceptions(error: Exception) -> None:
+    """Проверяет, что programming/contract errors не становятся cleanup warning."""
+
+    existing = tuple(_raid_archive(index) for index in range(5))
+    sheets = FakeSheetsClient(
+        metadata_sheets=_rotation_metadata(*existing),
+        fail_delete_sheet=error,
+    )
+    archives = RecordingRaidSheetArchiveRepository(archives=existing)
+
+    with pytest.raises(type(error)) as caught:
+        await _apply_raid(
+            runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+            prepared=_prepared_raid_apply(),
+            sheets=sheets,
+            archives=archives,
+        )
+
+    assert caught.value is error
+    assert archives.deleted_seasons == []
+    assert len(archives.archives) == 5
+
+
+@pytest.mark.asyncio
+async def test_pruning_rejects_duplicate_physical_registry_sheet_id() -> None:
+    """Проверяет domain error при неоднозначном physical archive identity."""
+
+    existing = tuple(_raid_archive(index) for index in range(5))
+    duplicate = existing[0]
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            *_rotation_metadata(*existing),
+            SheetMetadata(
+                sheet_id=duplicate.sheet_id,
+                title=f"{duplicate.sheet_name} duplicate",
+                index=20,
+            ),
+        ),
+    )
+    archives = RecordingRaidSheetArchiveRepository(archives=existing)
+    blocks = RecordingSheetBlockRepository()
+
+    with pytest.raises(RaidDataError, match=r"(?i)неоднознач"):
+        await _apply_raid(
+            runtime=_runtime(active_raid_season=RAID_SEASON_KEY),
+            prepared=_prepared_raid_apply(),
+            sheets=sheets,
+            archives=archives,
+            blocks=blocks,
+        )
+
+    assert sheets.deleted_sheet_ids == []
+    assert archives.deleted_seasons == []
+    assert blocks.delete_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_field",
+    (
+        "fail_add_sheet",
+        "fail_values_update",
+        "fail_spreadsheet_update",
+        "fail_hide",
+        "fail_atomic_rotation",
+    ),
+)
+async def test_rotation_failure_before_atomic_success_does_not_update_sqlite_metadata(
+    failure_field: str,
+) -> None:
+    """Проверяет отсутствие binding/registry reconciliation до atomic success."""
+
+    error = RuntimeError(f"{failure_field} failed")
+    sheets = FakeSheetsClient(
+        metadata_sheets=_rotation_metadata(),
+        **{failure_field: error},  # type: ignore[arg-type]
+    )
+    blocks = RecordingSheetBlockRepository()
+    archives = RecordingRaidSheetArchiveRepository()
+    bindings = RecordingSheetBindingRepository()
+    states = RecordingRaidPlayerStateRepository()
+
+    with pytest.raises(RuntimeError) as caught:
+        await _apply_raid(
+            runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+            prepared=_prepared_raid_rotation(),
+            sheets=sheets,
+            blocks=blocks,
+            states=states,
+            archives=archives,
+            bindings=bindings,
+        )
+
+    assert caught.value is error
+    assert bindings.update_calls == []
+    assert archives.upserted_archives == []
+    assert blocks.rebind_calls == []
+    assert blocks.replace_calls == []
+    assert states.upserted_states == []
+    if failure_field != "fail_atomic_rotation":
+        assert all(
+            update.sheet_name.startswith("Рейды - staging - ")
+            for batch in sheets.batch_value_updates
+            for update in batch
+        )
+        assert all(
+            request.get("repeatCell", {}).get("range", {}).get("sheetId") != 444
+            for batch in sheets.spreadsheet_requests
+            for request in batch
+        )
+        assert all(item["sheet_id"] != 444 for item in sheets.hidden_dimensions)
+    else:
+        canonical = [
+            sheet for sheet in sheets.metadata_sheets if sheet.title == RAID_ACTIVE_SHEET_NAME
+        ]
+        assert [(sheet.sheet_id, sheet.title) for sheet in canonical] == [
+            (444, RAID_ACTIVE_SHEET_NAME),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_post_rename_binding_failure_reconciles_without_second_archive() -> None:
+    """Проверяет recovery после atomic rename до SQLite binding."""
+
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata())
+    binding_error = RuntimeError("binding failed")
+    bindings = RecordingSheetBindingRepository(fail_update=binding_error)
+    archives = RecordingRaidSheetArchiveRepository()
+    blocks = RecordingSheetBlockRepository()
+
+    with pytest.raises(RuntimeError, match="binding failed"):
+        await _apply_raid(
+            runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+            prepared=_prepared_raid_rotation(),
+            sheets=sheets,
+            archives=archives,
+            bindings=bindings,
+            blocks=blocks,
+        )
+
+    assert any(
+        sheet.title == RAID_ACTIVE_SHEET_NAME and sheet.sheet_id != 444
+        for sheet in sheets.metadata_sheets
+    )
+    assert bindings.update_calls == []
+    assert archives.upserted_archives[-1].sheet_id == 444
+    assert blocks.replace_calls[-1]["blocks"][0].sheet_id != 444
+    added_after_failure = tuple(sheets.added_sheets)
+    atomic_count_after_failure = sheets.operation_log.count("atomic_rotation")
+    bindings.fail_update = None
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        archives=archives,
+        bindings=bindings,
+        blocks=blocks,
+    )
+
+    assert result.archived_previous_season is True
+    assert tuple(sheets.added_sheets) == added_after_failure
+    assert sheets.operation_log.count("atomic_rotation") == atomic_count_after_failure
+    assert archives.upserted_archives[-1].sheet_id == 444
+    assert bindings.update_calls[-1]["active_raid_sheet_id"] != 444
+
+
+class _FailingRepositoryProxy:
+    """Делегирует repository, падая на выбранном вызове метода."""
+
+    def __init__(
+        self,
+        target: object,
+        *,
+        method_name: str,
+        call_number: int = 1,
+        after_call: bool = False,
+    ) -> None:
+        self._target = target
+        self._method_name = method_name
+        self._call_number = call_number
+        self._after_call = after_call
+        self._calls = 0
+        self.error = RuntimeError(f"{method_name} recovery checkpoint failed")
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._target, name)
+        if name != self._method_name:
+            return attribute
+
+        async def controlled(*args: Any, **kwargs: Any) -> Any:
+            self._calls += 1
+            should_fail = self._calls == self._call_number
+            if should_fail and not self._after_call:
+                raise self.error
+            result = await attribute(*args, **kwargs)
+            if should_fail:
+                raise self.error
+            return result
+
+        return controlled
+
+
+class _OrderedRepositoryProxy:
+    """Записывает порядок вызовов одного repository метода."""
+
+    def __init__(
+        self,
+        target: object,
+        *,
+        method_name: str,
+        event_name: str,
+        events: list[str],
+    ) -> None:
+        self._target = target
+        self._method_name = method_name
+        self._event_name = event_name
+        self._events = events
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._target, name)
+        if name != self._method_name:
+            return attribute
+
+        async def recorded(*args: Any, **kwargs: Any) -> Any:
+            self._events.append(self._event_name)
+            return await attribute(*args, **kwargs)
+
+        return recorded
+
+
+@pytest.mark.asyncio
+async def test_rotation_publishes_binding_after_registry_and_all_blocks() -> None:
+    """Проверяет binding как последний основной reconciliation marker."""
+
+    events: list[str] = []
+    archives = RecordingRaidSheetArchiveRepository()
+    blocks = RecordingSheetBlockRepository(
+        blocks=(
+            make_sheet_block(
+                sheet_name=RAID_ACTIVE_SHEET_NAME,
+                sheet_id=444,
+                block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+                start_cell="A1",
+                rows_count=7,
+                columns_count=8,
+            ),
+        ),
+    )
+    bindings = RecordingSheetBindingRepository()
+
+    await apply_public_raid_sync(
+        runtime_config=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        sheets_client=FakeSheetsClient(metadata_sheets=_rotation_metadata()),  # type: ignore[arg-type]
+        raid_player_state_repository=RecordingRaidPlayerStateRepository(),  # type: ignore[arg-type]
+        raid_sheet_archive_repository=_OrderedRepositoryProxy(
+            archives,
+            method_name="upsert",
+            event_name="archive-registry",
+            events=events,
+        ),  # type: ignore[arg-type]
+        sheet_block_repository=_OrderedRepositoryProxy(
+            blocks,
+            method_name="replace_blocks_by_prefixes",
+            event_name="blocks",
+            events=events,
+        ),  # type: ignore[arg-type]
+        sheet_binding_repository=_OrderedRepositoryProxy(
+            bindings,
+            method_name="update_active_raid_binding",
+            event_name="binding",
+            events=events,
+        ),  # type: ignore[arg-type]
+        config=make_app_config(),
+        prepared=_prepared_raid_rotation(),
+        sync_run_id=77,
+    )
+
+    assert events == [
+        "archive-registry",
+        "blocks",
+        "blocks",
+        "blocks",
+        "binding",
+    ]
+
+
+async def _seed_rotation_recovery_database(
+    connection: aiosqlite.Connection,
+) -> tuple[RaidSheetArchive, ...]:
+    """Создаёт committed baseline для проверки настоящего SQLite rollback."""
+
+    await connection.execute(
+        """
+        INSERT INTO telegram_chats(
+            chat_id, title, type, status, created_by_user_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (-1001, "Raid recovery", "supergroup", "ready", 1001, TEST_NOW, TEST_NOW),
+    )
+    await SheetBindingRepository(connection).upsert_active_binding(
+        chat_id=-1001,
+        google_sheet_id="sheet-id",
+        spreadsheet_url="https://docs.google.com/spreadsheets/d/sheet-id/edit",
+        composition_sheet_name="Состав",
+        composition_sheet_id=111,
+        active_cwl_sheet_name="CWL",
+        active_cwl_sheet_id=222,
+        active_cwl_season="2026-07",
+        active_raid_sheet_name=RAID_ACTIVE_SHEET_NAME,
+        active_raid_sheet_id=444,
+        active_raid_season=OLD_RAID_SEASON_KEY,
+        bot_state_sheet_name="_bot_state",
+        bot_state_sheet_id=333,
+        timezone="Europe/Kyiv",
+        now=TEST_NOW,
+    )
+    old_block = make_sheet_block(
+        sheet_name=RAID_ACTIVE_SHEET_NAME,
+        sheet_id=444,
+        block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+        start_cell="A1",
+        rows_count=9,
+        columns_count=8,
+    )
+    await SheetBlockRepository(connection).upsert_block(
+        block=old_block,
+        updated_at=TEST_NOW,
+    )
+    await RaidPlayerStateRepository(connection).upsert(
+        _saved_raid_state(
+            season_key=OLD_RAID_SEASON_KEY,
+            season_end_at=OLD_RAID_SEASON_END,
+            clan_tag="#AAA111",
+            player_tag="#OLD",
+            user_values={"raid_note": "old-user-value"},
+        ),
+    )
+    existing = tuple(_raid_archive(index) for index in range(4))
+    archive_repository = RaidSheetArchiveRepository(connection)
+    for archive in existing:
+        await archive_repository.upsert(archive)
+    await connection.commit()
+    return existing
+
+
+def _prepared_rotation_with_user_values() -> PreparedRaidSync:
+    """Создаёт оба сезона с user-values для recovery-инварианта."""
+
+    previous = PreparedRaidSeason(
+        season_key=OLD_RAID_SEASON_KEY,
+        start_time=OLD_RAID_SEASON_KEY,
+        end_time=OLD_RAID_SEASON_END,
+        state="ended",
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(
+                    _planned_raid_row(
+                        season_key=OLD_RAID_SEASON_KEY,
+                        player_tag="#OLD",
+                        user_values={"raid_note": "old-user-value"},
+                    ),
+                ),
+            ),
+        ),
+    )
+    return _prepared_raid_apply(
+        blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                rows=(
+                    _planned_raid_row(
+                        player_tag="#NEW",
+                        user_values={"raid_note": "new-user-value"},
+                    ),
+                ),
+            ),
+        ),
+        previous_active_season=previous,
+    )
+
+
+async def _assert_rotation_rollback_state(
+    connection: aiosqlite.Connection,
+    *,
+    canonical_sheet_id: int,
+) -> None:
+    """Проверяет полный SQLite baseline после rollback post-rename ошибки."""
+
+    binding = await RuntimeConfigRepository(connection).get_active_sheet_binding(-1001)
+    assert binding is not None
+    assert binding.active_raid_sheet_id == 444
+    assert binding.active_raid_season == OLD_RAID_SEASON_KEY
+    assert (
+        await RaidSheetArchiveRepository(connection).get_by_season(
+            chat_id=-1001,
+            season_key=OLD_RAID_SEASON_KEY,
+        )
+        is None
+    )
+    blocks = await SheetBlockRepository(connection).list_blocks(-1001)
+    assert blocks == (
+        make_sheet_block(
+            sheet_name=RAID_ACTIVE_SHEET_NAME,
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=9,
+            columns_count=8,
+        ),
+    )
+    assert all(block.sheet_id != canonical_sheet_id for block in blocks)
+    old_states = await RaidPlayerStateRepository(connection).list_for_season(
+        chat_id=-1001,
+        season_key=OLD_RAID_SEASON_KEY,
+    )
+    new_states = await RaidPlayerStateRepository(connection).list_for_season(
+        chat_id=-1001,
+        season_key=RAID_SEASON_KEY,
+    )
+    assert len(old_states) == 1
+    assert old_states[0].user_values == {"raid_note": "old-user-value"}
+    assert new_states == ()
+
+
+async def _assert_recovered_rotation_state(
+    connection: aiosqlite.Connection,
+    *,
+    canonical_sheet_id: int,
+) -> RaidSheetArchive:
+    """Проверяет единый полный post-retry SQLite recovery contract."""
+
+    binding = await RuntimeConfigRepository(connection).get_active_sheet_binding(-1001)
+    assert binding is not None
+    assert binding.active_raid_sheet_name == RAID_ACTIVE_SHEET_NAME
+    assert binding.active_raid_sheet_id == canonical_sheet_id
+    assert binding.active_raid_season == RAID_SEASON_KEY
+    old_archive = await RaidSheetArchiveRepository(connection).get_by_season(
+        chat_id=-1001,
+        season_key=OLD_RAID_SEASON_KEY,
+    )
+    assert old_archive is not None
+    assert old_archive.sheet_id == 444
+    raid_blocks = tuple(
+        block
+        for block in await SheetBlockRepository(connection).list_blocks(-1001)
+        if block.block_key.startswith(RAID_BLOCK_PREFIX)
+        or block.block_key.startswith(RAID_MESSAGE_BLOCK_PREFIX)
+    )
+    assert set(raid_blocks) == {
+        make_sheet_block(
+            sheet_name=old_archive.sheet_name,
+            sheet_id=444,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+        make_sheet_block(
+            sheet_name=RAID_ACTIVE_SHEET_NAME,
+            sheet_id=canonical_sheet_id,
+            block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+            start_cell="A1",
+            rows_count=3,
+            columns_count=8,
+        ),
+    }
+    old_states = await RaidPlayerStateRepository(connection).list_for_season(
+        chat_id=-1001,
+        season_key=OLD_RAID_SEASON_KEY,
+    )
+    new_states = await RaidPlayerStateRepository(connection).list_for_season(
+        chat_id=-1001,
+        season_key=RAID_SEASON_KEY,
+    )
+    assert len(old_states) == 1
+    assert len(new_states) == 1
+    assert old_states[0].user_values == {"raid_note": "old-user-value"}
+    assert new_states[0].user_values == {"raid_note": "new-user-value"}
+    foreign_key_violations = await (await connection.execute("PRAGMA foreign_key_check")).fetchall()
+    assert foreign_key_violations == []
+    return old_archive
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("checkpoint", "repository_name", "method_name", "call_number", "after_call"),
+    (
+        ("before-archive-upsert", "archives", "upsert", 1, False),
+        ("after-archive-upsert", "archives", "upsert", 1, True),
+        ("archive-blocks", "blocks", "replace_blocks_by_prefixes", 2, True),
+        ("active-blocks", "blocks", "replace_blocks_by_prefixes", 3, True),
+        ("active-binding", "bindings", "update_active_raid_binding", 1, True),
+    ),
+)
+async def test_rotation_recovers_each_sqlite_reconciliation_checkpoint_after_rollback(
+    migrated_connection: aiosqlite.Connection,
+    checkpoint: str,
+    repository_name: str,
+    method_name: str,
+    call_number: int,
+    after_call: bool,
+) -> None:
+    """Проверяет recovery после physical rename и настоящего SQLite rollback."""
+
+    existing = await _seed_rotation_recovery_database(migrated_connection)
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata(*existing))
+    binding = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(-1001)
+    assert binding is not None
+    runtime = replace(
+        _runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        sheet_binding=binding,
+    )
+    repositories: dict[str, object] = {
+        "states": RaidPlayerStateRepository(migrated_connection),
+        "archives": RaidSheetArchiveRepository(migrated_connection),
+        "blocks": SheetBlockRepository(migrated_connection),
+        "bindings": SheetBindingRepository(migrated_connection),
+    }
+    failing = _FailingRepositoryProxy(
+        repositories[repository_name],
+        method_name=method_name,
+        call_number=call_number,
+        after_call=after_call,
+    )
+    repositories[repository_name] = failing
+
+    with pytest.raises(RuntimeError, match="recovery checkpoint failed"):
+        await apply_public_raid_sync(
+            runtime_config=runtime,
+            sheets_client=sheets,  # type: ignore[arg-type]
+            raid_player_state_repository=repositories["states"],  # type: ignore[arg-type]
+            raid_sheet_archive_repository=repositories["archives"],  # type: ignore[arg-type]
+            sheet_block_repository=repositories["blocks"],  # type: ignore[arg-type]
+            sheet_binding_repository=repositories["bindings"],  # type: ignore[arg-type]
+            config=make_app_config(),
+            prepared=_prepared_rotation_with_user_values(),
+            sync_run_id=77,
+        )
+    await migrated_connection.rollback()
+
+    canonical = tuple(
+        sheet for sheet in sheets.metadata_sheets if sheet.title == RAID_ACTIVE_SHEET_NAME
+    )
+    assert len(canonical) == 1
+    canonical_sheet_id = canonical[0].sheet_id
+    assert canonical_sheet_id != 444
+    await _assert_rotation_rollback_state(
+        migrated_connection,
+        canonical_sheet_id=canonical_sheet_id,
+    )
+    rolled_back = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(-1001)
+    assert rolled_back is not None
+    assert checkpoint
+
+    retry_runtime = replace(runtime, sheet_binding=rolled_back)
+    result = await apply_public_raid_sync(
+        runtime_config=retry_runtime,
+        sheets_client=sheets,  # type: ignore[arg-type]
+        raid_player_state_repository=RaidPlayerStateRepository(migrated_connection),
+        raid_sheet_archive_repository=RaidSheetArchiveRepository(migrated_connection),
+        sheet_block_repository=SheetBlockRepository(migrated_connection),
+        sheet_binding_repository=SheetBindingRepository(migrated_connection),
+        config=make_app_config(),
+        prepared=_prepared_rotation_with_user_values(),
+        sync_run_id=78,
+    )
+
+    assert result.sheet_id == canonical_sheet_id
+    assert sheets.operation_log.count("atomic_rotation") == 1
+    assert len(sheets.added_sheets) == 1
+    await _assert_recovered_rotation_state(
+        migrated_connection,
+        canonical_sheet_id=canonical_sheet_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rotation_recovers_failure_after_binding_before_pruning_rollback(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    """Проверяет последний binding marker и retry pruning после rollback."""
+
+    existing = await _seed_rotation_recovery_database(migrated_connection)
+    error = RuntimeError("after binding before pruning failed")
+    sheets = FakeSheetsClient(
+        metadata_sheets=_rotation_metadata(*existing),
+        fail_metadata_on_call=3,
+        fail_metadata_error=error,
+    )
+    binding = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(-1001)
+    assert binding is not None
+    runtime = replace(_runtime(active_raid_season=OLD_RAID_SEASON_KEY), sheet_binding=binding)
+
+    with pytest.raises(RuntimeError) as caught:
+        await apply_public_raid_sync(
+            runtime_config=runtime,
+            sheets_client=sheets,  # type: ignore[arg-type]
+            raid_player_state_repository=RaidPlayerStateRepository(migrated_connection),
+            raid_sheet_archive_repository=RaidSheetArchiveRepository(migrated_connection),
+            sheet_block_repository=SheetBlockRepository(migrated_connection),
+            sheet_binding_repository=SheetBindingRepository(migrated_connection),
+            config=make_app_config(),
+            prepared=_prepared_rotation_with_user_values(),
+            sync_run_id=77,
+        )
+    assert caught.value is error
+    await migrated_connection.rollback()
+
+    canonical_sheet_id = next(
+        sheet.sheet_id for sheet in sheets.metadata_sheets if sheet.title == RAID_ACTIVE_SHEET_NAME
+    )
+    assert any(
+        sheet.sheet_id == 444 and sheet.title.startswith(RAID_ARCHIVE_SHEET_PREFIX)
+        for sheet in sheets.metadata_sheets
+    )
+    await _assert_rotation_rollback_state(
+        migrated_connection,
+        canonical_sheet_id=canonical_sheet_id,
+    )
+    rolled_back = await RuntimeConfigRepository(migrated_connection).get_active_sheet_binding(-1001)
+    assert rolled_back is not None
+    sheets.fail_metadata_on_call = None
+    sheets.fail_metadata_error = None
+
+    result = await apply_public_raid_sync(
+        runtime_config=replace(runtime, sheet_binding=rolled_back),
+        sheets_client=sheets,  # type: ignore[arg-type]
+        raid_player_state_repository=RaidPlayerStateRepository(migrated_connection),
+        raid_sheet_archive_repository=RaidSheetArchiveRepository(migrated_connection),
+        sheet_block_repository=SheetBlockRepository(migrated_connection),
+        sheet_binding_repository=SheetBindingRepository(migrated_connection),
+        config=make_app_config(),
+        prepared=_prepared_rotation_with_user_values(),
+        sync_run_id=78,
+    )
+
+    assert result.sheet_id == canonical_sheet_id
+    assert sheets.operation_log.count("atomic_rotation") == 1
+    assert len(sheets.added_sheets) == 1
+    await _assert_recovered_rotation_state(
+        migrated_connection,
+        canonical_sheet_id=canonical_sheet_id,
+    )
+    archive_repository = RaidSheetArchiveRepository(migrated_connection)
+    assert len(await archive_repository.list_ordered(-1001)) == 4
+    assert (
+        await archive_repository.get_by_season(
+            chat_id=-1001,
+            season_key=existing[0].season_key,
+        )
+        is None
+    )
+    assert sheets.deleted_sheet_ids == [existing[0].sheet_id]
+
+
+@pytest.mark.asyncio
+async def test_canonical_active_recovers_stale_binding_pointing_to_archive() -> None:
+    """Проверяет canonical resolver и reconciliation partial rotation."""
+
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title="Рейды 2026-07-17", index=0),
+            SheetMetadata(sheet_id=445, title=RAID_ACTIVE_SHEET_NAME, index=1),
+            SheetMetadata(sheet_id=222, title="CWL", index=2),
+        ),
+    )
+    archives = RecordingRaidSheetArchiveRepository()
+    bindings = RecordingSheetBindingRepository()
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+        archives=archives,
+        bindings=bindings,
+    )
+
+    assert result.sheet_id == 445
+    assert sheets.added_sheets == []
+    assert sheets.operation_log.count("atomic_rotation") == 0
+    assert archives.upserted_archives[-1].sheet_id == 444
+    assert bindings.update_calls[-1]["active_raid_sheet_id"] == 445
+
+
+@pytest.mark.asyncio
+async def test_rotation_positions_active_before_physical_canonical_cwl() -> None:
+    """Проверяет, что stale CWL archive binding не побеждает canonical CWL."""
+
+    runtime = replace(
+        _runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        sheet_binding=make_sheet_binding(
+            active_raid_season=OLD_RAID_SEASON_KEY,
+            active_cwl_sheet_name="CWL 2026-07",
+            active_cwl_sheet_id=222,
+        ),
+    )
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+            SheetMetadata(sheet_id=222, title="CWL 2026-07", index=1),
+            SheetMetadata(sheet_id=333, title="CWL", index=4),
+        ),
+    )
+
+    await _apply_raid(
+        runtime=runtime,
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+    )
+
+    atomic = next(
+        batch
+        for batch in sheets.spreadsheet_requests
+        if any(item.get("updateSheetProperties", {}).get("fields") == "index" for item in batch)
+    )
+    move = next(
+        item["updateSheetProperties"]
+        for item in atomic
+        if item.get("updateSheetProperties", {}).get("fields") == "index"
+    )
+    assert move["properties"]["index"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bound_title", "bound_index"),
+    (
+        ("CWL - staging - 77", 3),
+        ("CWL 2026-07", 5),
+        ("CWL copy", 6),
+    ),
+    ids=("staging", "archive", "similar-user-title"),
+)
+async def test_rotation_rejects_nonactive_bound_cwl_before_staging(
+    bound_title: str,
+    bound_index: int,
+) -> None:
+    """Проверяет запрет CWL staging/archive при отсутствии canonical."""
+
+    runtime = replace(
+        _runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        sheet_binding=make_sheet_binding(
+            active_raid_season=OLD_RAID_SEASON_KEY,
+            active_cwl_sheet_name=bound_title,
+            active_cwl_sheet_id=222,
+        ),
+    )
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+            SheetMetadata(sheet_id=222, title=bound_title, index=bound_index),
+        ),
+    )
+
+    with pytest.raises(RaidDataError, match="active CWL"):
+        await _apply_raid(
+            runtime=runtime,
+            prepared=_prepared_raid_rotation(),
+            sheets=sheets,
+        )
+
+    assert sheets.added_sheets == []
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+    assert sheets.operation_log == []
+
+
+@pytest.mark.asyncio
+async def test_rotation_rejects_ambiguous_exact_cwl_title_fallback_before_staging() -> None:
+    """Проверяет ambiguity exact configured fallback без fuzzy ownership."""
+
+    runtime = replace(
+        _runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        sheet_binding=make_sheet_binding(
+            active_raid_season=OLD_RAID_SEASON_KEY,
+            active_cwl_sheet_name="Лига",
+            active_cwl_sheet_id=999,
+        ),
+    )
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+            SheetMetadata(sheet_id=222, title="Лига", index=2),
+            SheetMetadata(sheet_id=333, title="Лига", index=3),
+        ),
+    )
+
+    with pytest.raises(RaidDataError, match=r"(?i)неоднознач"):
+        await _apply_raid(
+            runtime=runtime,
+            prepared=_prepared_raid_rotation(),
+            sheets=sheets,
+        )
+
+    assert sheets.added_sheets == []
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bound_title", "bound_id", "bound_index"),
+    (
+        ("CWL", 333, 4),
+        ("Лига", 222, 3),
+    ),
+    ids=("canonical", "configured-bound-active"),
+)
+async def test_rotation_uses_exact_safe_cwl_target_index(
+    bound_title: str,
+    bound_id: int,
+    bound_index: int,
+) -> None:
+    """Проверяет canonical и допустимый exact bound active без fuzzy matching."""
+
+    runtime = replace(
+        _runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+        sheet_binding=make_sheet_binding(
+            active_raid_season=OLD_RAID_SEASON_KEY,
+            active_cwl_sheet_name=bound_title,
+            active_cwl_sheet_id=bound_id,
+        ),
+    )
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+            SheetMetadata(sheet_id=bound_id, title=bound_title, index=bound_index),
+        ),
+    )
+
+    await _apply_raid(
+        runtime=runtime,
+        prepared=_prepared_raid_rotation(),
+        sheets=sheets,
+    )
+
+    atomic = next(
+        batch
+        for batch in sheets.spreadsheet_requests
+        if any(item.get("updateSheetProperties", {}).get("fields") == "index" for item in batch)
+    )
+    move = next(
+        item["updateSheetProperties"]
+        for item in atomic
+        if item.get("updateSheetProperties", {}).get("fields") == "index"
+    )
+    assert move["properties"] == {
+        "sheetId": next(
+            sheet.sheet_id
+            for sheet in sheets.metadata_sheets
+            if sheet.title == RAID_ACTIVE_SHEET_NAME
+        ),
+        "index": bound_index,
+    }
+
+
+@pytest.mark.asyncio
+async def test_rotation_rejects_ambiguous_canonical_cwl_before_atomic_write() -> None:
+    """Проверяет остановку неоднозначного canonical CWL до rename/move."""
+
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title=RAID_ACTIVE_SHEET_NAME, index=0),
+            SheetMetadata(sheet_id=222, title="CWL 2026-07", index=1),
+            SheetMetadata(sheet_id=333, title="CWL", index=2),
+            SheetMetadata(sheet_id=334, title="CWL", index=3),
+        ),
+    )
+
+    with pytest.raises(RaidDataError, match=r"(?i)неоднознач"):
+        await _apply_raid(
+            runtime=_runtime(active_raid_season=OLD_RAID_SEASON_KEY),
+            prepared=_prepared_raid_rotation(),
+            sheets=sheets,
+        )
+
+    assert sheets.operation_log.count("atomic_rotation") == 0
+    assert sheets.added_sheets == []
+    assert sheets.batch_value_updates == []
+    assert sheets.spreadsheet_requests == []
+    assert sheets.hidden_dimensions == []
+
+
+@pytest.mark.asyncio
+async def test_staging_binding_is_never_resolved_as_active() -> None:
+    """Проверяет, что leftover staging не становится active без canonical."""
+
+    staging_title = "Рейды - staging - orphan"
+    sheets = FakeSheetsClient(
+        metadata_sheets=(
+            SheetMetadata(sheet_id=444, title=staging_title, index=0),
+            SheetMetadata(sheet_id=222, title="CWL", index=1),
+        ),
+    )
+    bindings = RecordingSheetBindingRepository()
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(
+            active_raid_season=RAID_SEASON_KEY,
+            active_raid_sheet_name=staging_title,
+            active_raid_sheet_id=444,
+        ),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        bindings=bindings,
+    )
+
+    assert result.sheet_id != 444
+    assert sheets.added_sheets == [RAID_ACTIVE_SHEET_NAME]
+    assert any(
+        sheet.sheet_id == 444 and sheet.title == staging_title for sheet in sheets.metadata_sheets
+    )
+    assert bindings.update_calls[-1]["active_raid_sheet_id"] == result.sheet_id
+
+
+@pytest.mark.asyncio
+async def test_initial_message_only_active_is_not_archived() -> None:
+    """Проверяет отсутствие staging/archive без известного active season."""
+
+    prepared = PreparedRaidSync(
+        selected_season=None,
+        previous_active_season=None,
+        empty_blocks=(
+            RaidClanBlock(
+                clan_tag="#AAA111",
+                clan_name="Alpha",
+                message="Нет данных рейдового уикенда за доступный период",
+            ),
+        ),
+    )
+    sheets = FakeSheetsClient(metadata_sheets=_rotation_metadata())
+    archives = RecordingRaidSheetArchiveRepository()
+    bindings = RecordingSheetBindingRepository()
+
+    result, sheets, _blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=None),
+        prepared=prepared,
+        sheets=sheets,
+        archives=archives,
+        bindings=bindings,
+    )
+
+    assert result.season_key is None
+    assert result.archived_previous_season is False
+    assert sheets.added_sheets == []
+    assert archives.upserted_archives == []
+    assert bindings.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sheets_client_delete_sheet_uses_only_numeric_sheet_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Проверяет точный deleteSheet request без title/prefix."""
+
+    client = object.__new__(SheetsClient)
+    calls: list[list[JsonObject]] = []
+
+    async def capture(requests: list[JsonObject]) -> JsonObject:
+        calls.append(requests)
+        return {}
+
+    monkeypatch.setattr(client, "batch_update_spreadsheet", capture)
+
+    await client.delete_sheet(501)
+
+    assert calls == [[{"deleteSheet": {"sheetId": 501}}]]
+    with pytest.raises(GoogleSheetsWriteError):
+        await client.delete_sheet(True)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sheet_id", (True, "501", -1, None))
+async def test_delete_sheet_contract_rejects_same_invalid_ids_in_client_and_fake(
+    monkeypatch: pytest.MonkeyPatch,
+    sheet_id: object,
+) -> None:
+    """Проверяет одинаково строгую validation production и Fake Sheets."""
+
+    client = object.__new__(SheetsClient)
+
+    async def capture(_requests: list[JsonObject]) -> JsonObject:
+        raise AssertionError("invalid sheet_id must fail before request")
+
+    monkeypatch.setattr(client, "batch_update_spreadsheet", capture)
+    fake = FakeSheetsClient()
+
+    with pytest.raises(GoogleSheetsWriteError):
+        await client.delete_sheet(sheet_id)  # type: ignore[arg-type]
+    with pytest.raises(GoogleSheetsWriteError):
+        await fake.delete_sheet(sheet_id)  # type: ignore[arg-type]
+    assert fake.deleted_sheet_ids == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sheet_id", (0, 501))
+async def test_delete_sheet_contract_accepts_same_valid_ids_in_client_and_fake(
+    monkeypatch: pytest.MonkeyPatch,
+    sheet_id: int,
+) -> None:
+    """Проверяет совпадающий допустимый домен physical sheet IDs."""
+
+    client = object.__new__(SheetsClient)
+    calls: list[list[JsonObject]] = []
+
+    async def capture(requests: list[JsonObject]) -> JsonObject:
+        calls.append(requests)
+        return {}
+
+    monkeypatch.setattr(client, "batch_update_spreadsheet", capture)
+    fake = FakeSheetsClient(
+        metadata_sheets=(SheetMetadata(sheet_id=sheet_id, title="Owned", index=0),),
+    )
+
+    await client.delete_sheet(sheet_id)
+    await fake.delete_sheet(sheet_id)
+
+    assert calls == [[{"deleteSheet": {"sheetId": sheet_id}}]]
+    assert fake.deleted_sheet_ids == [sheet_id]
