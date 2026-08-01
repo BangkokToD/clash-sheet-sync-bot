@@ -175,6 +175,7 @@ class PreparedRaidSync:
     empty_blocks: tuple[RaidClanBlock, ...] = ()
     warnings: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    showing_saved_season: bool = False
 
     @property
     def season_key(self) -> str | None:
@@ -215,6 +216,12 @@ class RaidSheetSyncResult:
     sheet_id: int
     rows_count: int
     blocks_count: int
+    season_start_at: str | None = None
+    season_end_at: str | None = None
+    attacks_target: int = 6
+    attacks_complete_count: int = 0
+    attacks_below_target_count: int = 0
+    showing_saved_season: bool = False
     warnings: tuple[str, ...] = ()
     archived_previous_season: bool = False
     archive_sheet_name: str | None = None
@@ -419,6 +426,7 @@ async def apply_public_raid_sync(
         archive_limit=config.raid_archive_sheets_limit,
     )
     warnings = (*prepared.warnings, *cleanup_warnings)
+    active_rows = tuple(row for block in built_blocks for row in block.rows)
 
     return RaidSheetSyncResult(
         season_key=None if selected is None else selected.season_key,
@@ -427,6 +435,16 @@ async def apply_public_raid_sync(
         sheet_id=active_sheet.sheet_id,
         rows_count=sum(len(block.rows) for block in built_blocks),
         blocks_count=len(built_blocks),
+        season_start_at=None if selected is None else selected.start_time,
+        season_end_at=None if selected is None else selected.end_time,
+        attacks_target=config.raid_attacks_target,
+        attacks_complete_count=sum(
+            row.technical_values.attacks >= config.raid_attacks_target for row in active_rows
+        ),
+        attacks_below_target_count=sum(
+            row.technical_values.attacks < config.raid_attacks_target for row in active_rows
+        ),
+        showing_saved_season=prepared.showing_saved_season,
         warnings=warnings,
         archived_previous_season=season_changed,
         archive_sheet_name=archive_sheet_name,
@@ -1485,6 +1503,7 @@ async def prepare_public_raid_sync(
     user_column_links = _raid_composition_user_column_links(runtime_config.column_profiles)
 
     selected_season: PreparedRaidSeason | None = None
+    showing_saved_season = False
     if selected_key is not None:
         selected_season = _prepare_season_state(
             season_key=selected_key,
@@ -1501,6 +1520,7 @@ async def prepare_public_raid_sync(
             config=config,
         )
         if not api_history_exists:
+            showing_saved_season = True
             warnings.append(f"{selected_key}: выбран последний сохранённый raid season из SQLite.")
 
     previous_active_season: PreparedRaidSeason | None = None
@@ -1550,6 +1570,7 @@ async def prepare_public_raid_sync(
         empty_blocks=empty_blocks,
         warnings=tuple(warnings),
         diff=diff,
+        showing_saved_season=showing_saved_season,
     )
 
 

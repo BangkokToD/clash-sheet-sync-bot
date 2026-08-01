@@ -2509,6 +2509,7 @@ async def test_apply_keeps_saved_ended_raid_visible_between_api_events() -> None
     )
 
     assert result.season_state == "ended"
+    assert result.showing_saved_season is True
     assert sheets.batch_value_updates[0][-1].values[0][1].endswith("| завершён")
     assert sheets.batch_value_updates[0][-1].values[2][4] == "1/6"
     assert states.upserted_states[0].season_state == "ended"
@@ -2650,6 +2651,10 @@ async def test_apply_first_season_updates_binding_without_archive_or_staging() -
     )
 
     assert result.archived_previous_season is False
+    assert result.season_start_at == RAID_SEASON_KEY
+    assert result.season_end_at == RAID_SEASON_END
+    assert result.attacks_complete_count == 0
+    assert result.attacks_below_target_count == 1
     assert sheets.added_sheets == []
     assert archives.upserted_archives == []
     assert bindings.update_calls[-1]["active_raid_season"] == RAID_SEASON_KEY

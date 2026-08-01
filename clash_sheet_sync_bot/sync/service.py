@@ -14,15 +14,19 @@ import httpx
 from clash_sheet_sync_bot.coc.client import ClashApiUnavailableError, ClashClient
 from clash_sheet_sync_bot.common.time import format_dt as _format_dt, utc_now as _utc_now
 from clash_sheet_sync_bot.config import AppConfig
+from clash_sheet_sync_bot.models import RuntimeChatConfig
 from clash_sheet_sync_bot.repositories import (
     CompositionPlayerStateRepository,
     CwlRowStateRepository,
+    RaidPlayerStateRepository,
+    RaidSheetArchiveRepository,
     RuntimeConfigRepository,
     SheetBindingRepository,
     SheetBlockRepository,
     SyncRunRepository,
     TelegramChatRepository,
 )
+from clash_sheet_sync_bot.sheets.admin import build_bot_state_values
 from clash_sheet_sync_bot.sheets.client import (
     GoogleAccessTokenProvider,
     GoogleSheetsError,
@@ -39,6 +43,11 @@ from clash_sheet_sync_bot.sync.cwl import (
     apply_public_cwl_sync,
     prepare_public_cwl_sync,
 )
+from clash_sheet_sync_bot.sync.raids import (
+    RaidDataError,
+    apply_public_raid_sync,
+    prepare_public_raid_sync,
+)
 from clash_sheet_sync_bot.sync.reports import (
     build_error_report,
     build_status_report,
@@ -54,6 +63,7 @@ SYNC_HTTP_TIMEOUT_SECONDS: Final = 90.0
 WRITE_PHASE_PREPARED: Final = "prepared"
 WRITE_PHASE_COMPOSITION_WRITTEN: Final = "composition_written"
 WRITE_PHASE_CWL_WRITTEN: Final = "cwl_written"
+WRITE_PHASE_RAIDS_WRITTEN: Final = "raids_written"
 WRITE_PHASE_SQLITE_COMMITTED: Final = "sqlite_committed"
 PARTIAL_SHEET_WRITE_WARNING: Final = (
     "Таблица могла быть частично обновлена. Запустите диагностику и повторите /sync."
@@ -237,6 +247,8 @@ class SyncService:
 
                 composition_repository = CompositionPlayerStateRepository(self._connection)
                 cwl_repository = CwlRowStateRepository(self._connection)
+                raid_player_state_repository = RaidPlayerStateRepository(self._connection)
+                raid_sheet_archive_repository = RaidSheetArchiveRepository(self._connection)
                 sheet_block_repository = SheetBlockRepository(self._connection)
                 sheet_binding_repository = SheetBindingRepository(self._connection)
 
@@ -255,6 +267,39 @@ class SyncService:
                     cwl_repository=cwl_repository,
                     sheet_block_repository=sheet_block_repository,
                     cwl_war_concurrency_limit=self._config.cwl_war_concurrency_limit,
+                    composition_player_states=tuple(prepared_composition.planned_states.values()),
+                )
+                active_clan_tags = tuple(clan.clan_tag for clan in runtime.active_clans)
+                latest_raid_season = await raid_player_state_repository.get_latest_season_key(
+                    chat_id=runtime.chat_id,
+                    clan_tags=active_clan_tags,
+                )
+                raid_season_keys = tuple(
+                    dict.fromkeys(
+                        season_key
+                        for season_key in (
+                            runtime.sheet_binding.active_raid_season,
+                            latest_raid_season,
+                        )
+                        if season_key is not None
+                    )
+                )
+                saved_raid_rows = []
+                for season_key in raid_season_keys:
+                    saved_raid_rows.extend(
+                        await raid_player_state_repository.list_for_season(
+                            chat_id=runtime.chat_id,
+                            season_key=season_key,
+                            clan_tags=active_clan_tags,
+                        )
+                    )
+                prepared_raids = await prepare_public_raid_sync(
+                    runtime_config=runtime,
+                    clash_client=clash_client,
+                    sheets_client=sheets_client,
+                    sheet_block_repository=sheet_block_repository,
+                    config=self._config,
+                    saved_rows=tuple(saved_raid_rows),
                     composition_player_states=tuple(prepared_composition.planned_states.values()),
                 )
 
@@ -278,6 +323,25 @@ class SyncService:
                     sync_run_id=sync_run_id,
                     prepared=prepared_cwl,
                 )
+                write_phase = WRITE_PHASE_RAIDS_WRITTEN
+                raid_result = await apply_public_raid_sync(
+                    runtime_config=runtime,
+                    sheets_client=sheets_client,
+                    raid_player_state_repository=raid_player_state_repository,
+                    raid_sheet_archive_repository=raid_sheet_archive_repository,
+                    sheet_block_repository=sheet_block_repository,
+                    sheet_binding_repository=sheet_binding_repository,
+                    config=self._config,
+                    prepared=prepared_raids,
+                    sync_run_id=sync_run_id,
+                )
+                reconciled_runtime = await self._runtime.get_runtime_chat_config(runtime_chat_id)
+                if reconciled_runtime is None:
+                    raise RaidDataError("RuntimeChatConfig исчез после raid apply.")
+                await _write_reconciled_bot_state(
+                    runtime_config=reconciled_runtime,
+                    sheets_client=sheets_client,
+                )
 
             composition_result = CompositionSyncResult(
                 active_counts=prepared_composition.active_counts,
@@ -288,6 +352,7 @@ class SyncService:
             report = build_success_report(
                 composition_result=composition_result,
                 cwl_result=cwl_result,
+                raid_result=raid_result,
                 spreadsheet_url=spreadsheet_url,
                 report_max_items=self._config.report_max_items,
                 is_baseline=is_baseline,
@@ -322,6 +387,7 @@ class SyncService:
             GoogleSheetsError,
             CompositionDataError,
             CwlDataError,
+            RaidDataError,
         ) as exc:
             await self._connection.rollback()
             reason = _sync_error_reason(str(exc), write_phase)
@@ -482,7 +548,41 @@ def _sync_error_reason(reason: str, write_phase: str) -> str:
     return f"{normalized_reason}\n\n{PARTIAL_SHEET_WRITE_WARNING}"
 
 
+async def _write_reconciled_bot_state(
+    *,
+    runtime_config: RuntimeChatConfig,
+    sheets_client: SheetsClient,
+) -> None:
+    """Зеркалирует финальные CWL/raid binding после всех apply."""
+
+    binding = runtime_config.sheet_binding
+    values = build_bot_state_values(
+        chat_id=runtime_config.chat_id,
+        google_sheet_id=binding.google_sheet_id,
+        composition_sheet_name=binding.composition_sheet_name,
+        composition_sheet_id=binding.composition_sheet_id,
+        active_cwl_sheet_name=binding.active_cwl_sheet_name,
+        active_cwl_sheet_id=binding.active_cwl_sheet_id,
+        active_cwl_season=binding.active_cwl_season,
+        active_raid_sheet_name=binding.active_raid_sheet_name,
+        active_raid_sheet_id=binding.active_raid_sheet_id,
+        active_raid_season=binding.active_raid_season,
+        bot_state_sheet_name=binding.bot_state_sheet_name,
+        bot_state_sheet_id=binding.bot_state_sheet_id,
+        timezone=binding.timezone,
+    )
+    await sheets_client.write_values(
+        sheet_name=binding.bot_state_sheet_name,
+        range_a1=f"A1:B{len(values)}",
+        values=values,
+    )
+
+
 def _has_sheet_write_started(write_phase: str) -> bool:
     """Проверяет, могла ли Google-таблица уже измениться."""
 
-    return write_phase in {WRITE_PHASE_COMPOSITION_WRITTEN, WRITE_PHASE_CWL_WRITTEN}
+    return write_phase in {
+        WRITE_PHASE_COMPOSITION_WRITTEN,
+        WRITE_PHASE_CWL_WRITTEN,
+        WRITE_PHASE_RAIDS_WRITTEN,
+    }

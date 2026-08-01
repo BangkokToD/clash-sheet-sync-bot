@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fakes import make_raid_sheet_sync_result
 
 from clash_sheet_sync_bot.repositories import SyncStatusSummary
 from clash_sheet_sync_bot.sync.composition import CompositionSyncResult
@@ -38,6 +39,7 @@ def _status_summary(last_sync_status: str | None) -> SyncStatusSummary:
         last_sync_error="<ошибка & причина>",
         active_clans_count=2,
         active_cwl_season="<2026-07>",
+        active_raid_season="<2026-07-24T07:00:00+00:00>",
         spreadsheet_url="https://example.com/sheet?a=1&b=2",
     )
 
@@ -84,6 +86,7 @@ def test_build_status_report_escapes_fields() -> None:
 
     assert "Ошибка: &lt;ошибка &amp; причина&gt;" in payload.text
     assert "CWL-сезон: &lt;2026-07&gt;" in payload.text
+    assert "Рейдовый сезон: &lt;2026-07-24T07:00:00+00:00&gt;" in payload.text
     assert '<a href="https://example.com/sheet?a=1&amp;b=2">Таблица</a>' in payload.text
 
 
@@ -101,6 +104,7 @@ def test_build_success_report_baseline() -> None:
     payload = build_success_report(
         composition_result=_composition_result(),
         cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(),
         spreadsheet_url="https://example.com/sheet",
         report_max_items=50,
         is_baseline=True,
@@ -108,6 +112,9 @@ def test_build_success_report_baseline() -> None:
 
     assert "Первичная синхронизация завершена." in payload.text
     assert '<a href="https://example.com/sheet">Таблица</a>' in payload.text
+    assert "Добавлено строк рейдов" not in payload.text
+    assert "Рейды:" in payload.text
+    assert "Изменения:" not in payload.text
 
 
 def test_build_success_report_without_changes() -> None:
@@ -116,6 +123,7 @@ def test_build_success_report_without_changes() -> None:
     payload = build_success_report(
         composition_result=_composition_result(),
         cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(),
         spreadsheet_url="https://example.com/sheet",
         report_max_items=50,
         is_baseline=False,
@@ -127,6 +135,12 @@ def test_build_success_report_without_changes() -> None:
     assert "Активных: 2. Вышедших: 1." in payload.text
     assert "Изменений нет." in payload.text
     assert '<a href="https://example.com/sheet">Таблица</a>' in payload.text
+    assert "Рейды:" in payload.text
+    assert "Сезон: 2026-07-24T07:00:00+00:00. Состояние: завершён." in payload.text
+    assert "Период: 2026-07-24T07:00:00+00:00 — 2026-07-27T07:00:00+00:00." in payload.text
+    assert "Клановых блоков: 2. Участников: 8." in payload.text
+    assert "Выполнили 6/6: 5." in payload.text
+    assert "Не выполнили 6/6: 3." in payload.text
 
 
 def test_build_success_report_includes_import_warning_summary() -> None:
@@ -135,12 +149,15 @@ def test_build_success_report_includes_import_warning_summary() -> None:
     payload = build_success_report(
         composition_result=_composition_result(warnings=("warning 1", "warning 2")),
         cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(warnings=("warning 3",)),
         spreadsheet_url="https://example.com/sheet",
         report_max_items=50,
         is_baseline=False,
     )
 
     assert "Предупреждения импорта: 2." in payload.text
+    assert "Предупреждения рейдов:" in payload.text
+    assert "warning 3" in payload.text
     assert "Если число повторяется после следующего /sync" in payload.text
 
 
@@ -156,6 +173,7 @@ def test_build_success_report_identifies_saved_cwl_season() -> None:
             all_not_in_progress=True,
             showing_previous_season=True,
         ),
+        raid_result=make_raid_sheet_sync_result(),
         spreadsheet_url="https://example.com/sheet",
         report_max_items=50,
         is_baseline=False,
@@ -176,6 +194,7 @@ def test_build_success_report_explains_missing_cwl_history() -> None:
             blocks_count=1,
             all_not_in_progress=True,
         ),
+        raid_result=make_raid_sheet_sync_result(),
         spreadsheet_url="https://example.com/sheet",
         report_max_items=50,
         is_baseline=False,
@@ -197,6 +216,7 @@ def test_build_success_report_truncates_long_report() -> None:
     payload = build_success_report(
         composition_result=_composition_result(),
         cwl_result=cwl_result,
+        raid_result=make_raid_sheet_sync_result(),
         spreadsheet_url="https://example.com/sheet",
         report_max_items=50,
         is_baseline=False,
@@ -205,3 +225,94 @@ def test_build_success_report_truncates_long_report() -> None:
     assert len(payload.text) <= MAX_TELEGRAM_MESSAGE_LENGTH
     assert "Отчёт сокращён. Полный результат смотри в таблице." in payload.text
     assert payload.text.endswith('<a href="https://example.com/sheet">Таблица</a>')
+
+
+def test_build_success_report_describes_ongoing_raids_without_below_target_count() -> None:
+    """Проверяет raid-сводку ongoing без преждевременного `<6/6`."""
+
+    payload = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(
+            season_state="ongoing",
+            attacks_complete_count=2,
+            attacks_below_target_count=6,
+        ),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+
+    assert "Состояние: проводится." in payload.text
+    assert "Выполнили 6/6: 2." in payload.text
+    assert "Не выполнили 6/6" not in payload.text
+
+
+def test_build_success_report_uses_configured_raid_attacks_target() -> None:
+    """Проверяет единый configured target в raid-отчёте."""
+
+    payload = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(attacks_target=7),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+
+    assert "Выполнили 7/7: 5." in payload.text
+    assert "Не выполнили 7/7: 3." in payload.text
+
+
+def test_build_success_report_describes_saved_and_missing_raid_seasons() -> None:
+    """Проверяет interseason и отсутствие raid history."""
+
+    saved = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(showing_saved_season=True),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+    missing = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(
+            season_key=None,
+            season_state=None,
+            rows_count=0,
+            attacks_complete_count=0,
+            attacks_below_target_count=0,
+        ),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+
+    assert "Состояние: показан сохранённый." in saved.text
+    assert ("Рейды сейчас не проводятся. Сохранённых данных за прошлый уикенд нет.") in missing.text
+
+
+def test_build_success_report_describes_rotation_pruning_and_cleanup_warning() -> None:
+    """Проверяет archive/pruning и special cleanup warning."""
+
+    cleanup_warning = "Raid cleanup не завершён: deleteSheet failed."
+    payload = build_success_report(
+        composition_result=_composition_result(),
+        cwl_result=None,
+        raid_result=make_raid_sheet_sync_result(
+            warnings=(cleanup_warning,),
+            archived_previous_season=True,
+            archive_sheet_name="Рейды 2026-07-17",
+            pruned_archive_sheet_names=("Рейды 2026-06-19",),
+        ),
+        spreadsheet_url="https://example.com/sheet",
+        report_max_items=50,
+        is_baseline=False,
+    )
+
+    assert "Архивирован предыдущий сезон: Рейды 2026-07-17." in payload.text
+    assert "Удалён старый архив: Рейды 2026-06-19." in payload.text
+    assert cleanup_warning in payload.text
+    assert "Таблица могла быть частично обновлена" not in payload.text

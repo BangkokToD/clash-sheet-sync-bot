@@ -13,6 +13,7 @@ from clash_sheet_sync_bot.models import (
     TrackedClan,
 )
 from clash_sheet_sync_bot.repositories import CompositionPlayerState
+from clash_sheet_sync_bot.sync.raids import RaidSheetSyncResult
 
 
 def make_tracked_clan(
@@ -337,4 +338,43 @@ def make_sheet_block(
         start_cell=start_cell,
         rows_count=rows_count,
         columns_count=columns_count,
+    )
+
+
+def make_raid_sheet_sync_result(
+    *,
+    season_key: str | None = "2026-07-24T07:00:00+00:00",
+    season_state: str | None = "ended",
+    rows_count: int = 8,
+    blocks_count: int = 2,
+    season_start_at: str | None = "2026-07-24T07:00:00+00:00",
+    season_end_at: str | None = "2026-07-27T07:00:00+00:00",
+    attacks_target: int = 6,
+    attacks_complete_count: int = 5,
+    attacks_below_target_count: int = 3,
+    showing_saved_season: bool = False,
+    warnings: tuple[str, ...] = (),
+    archived_previous_season: bool = False,
+    archive_sheet_name: str | None = None,
+    pruned_archive_sheet_names: tuple[str, ...] = (),
+) -> RaidSheetSyncResult:
+    """Создаёт результат raid apply для pipeline/report tests."""
+
+    return RaidSheetSyncResult(
+        season_key=season_key,
+        season_state=season_state,  # type: ignore[arg-type]
+        sheet_name="Рейды",
+        sheet_id=444,
+        rows_count=rows_count,
+        blocks_count=blocks_count,
+        season_start_at=season_start_at,
+        season_end_at=season_end_at,
+        attacks_target=attacks_target,
+        attacks_complete_count=attacks_complete_count,
+        attacks_below_target_count=attacks_below_target_count,
+        showing_saved_season=showing_saved_season,
+        warnings=warnings,
+        archived_previous_season=archived_previous_season,
+        archive_sheet_name=archive_sheet_name,
+        pruned_archive_sheet_names=pruned_archive_sheet_names,
     )
