@@ -108,12 +108,19 @@ def _district(
     attacks: list[JsonObject],
     *,
     name: str = "Ordinary District",
+    destruction_percent: int | None = None,
 ) -> JsonObject:
     """Создаёт district object минимального raid-контракта."""
 
+    final_destruction = (
+        destruction_percent
+        if destruction_percent is not None
+        else (attacks[0]["destructionPercent"] if attacks else 0)
+    )
     return {
         "id": district_id,
         "name": name,
+        "destructionPercent": final_destruction,
         "attackCount": len(attacks),
         "attacks": attacks,
     }
@@ -300,6 +307,8 @@ def test_parse_raid_season_rejects_malformed_member(field: str, value: Any) -> N
     (
         ("id", None),
         ("id", True),
+        ("destructionPercent", None),
+        ("destructionPercent", True),
         ("attacks", None),
     ),
 )
@@ -326,6 +335,7 @@ def test_parse_raid_season_accepts_zero_attack_district_without_attacks() -> Non
     district: JsonObject = {
         "id": CAPITAL_PEAK_DISTRICT_ID,
         "name": "Capital Peak",
+        "destructionPercent": 0,
         "attackCount": 0,
     }
     payload = _season(members=[], districts=[district])
@@ -373,6 +383,78 @@ def test_parse_raid_season_normalizes_clan_and_player_tags() -> None:
     assert parsed.attacks[0].player_tag == "#PLAYER"
 
 
+def test_parse_raid_season_converts_reverse_cumulative_damage_to_player_contributions() -> None:
+    """Проверяет delta накопленного урона и привязку к игрокам."""
+
+    payload = _season(
+        members=[
+            _member("#LAST", attacks=1),
+            _member("#MIDDLE", attacks=1),
+            _member("#FIRST", attacks=1),
+        ],
+        districts=[
+            _district(
+                CAPITAL_PEAK_DISTRICT_ID,
+                [
+                    _attack("#LAST", 100),
+                    _attack("#MIDDLE", 90),
+                    _attack("#FIRST", 33),
+                ],
+                name="Capital Peak",
+            ),
+        ],
+    )
+
+    parsed = parse_raid_season(payload, clan_tag="#CLAN")
+
+    assert [attack.player_tag for attack in parsed.attacks] == [
+        "#LAST",
+        "#MIDDLE",
+        "#FIRST",
+    ]
+    assert [attack.destruction_delta_percent for attack in parsed.attacks] == [10, 57, 33]
+    assert sum(attack.destruction_delta_percent for attack in parsed.attacks) == 100
+
+
+def test_parse_raid_season_rejects_non_monotonic_reverse_cumulative_damage() -> None:
+    """Проверяет отказ при невозрастающей API-хронологии."""
+
+    payload = _season(
+        members=[_member("#PLAYER", attacks=3)],
+        districts=[
+            _district(
+                123,
+                [
+                    _attack("#PLAYER", 100),
+                    _attack("#PLAYER", 60),
+                    _attack("#PLAYER", 70),
+                ],
+            ),
+        ],
+    )
+
+    with pytest.raises(RaidContractError, match="немонотон"):
+        parse_raid_season(payload, clan_tag="#CLAN")
+
+
+def test_parse_raid_season_rejects_district_final_destruction_mismatch() -> None:
+    """Проверяет сверку cumulative-атак с итогом района."""
+
+    payload = _season(
+        members=[_member("#PLAYER", attacks=2)],
+        districts=[
+            _district(
+                123,
+                [_attack("#PLAYER", 90), _attack("#PLAYER", 40)],
+                destruction_percent=100,
+            ),
+        ],
+    )
+
+    with pytest.raises(RaidContractError, match="итоговым destructionPercent"):
+        parse_raid_season(payload, clan_tag="#CLAN")
+
+
 def test_classify_raid_district_uses_confirmed_id() -> None:
     """Проверяет ID-based классификацию Capital Peak и обычного района."""
 
@@ -412,13 +494,13 @@ def test_parse_raid_season_returns_retryable_ongoing_attack_counter_mismatch() -
         parse_raid_season(payload, clan_tag="#CLAN")
 
 
-def test_normal_district_33_and_67_give_two_normal_points() -> None:
+def test_normal_district_cumulative_100_and_33_give_two_normal_points() -> None:
     """Проверяет формулу обычного района без float drift."""
 
     rows = _aggregate(
         _season(
             members=[_member("#PLAYER", attacks=2)],
-            districts=[_district(123, [_attack("#PLAYER", 33), _attack("#PLAYER", 67)])],
+            districts=[_district(123, [_attack("#PLAYER", 100), _attack("#PLAYER", 33)])],
         ),
     )
 
@@ -427,7 +509,7 @@ def test_normal_district_33_and_67_give_two_normal_points() -> None:
     assert isinstance(rows[0].normal_points, Decimal)
 
 
-def test_capital_peak_40_35_and_25_give_three_normal_points() -> None:
+def test_capital_peak_cumulative_damage_gives_three_normal_points() -> None:
     """Проверяет формулу Capital Peak по подтверждённому ID."""
 
     rows = _aggregate(
@@ -437,9 +519,9 @@ def test_capital_peak_40_35_and_25_give_three_normal_points() -> None:
                 _district(
                     CAPITAL_PEAK_DISTRICT_ID,
                     [
+                        _attack("#PLAYER", 100),
+                        _attack("#PLAYER", 75),
                         _attack("#PLAYER", 40),
-                        _attack("#PLAYER", 35),
-                        _attack("#PLAYER", 25),
                     ],
                     name="Capital Peak",
                 ),
@@ -454,11 +536,14 @@ def test_capital_peak_40_35_and_25_give_three_normal_points() -> None:
 def test_six_normative_attacks_give_coefficient_one() -> None:
     """Проверяет идеальный ориентир шести нормативных атак."""
 
-    attacks = [_attack("#PLAYER", 50) for _ in range(6)]
     rows = _aggregate(
         _season(
             members=[_member("#PLAYER", attacks=6)],
-            districts=[_district(123, attacks)],
+            districts=[
+                _district(123, [_attack("#PLAYER", 100), _attack("#PLAYER", 50)]),
+                _district(124, [_attack("#PLAYER", 100), _attack("#PLAYER", 50)]),
+                _district(125, [_attack("#PLAYER", 100), _attack("#PLAYER", 50)]),
+            ],
         ),
     )
 
@@ -469,11 +554,14 @@ def test_six_normative_attacks_give_coefficient_one() -> None:
 def test_five_normative_attacks_display_as_point_83() -> None:
     """Проверяет отображаемое округление коэффициента пяти атак."""
 
-    attacks = [_attack("#PLAYER", 50) for _ in range(5)]
     rows = _aggregate(
         _season(
             members=[_member("#PLAYER", attacks=5)],
-            districts=[_district(123, attacks)],
+            districts=[
+                _district(123, [_attack("#PLAYER", 100), _attack("#PLAYER", 50)]),
+                _district(124, [_attack("#PLAYER", 100), _attack("#PLAYER", 50)]),
+                _district(125, [_attack("#PLAYER", 50)]),
+            ],
         ),
     )
 
@@ -496,7 +584,7 @@ def test_aggregation_handles_multiple_players_and_district_kinds() -> None:
             ),
             _district(
                 CAPITAL_PEAK_DISTRICT_ID,
-                [_attack("#ONE", 50), _attack("#TWO", 100)],
+                [_attack("#TWO", 100), _attack("#ONE", 50)],
                 name="Capital Peak",
             ),
         ],
@@ -505,8 +593,35 @@ def test_aggregation_handles_multiple_players_and_district_kinds() -> None:
     rows = _aggregate(payload)
 
     assert [row.player_tag for row in rows] == ["#ONE", "#TWO"]
-    assert rows[0].weighted_damage_units == 350
-    assert rows[1].weighted_damage_units == 400
+    assert rows[0].weighted_damage_units == 250
+    assert rows[1].weighted_damage_units == 250
+
+
+def test_normal_and_capital_three_attack_districts_give_five_points_and_point_83() -> None:
+    """Проверяет полные обычный район и Capital Peak за шесть атак."""
+
+    cumulative_attacks = [
+        _attack("#PLAYER", 100),
+        _attack("#PLAYER", 90),
+        _attack("#PLAYER", 33),
+    ]
+    rows = _aggregate(
+        _season(
+            members=[_member("#PLAYER", attacks=6)],
+            districts=[
+                _district(123, cumulative_attacks),
+                _district(
+                    CAPITAL_PEAK_DISTRICT_ID,
+                    cumulative_attacks,
+                    name="Capital Peak",
+                ),
+            ],
+        ),
+    )
+
+    assert rows[0].weighted_damage_units == 500
+    assert rows[0].normal_points == Decimal("5")
+    assert f"{rows[0].coefficient:.2f}" == "0.83"
 
 
 def test_coefficient_may_exceed_one_and_zero_attack_has_zero_points() -> None:
@@ -519,16 +634,26 @@ def test_coefficient_may_exceed_one_and_zero_attack_has_zero_points() -> None:
         ],
         districts=[
             _district(
-                123,
-                [_attack("#STRONG", 100) for _ in range(6)] + [_attack("#ZERO", 0)],
+                CAPITAL_PEAK_DISTRICT_ID,
+                [_attack("#STRONG", 100)],
+                name="Capital Peak",
+            ),
+            _district(123, [_attack("#STRONG", 100)]),
+            _district(124, [_attack("#STRONG", 100)]),
+            _district(125, [_attack("#STRONG", 0)]),
+            _district(126, [_attack("#STRONG", 0)]),
+            _district(127, [_attack("#STRONG", 0)]),
+            _district(
+                128,
+                [_attack("#ZERO", 0)],
             ),
         ],
     )
 
     strong, zero = _aggregate(payload)
 
-    assert strong.weighted_damage_units == 1200
-    assert strong.coefficient == Decimal("2")
+    assert strong.weighted_damage_units == 700
+    assert strong.coefficient == Decimal(7) / Decimal(6)
     assert zero.weighted_damage_units == 0
     assert zero.normal_points == Decimal("0")
 
@@ -624,6 +749,16 @@ async def test_real_fixture_envelope_and_first_complete_season() -> None:
     assert sum(row.attacks for row in rows) == 299
     assert any(attack.district_kind == "capital" for attack in parsed.attacks)
     assert any(member.bonus_attack_limit == 1 for member in parsed.members)
+    assert [attack.player_tag for attack in parsed.attacks[:3]] == [
+        "#000000088",
+        "#000000088",
+        "#000000088",
+    ]
+    assert [attack.destruction_delta_percent for attack in parsed.attacks[:3]] == [
+        10,
+        57,
+        33,
+    ]
 
 
 def test_synthetic_ongoing_overlay_changes_only_state() -> None:
@@ -806,10 +941,9 @@ async def test_prepare_selects_ongoing_members_ranks_ties_and_performs_no_sheet_
             _member("#LEFT", attacks=1, name="Left"),
         ],
         districts=[
-            _district(
-                123,
-                [_attack("#ONE", 50), _attack("#TWO", 50), _attack("#LEFT", 25)],
-            )
+            _district(123, [_attack("#ONE", 50)]),
+            _district(124, [_attack("#TWO", 50)]),
+            _district(125, [_attack("#LEFT", 25)]),
         ],
     )
     sheets = FakeSheetsClient()

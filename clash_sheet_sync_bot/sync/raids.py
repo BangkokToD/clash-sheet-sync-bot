@@ -99,11 +99,11 @@ class RaidMember:
 
 @dataclass(frozen=True, slots=True)
 class RaidAttack:
-    """Одна проверенная атака рейдового сезона."""
+    """Одна атака с вычисленным приростом разрушения района."""
 
     player_tag: str
     district_kind: RaidDistrictKind
-    destruction_percent: int
+    destruction_delta_percent: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -2090,7 +2090,8 @@ def parse_raid_season(data: JsonObject, *, clan_tag: str) -> ParsedRaidSeason:
         clan_tag: Тег клана, которому принадлежит ответ.
 
     Returns:
-        Проверенный сезон с нормализованными тегами и плоским списком атак.
+        Проверенный сезон с нормализованными тегами и плоским списком
+        вкладов атак.
 
     Raises:
         RaidContractError: Если обязательный контракт нарушен.
@@ -2150,7 +2151,7 @@ def aggregate_raid_season(
             if attack.district_kind == "capital"
             else normal_district_attack_norm
         )
-        weighted_units[attack.player_tag] += attack.destruction_percent * multiplier
+        weighted_units[attack.player_tag] += attack.destruction_delta_percent * multiplier
 
     coefficient_denominator = 100 * attacks_target
     return tuple(
@@ -2265,7 +2266,7 @@ def _parse_members(raw_members: list[Any]) -> tuple[RaidMember, ...]:
 
 
 def _parse_attack_log(raw_logs: list[Any]) -> tuple[RaidAttack, ...]:
-    """Разбирает все фактически выполненные атаки сезона."""
+    """Разбирает атаки и превращает cumulative-урон в их вклады."""
 
     attacks: list[RaidAttack] = []
     for log_index, raw_log in enumerate(raw_logs, start=1):
@@ -2278,7 +2279,17 @@ def _parse_attack_log(raw_logs: list[Any]) -> tuple[RaidAttack, ...]:
             district_id = _required_int(district, "id", district_context)
             district_name = _optional_str(district, "name", district_context)
             district_kind = classify_raid_district(district_id, district_name)
+            district_destruction = _required_int(
+                district,
+                "destructionPercent",
+                district_context,
+            )
+            if not 0 <= district_destruction <= 100:
+                raise RaidContractError(
+                    f"{district_context}: destructionPercent должен быть в диапазоне 0..100.",
+                )
             raw_attacks = _district_attacks(district, district_context)
+            cumulative_attacks: list[tuple[str, int]] = []
             for attack_index, raw_attack in enumerate(raw_attacks, start=1):
                 attack_context = f"{district_context} attack #{attack_index}"
                 attack = _required_dict_item(raw_attack, attack_context)
@@ -2296,12 +2307,49 @@ def _parse_attack_log(raw_logs: list[Any]) -> tuple[RaidAttack, ...]:
                     raise RaidContractError(
                         f"{attack_context}: destructionPercent должен быть в диапазоне 0..100.",
                     )
+                cumulative_attacks.append((player_tag, destruction_percent))
+
+            if not cumulative_attacks:
+                if district_destruction != 0:
+                    raise RaidContractError(
+                        f"{district_context}: итоговый destructionPercent "
+                        "не совпадает с вкладом атак.",
+                    )
+                continue
+            if cumulative_attacks[0][1] != district_destruction:
+                raise RaidContractError(
+                    f"{district_context}: cumulative-атаки не согласованы "
+                    "с итоговым destructionPercent района.",
+                )
+
+            district_contribution = 0
+            for attack_index, (player_tag, cumulative_percent) in enumerate(
+                cumulative_attacks,
+                start=1,
+            ):
+                previous_cumulative = (
+                    cumulative_attacks[attack_index][1]
+                    if attack_index < len(cumulative_attacks)
+                    else 0
+                )
+                if cumulative_percent < previous_cumulative:
+                    raise RaidContractError(
+                        f"{district_context}: attacks содержат немонотонную "
+                        "reverse-cumulative последовательность destructionPercent.",
+                    )
+                contribution = cumulative_percent - previous_cumulative
+                district_contribution += contribution
                 attacks.append(
                     RaidAttack(
                         player_tag=player_tag,
                         district_kind=district_kind,
-                        destruction_percent=destruction_percent,
+                        destruction_delta_percent=contribution,
                     ),
+                )
+            if district_contribution != district_destruction:
+                raise RaidContractError(
+                    f"{district_context}: сумма вкладов атак не совпадает "
+                    "с итоговым destructionPercent района.",
                 )
     return tuple(attacks)
 
