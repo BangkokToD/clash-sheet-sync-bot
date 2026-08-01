@@ -283,7 +283,21 @@ class SheetAdminService:
                 TableDiagnosticIssue("error", "active_raid_sheet_id отсутствует в SQLite.", True)
             )
         if raid_sheet is None:
-            issues.append(TableDiagnosticIssue("error", "Активный лист Рейды отсутствует.", True))
+            requires_apply_recovery = _requires_raid_apply_recovery(
+                known_sheets=metadata.sheets,
+                binding=binding,
+                canonical_raid_sheet=None,
+            )
+            message = "Активный лист Рейды отсутствует."
+            if requires_apply_recovery:
+                message += " Bound raid-лист требует recovery через /sync."
+            issues.append(
+                TableDiagnosticIssue(
+                    "error",
+                    message,
+                    not requires_apply_recovery,
+                ),
+            )
         else:
             issues.append(
                 TableDiagnosticIssue("ok", f"Active raid лист найден: {raid_sheet.title}.")
@@ -292,11 +306,17 @@ class SheetAdminService:
                 binding.active_raid_sheet_id != raid_sheet.sheet_id
                 or binding.active_raid_sheet_name != raid_sheet.title
             ):
+                requires_apply_recovery = _requires_raid_apply_recovery(
+                    known_sheets=metadata.sheets,
+                    binding=binding,
+                    canonical_raid_sheet=raid_sheet,
+                )
+                suffix = " Требуется raid recovery через /sync." if requires_apply_recovery else ""
                 issues.append(
                     TableDiagnosticIssue(
                         "error",
-                        "Raid binding не соответствует физическому canonical листу Рейды.",
-                        True,
+                        "Raid binding не соответствует физическому canonical листу Рейды." + suffix,
+                        not requires_apply_recovery,
                     ),
                 )
 
@@ -384,6 +404,33 @@ class SheetAdminService:
 
         self._validate_service_account_email()
         metadata = await self._sheets_client.get_spreadsheet_metadata()
+        preflight_bot_state_sheet = _sheet_by_id(
+            metadata.sheets,
+            binding.bot_state_sheet_id,
+        )
+        if preflight_bot_state_sheet is None:
+            preflight_bot_state_sheet = _sheet_by_title(
+                metadata.sheets,
+                binding.bot_state_sheet_name,
+            )
+        if preflight_bot_state_sheet is not None:
+            bot_state = await self._read_bot_state(preflight_bot_state_sheet.title)
+            _validate_bot_state_spreadsheet_id(
+                bot_state=bot_state,
+                expected_spreadsheet_id=binding.google_sheet_id,
+            )
+
+        preflight_raid_sheet = _resolve_active_raid_sheet(metadata.sheets, binding=binding)
+        if _requires_raid_apply_recovery(
+            known_sheets=metadata.sheets,
+            binding=binding,
+            canonical_raid_sheet=preflight_raid_sheet,
+        ):
+            raise SheetAdminError(
+                "Обнаружена незавершённая raid rotation; "
+                "auto-fix запрещён до raid recovery через /sync.",
+            )
+
         composition_sheet = _sheet_by_id(metadata.sheets, binding.composition_sheet_id)
         if composition_sheet is None:
             composition_sheet = _sheet_by_title(metadata.sheets, binding.composition_sheet_name)
@@ -412,11 +459,10 @@ class SheetAdminService:
         if bot_state_sheet is None:
             bot_state_sheet = await self._sheets_client.add_sheet(binding.bot_state_sheet_name)
         bot_state = await self._read_bot_state(bot_state_sheet.title)
-        mirrored_spreadsheet_id = bot_state.get("google_sheet_id")
-        if mirrored_spreadsheet_id not in {None, "", binding.google_sheet_id}:
-            raise SheetAdminError(
-                "google_sheet_id в SQLite и _bot_state не совпадает; auto-fix запрещён.",
-            )
+        _validate_bot_state_spreadsheet_id(
+            bot_state=bot_state,
+            expected_spreadsheet_id=binding.google_sheet_id,
+        )
 
         await self._move_raid_before_cwl(raid_sheet=raid_sheet, cwl_sheet=cwl_sheet)
 
@@ -1077,6 +1123,42 @@ def _resolve_active_raid_sheet(
     ):
         return bound[0]
     return None
+
+
+def _requires_raid_apply_recovery(
+    *,
+    known_sheets: Sequence[SheetMetadata],
+    binding: SheetBinding,
+    canonical_raid_sheet: SheetMetadata | None,
+) -> bool:
+    """Проверяет, должен ли stale raid binding восстанавливать только raid apply."""
+
+    if binding.active_raid_season is None or binding.active_raid_sheet_id is None:
+        return False
+    bound_matches = tuple(
+        sheet for sheet in known_sheets if sheet.sheet_id == binding.active_raid_sheet_id
+    )
+    if len(bound_matches) > 1:
+        raise SheetAdminError("active_raid_sheet_id неоднозначен в Sheets metadata.")
+    if not bound_matches or bound_matches[0].title.startswith(RAID_STAGING_SHEET_PREFIX):
+        return False
+    return (
+        canonical_raid_sheet is None or bound_matches[0].sheet_id != canonical_raid_sheet.sheet_id
+    )
+
+
+def _validate_bot_state_spreadsheet_id(
+    *,
+    bot_state: dict[str, str],
+    expected_spreadsheet_id: str,
+) -> None:
+    """Останавливает auto-fix при foreign ownership marker `_bot_state`."""
+
+    mirrored_spreadsheet_id = bot_state.get("google_sheet_id")
+    if mirrored_spreadsheet_id not in {None, "", expected_spreadsheet_id}:
+        raise SheetAdminError(
+            "google_sheet_id в SQLite и _bot_state не совпадает; auto-fix запрещён.",
+        )
 
 
 def _unique_sheet_by_id(

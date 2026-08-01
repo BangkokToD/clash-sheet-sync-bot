@@ -309,7 +309,7 @@ async def test_initialize_binding_rejects_duplicate_canonical_raid() -> None:
 
 
 @pytest.mark.asyncio
-async def test_diagnose_marks_stale_raid_binding_fixable_against_canonical() -> None:
+async def test_diagnose_requires_apply_recovery_for_stale_raid_binding() -> None:
     """Проверяет physical sheet ID canonical raid против stale SQLite binding."""
 
     binding = replace(
@@ -345,7 +345,10 @@ async def test_diagnose_marks_stale_raid_binding_fixable_against_canonical() -> 
 
     result = await admin.diagnose_binding(binding=binding, blocks=())
 
-    assert any("canonical" in issue.message and issue.fixable for issue in result.issues)
+    assert any(
+        "canonical" in issue.message and "raid recovery" in issue.message and not issue.fixable
+        for issue in result.issues
+    )
 
 
 @pytest.mark.asyncio
@@ -560,6 +563,135 @@ async def test_autofix_rejects_foreign_bot_state_spreadsheet_id() -> None:
         )
 
     assert sheets_client.written_values == []
+    assert sheets_client.hidden_dimensions == []
+    assert sheets_client.deleted_sheet_ids == []
+
+
+@pytest.mark.asyncio
+async def test_autofix_checks_foreign_bot_state_before_creating_missing_sheets() -> None:
+    """Проверяет ownership preflight до любых auto-fix Sheet writes."""
+
+    sheets_client = FakeAdminSheetsClient(
+        sheets=[SheetMetadata(sheet_id=333, title="_bot_state", index=0)],
+        read_ranges={
+            ("_bot_state", "A1:B30"): [
+                ["schema_version", "2"],
+                ["google_sheet_id", "foreign-sheet-id"],
+            ],
+        },
+    )
+    admin = SheetAdminService(
+        sheets_client=sheets_client,  # type: ignore[arg-type]
+        spreadsheet_id="sheet-id",
+        service_account_email="bot@example.com",
+        expected_service_account_email=None,
+    )
+
+    with pytest.raises(SheetAdminError, match="auto-fix запрещён"):
+        await admin.auto_fix_binding(binding=_binding(), blocks=())
+
+    assert sheets_client.added_sheets == []
+    assert sheets_client.moved_sheets == []
+    assert sheets_client.written_values == []
+    assert sheets_client.hidden_sheets == []
+    assert sheets_client.hidden_dimensions == []
+    assert sheets_client.deleted_sheet_ids == []
+
+
+@pytest.mark.asyncio
+async def test_autofix_rejects_partial_raid_rotation_before_sheet_writes() -> None:
+    """Проверяет сохранение stale marker для canonical raid recovery через apply."""
+
+    binding = replace(
+        _binding(),
+        active_raid_sheet_name="Рейды 2026-07-24",
+        active_raid_sheet_id=555,
+        active_raid_season="2026-07-24T07:00:00+00:00",
+    )
+    sheets_client = FakeAdminSheetsClient(
+        sheets=[
+            SheetMetadata(sheet_id=111, title="Состав", index=0),
+            SheetMetadata(sheet_id=444, title="Рейды", index=1),
+            SheetMetadata(sheet_id=555, title="Рейды 2026-07-24", index=2),
+            SheetMetadata(sheet_id=222, title="CWL", index=3),
+            SheetMetadata(sheet_id=333, title="_bot_state", index=4),
+        ],
+        read_ranges={
+            ("_bot_state", "A1:B30"): [
+                ["schema_version", "2"],
+                ["google_sheet_id", "sheet-id"],
+                ["active_raid_sheet_name", "Рейды 2026-07-24"],
+                ["active_raid_sheet_id", "555"],
+                ["active_raid_season", "2026-07-24T07:00:00+00:00"],
+            ],
+        },
+    )
+    admin = SheetAdminService(
+        sheets_client=sheets_client,  # type: ignore[arg-type]
+        spreadsheet_id="sheet-id",
+        service_account_email="bot@example.com",
+        expected_service_account_email=None,
+    )
+
+    with pytest.raises(SheetAdminError, match="raid recovery"):
+        await admin.auto_fix_binding(binding=binding, blocks=())
+
+    assert sheets_client.added_sheets == []
+    assert sheets_client.moved_sheets == []
+    assert sheets_client.written_values == []
+    assert sheets_client.hidden_sheets == []
+    assert sheets_client.hidden_dimensions == []
+    assert sheets_client.deleted_sheet_ids == []
+
+
+@pytest.mark.asyncio
+async def test_autofix_preserves_renamed_bound_raid_for_apply_recovery() -> None:
+    """Проверяет, что auto-fix не заменяет существующий bound active пустым листом."""
+
+    binding = replace(
+        _binding(),
+        active_raid_sheet_name="Рейды команды",
+        active_raid_sheet_id=555,
+        active_raid_season="2026-07-24T07:00:00+00:00",
+    )
+    sheets_client = FakeAdminSheetsClient(
+        sheets=[
+            SheetMetadata(sheet_id=111, title="Состав", index=0),
+            SheetMetadata(sheet_id=555, title="Рейды команды", index=1),
+            SheetMetadata(sheet_id=222, title="CWL", index=2),
+            SheetMetadata(sheet_id=333, title="_bot_state", index=3),
+        ],
+        read_ranges={
+            ("_bot_state", "A1:B30"): [
+                ["schema_version", "2"],
+                ["google_sheet_id", "sheet-id"],
+                ["active_raid_sheet_name", "Рейды команды"],
+                ["active_raid_sheet_id", "555"],
+                ["active_raid_season", "2026-07-24T07:00:00+00:00"],
+            ],
+        },
+    )
+    admin = SheetAdminService(
+        sheets_client=sheets_client,  # type: ignore[arg-type]
+        spreadsheet_id="sheet-id",
+        service_account_email="bot@example.com",
+        expected_service_account_email=None,
+    )
+
+    diagnostic = await admin.diagnose_binding(binding=binding, blocks=())
+    assert any(
+        "Bound raid-лист" in issue.message and not issue.fixable for issue in diagnostic.issues
+    )
+
+    writes_before_autofix = list(sheets_client.written_values)
+    hidden_before_autofix = list(sheets_client.hidden_sheets)
+    with pytest.raises(SheetAdminError, match="raid recovery"):
+        await admin.auto_fix_binding(binding=binding, blocks=())
+
+    assert sheets_client.added_sheets == []
+    assert sheets_client.moved_sheets == []
+    assert sheets_client.written_values == writes_before_autofix
+    assert sheets_client.hidden_sheets == hidden_before_autofix
     assert sheets_client.hidden_dimensions == []
     assert sheets_client.deleted_sheet_ids == []
 
