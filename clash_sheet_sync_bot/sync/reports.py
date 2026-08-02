@@ -13,6 +13,7 @@ from clash_sheet_sync_bot.sync.raids import RaidSheetSyncResult
 
 TABLE_LINK_TEXT: Final = "Таблица"
 DEVELOPER_NAME: Final = "BangkokToD"
+DEVELOPER_URL: Final = "https://t.me/BangkokToD"
 SUPPORT_LINK_TEXT: Final = "Чат Леши"
 
 
@@ -36,6 +37,7 @@ def build_success_report(
     composition_result: CompositionSyncResult,
     cwl_result: CwlSheetSyncResult | None,
     raid_result: RaidSheetSyncResult | None,
+    spreadsheet_url: str,
     support_url: str | None = None,
 ) -> SyncReportPayload:
     """Строит отчёт успешного `/sync`.
@@ -44,6 +46,7 @@ def build_success_report(
         composition_result: Результат синхронизации состава.
         cwl_result: Результат CWL или `None`, если CWL не запускалась.
         raid_result: Результат raid sync или `None`, если raids не запускались.
+        spreadsheet_url: Ссылка на привязанную Google Spreadsheet.
         support_url: Ссылка на настроенный чат техподдержки или `None`.
 
     Returns:
@@ -58,7 +61,13 @@ def build_success_report(
 
     lines = [f"Обновлены {_human_list(sections)} для кланов:"]
     lines.extend(f"• {escape(clan_name)}" for clan_name, _ in composition_result.active_counts)
-    lines.extend(["", f"Разработчик: {DEVELOPER_NAME}"])
+    lines.extend(
+        [
+            "",
+            f'Разработчик: <a href="{DEVELOPER_URL}">{DEVELOPER_NAME}</a>',
+            _table_link(spreadsheet_url),
+        ]
+    )
     if support_url is not None:
         lines.append(f'<a href="{escape(support_url, quote=True)}">{SUPPORT_LINK_TEXT}</a>')
     return SyncReportPayload(text="\n".join(lines))

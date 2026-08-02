@@ -115,6 +115,7 @@ def test_build_success_report_has_only_sections_clans_and_developer() -> None:
             all_not_in_progress=False,
         ),
         raid_result=make_raid_sheet_sync_result(),
+        spreadsheet_url="https://example.com/sheet?a=1&b=2",
         support_url="https://t.me/+support?a=1&b=2",
     )
 
@@ -122,7 +123,8 @@ def test_build_success_report_has_only_sections_clans_and_developer() -> None:
         "Обновлены Состав, CWL и Рейды для кланов:\n"
         "• Alpha &amp; Co\n"
         "• Beta\n\n"
-        "Разработчик: BangkokToD\n"
+        'Разработчик: <a href="https://t.me/BangkokToD">BangkokToD</a>\n'
+        '<a href="https://example.com/sheet?a=1&amp;b=2">Таблица</a>\n'
         '<a href="https://t.me/+support?a=1&amp;b=2">Чат Леши</a>'
     )
 
@@ -134,13 +136,19 @@ def test_build_success_report_lists_only_updated_sections() -> None:
         composition_result=_composition_result(),
         cwl_result=None,
         raid_result=None,
+        spreadsheet_url="https://example.com/sheet",
     )
 
-    assert payload.text == ("Обновлены Состав для кланов:\n• Alpha\n\nРазработчик: BangkokToD")
+    assert payload.text == (
+        "Обновлены Состав для кланов:\n"
+        "• Alpha\n\n"
+        'Разработчик: <a href="https://t.me/BangkokToD">BangkokToD</a>\n'
+        '<a href="https://example.com/sheet">Таблица</a>'
+    )
     assert "Чат Леши" not in payload.text
 
 
-def test_build_success_report_omits_counts_links_seasons_and_warnings() -> None:
+def test_build_success_report_omits_counts_seasons_and_warnings() -> None:
     """Проверяет отсутствие прежней подробной информации."""
 
     payload = build_success_report(
@@ -154,10 +162,10 @@ def test_build_success_report_omits_counts_links_seasons_and_warnings() -> None:
             warnings=("cwl warning",),
         ),
         raid_result=make_raid_sheet_sync_result(warnings=("raid warning",)),
+        spreadsheet_url="https://example.com/sheet",
     )
 
     assert "Всего игроков" not in payload.text
     assert "Сезон" not in payload.text
     assert "warning" not in payload.text
-    assert "Таблица" not in payload.text
-    assert payload.text.endswith("Разработчик: BangkokToD")
+    assert payload.text.endswith('<a href="https://example.com/sheet">Таблица</a>')

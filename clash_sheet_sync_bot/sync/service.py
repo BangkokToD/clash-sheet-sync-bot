@@ -353,6 +353,7 @@ class SyncService:
                 composition_result=composition_result,
                 cwl_result=cwl_result,
                 raid_result=raid_result,
+                spreadsheet_url=spreadsheet_url,
                 support_url=support_group.url if support_group is not None else None,
             )
             report_data: dict[str, object] = {"telegram_report": report.text}

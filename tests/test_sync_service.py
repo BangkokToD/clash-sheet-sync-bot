@@ -521,6 +521,10 @@ async def test_success_report_uses_configured_support_chat_link(
 
     assert telegram.sent_messages
     assert (
+        '<a href="https://docs.google.com/spreadsheets/d/sheet-1504/edit">Таблица</a>'
+        in telegram.sent_messages[-1]["text"]
+    )
+    assert (
         '<a href="https://t.me/+support?a=1&amp;b=2">Чат Леши</a>'
         in telegram.sent_messages[-1]["text"]
     )

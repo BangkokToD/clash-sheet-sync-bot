@@ -498,9 +498,10 @@ Partial write warning означает, что ошибка произошла �
 SQLite commit при успешном sync происходит после Google Sheets write. Если Telegram report не доставлен уже после successful commit, сохранённый success не откатывается.
 
 Успешный Telegram report намеренно минимален: перечисляет обновлённые разделы,
-названия кланов, разработчика и настроенную ссылку техподдержки `Чат Леши`.
-Counts, seasons, diff, ссылка на таблицу и warnings в сообщение не выводятся.
-Recoverable warnings при этом сохраняются в `sync_runs.report_json` для диагностики.
+названия кланов, ссылку на разработчика `t.me/BangkokToD`, ссылку на таблицу и
+настроенную ссылку техподдержки `Чат Леши`. Counts, seasons, diff и warnings в сообщение не
+выводятся. Recoverable warnings при этом сохраняются в
+`sync_runs.report_json` для диагностики.
 
 ## 17. Sync history и status
 
