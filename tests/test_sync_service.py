@@ -520,13 +520,76 @@ async def test_success_report_uses_configured_support_chat_link(
     )._run_sync(runtime_chat_id=chat_id, user_id=1001)
 
     assert telegram.sent_messages
-    assert (
-        '<a href="https://docs.google.com/spreadsheets/d/sheet-1504/edit">Таблица</a>'
-        in telegram.sent_messages[-1]["text"]
-    )
+    assert telegram.sent_messages[-1]["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Таблица",
+                    "url": "https://docs.google.com/spreadsheets/d/sheet-1504/edit",
+                }
+            ],
+        ],
+    }
+    assert "Разработчик: BangkokToD" in telegram.sent_messages[-1]["text"]
+    assert "t.me/BangkokToD" not in telegram.sent_messages[-1]["text"]
     assert (
         '<a href="https://t.me/+support?a=1&amp;b=2">Чат Леши</a>'
         in telegram.sent_messages[-1]["text"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_success_report_table_button_is_kept_when_progress_message_is_edited(
+    migrated_connection: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Проверяет кнопку таблицы при редактировании progress-message."""
+
+    chat_id = -1505
+    telegram = FakeTelegram()
+    await _insert_ready_chat(migrated_connection, chat_id=chat_id)
+    _patch_successful_sync_pipeline(monkeypatch)
+
+    await SyncService(
+        config=make_app_config(),
+        telegram=telegram,  # type: ignore[arg-type]
+        connection=migrated_connection,
+    )._run_sync(runtime_chat_id=chat_id, user_id=1001, progress_message_id=77)
+
+    assert telegram.edited_messages[-1]["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Таблица",
+                    "url": "https://docs.google.com/spreadsheets/d/sheet-1505/edit",
+                }
+            ],
+        ],
+    }
+    assert telegram.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_success_report_table_button_is_kept_after_progress_edit_failure(
+    migrated_connection: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Проверяет кнопку таблицы в fallback-сообщении после ошибки edit."""
+
+    chat_id = -1506
+    telegram = FakeTelegram(raise_not_modified_on_edit=True)
+    await _insert_ready_chat(migrated_connection, chat_id=chat_id)
+    _patch_successful_sync_pipeline(monkeypatch)
+
+    await SyncService(
+        config=make_app_config(),
+        telegram=telegram,  # type: ignore[arg-type]
+        connection=migrated_connection,
+    )._run_sync(runtime_chat_id=chat_id, user_id=1001, progress_message_id=78)
+
+    assert telegram.edit_attempts[-1]["reply_markup"] == telegram.sent_messages[-1]["reply_markup"]
+    assert telegram.sent_messages[-1]["reply_markup"]["inline_keyboard"][0][0]["url"] == (
+        "https://docs.google.com/spreadsheets/d/sheet-1506/edit"
     )
 
 

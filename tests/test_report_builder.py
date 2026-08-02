@@ -47,8 +47,8 @@ def _status_summary(last_sync_status: str | None) -> SyncStatusSummary:
     )
 
 
-def test_build_error_report_escapes_reason_and_table_url() -> None:
-    """Проверяет HTML escaping в error report."""
+def test_build_error_report_escapes_reason_and_uses_table_button() -> None:
+    """Проверяет HTML escaping и кнопку таблицы в error report."""
 
     payload = build_error_report(
         reason="<broken & unsafe>",
@@ -58,7 +58,12 @@ def test_build_error_report_escapes_reason_and_table_url() -> None:
     assert payload.parse_mode == "HTML"
     assert payload.disable_web_page_preview is True
     assert "Причина: &lt;broken &amp; unsafe&gt;" in payload.text
-    assert '<a href="https://example.com/sheet?a=1&amp;b=2">Таблица</a>' in payload.text
+    assert "Таблица" not in payload.text
+    assert payload.reply_markup == {
+        "inline_keyboard": [
+            [{"text": "Таблица", "url": "https://example.com/sheet?a=1&b=2"}],
+        ],
+    }
 
 
 @pytest.mark.parametrize(
@@ -123,10 +128,14 @@ def test_build_success_report_has_only_sections_clans_and_developer() -> None:
         "Обновлены Состав, CWL и Рейды для кланов:\n"
         "• Alpha &amp; Co\n"
         "• Beta\n\n"
-        'Разработчик: <a href="https://t.me/BangkokToD">BangkokToD</a>\n'
-        '<a href="https://example.com/sheet?a=1&amp;b=2">Таблица</a>\n'
+        "Разработчик: BangkokToD\n"
         '<a href="https://t.me/+support?a=1&amp;b=2">Чат Леши</a>'
     )
+    assert payload.reply_markup == {
+        "inline_keyboard": [
+            [{"text": "Таблица", "url": "https://example.com/sheet?a=1&b=2"}],
+        ],
+    }
 
 
 def test_build_success_report_lists_only_updated_sections() -> None:
@@ -139,12 +148,12 @@ def test_build_success_report_lists_only_updated_sections() -> None:
         spreadsheet_url="https://example.com/sheet",
     )
 
-    assert payload.text == (
-        "Обновлены Состав для кланов:\n"
-        "• Alpha\n\n"
-        'Разработчик: <a href="https://t.me/BangkokToD">BangkokToD</a>\n'
-        '<a href="https://example.com/sheet">Таблица</a>'
-    )
+    assert payload.text == ("Обновлены Состав для кланов:\n• Alpha\n\nРазработчик: BangkokToD")
+    assert payload.reply_markup == {
+        "inline_keyboard": [
+            [{"text": "Таблица", "url": "https://example.com/sheet"}],
+        ],
+    }
     assert "Чат Леши" not in payload.text
 
 
@@ -168,4 +177,5 @@ def test_build_success_report_omits_counts_seasons_and_warnings() -> None:
     assert "Всего игроков" not in payload.text
     assert "Сезон" not in payload.text
     assert "warning" not in payload.text
-    assert payload.text.endswith('<a href="https://example.com/sheet">Таблица</a>')
+    assert "Таблица" not in payload.text
+    assert payload.text.endswith("Разработчик: BangkokToD")
