@@ -97,7 +97,6 @@ def main_private_keyboard(
     """Создаёт главное меню личного чата."""
 
     rows: list[list[dict[str, str]]] = [
-        [{"text": "Подключить группу", "callback_data": CALLBACK_CONNECT_GROUP}],
         [{"text": "Мои группы", "callback_data": CALLBACK_MY_GROUPS}],
     ]
     if support_url is not None:
@@ -123,7 +122,10 @@ def known_groups_keyboard(groups: Sequence[KnownGroupButton]) -> JsonObject:
             ]
             for group in groups
         ]
-        + [[{"text": "Назад", "callback_data": CALLBACK_PRIVATE_START}]],
+        + [
+            [{"text": "Подключить группу", "callback_data": CALLBACK_CONNECT_GROUP}],
+            [{"text": "Назад", "callback_data": CALLBACK_PRIVATE_START}],
+        ],
     }
 
 

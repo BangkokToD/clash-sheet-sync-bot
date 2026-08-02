@@ -23,6 +23,7 @@ from clash_sheet_sync_bot.repositories import (
     RuntimeConfigRepository,
     SheetBindingRepository,
     SheetBlockRepository,
+    SuperadminRepository,
     SyncRunRepository,
     TelegramChatRepository,
 )
@@ -233,8 +234,6 @@ class SyncService:
             return
 
         spreadsheet_url = runtime.sheet_binding.spreadsheet_url
-        is_baseline = not await self._sync_runs.has_successful_sync(runtime_chat_id)
-
         try:
             token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
             async with httpx.AsyncClient(
@@ -349,20 +348,27 @@ class SyncService:
                 diff_items=prepared_composition.diff_items,
                 warnings=prepared_composition.warnings,
             )
+            support_group = await SuperadminRepository(self._connection).get_support_group()
             report = build_success_report(
                 composition_result=composition_result,
                 cwl_result=cwl_result,
                 raid_result=raid_result,
-                spreadsheet_url=spreadsheet_url,
-                report_max_items=self._config.report_max_items,
-                is_baseline=is_baseline,
+                support_url=support_group.url if support_group is not None else None,
             )
+            report_data: dict[str, object] = {"telegram_report": report.text}
+            warnings = [*composition_result.warnings]
+            if cwl_result is not None:
+                warnings.extend(cwl_result.warnings)
+            if raid_result is not None:
+                warnings.extend(raid_result.warnings)
+            if warnings:
+                report_data["warnings"] = warnings
             finished_at = _format_dt(_utc_now())
             await self._sync_runs.finish_sync_run(
                 sync_run_id=sync_run_id,
                 status="success",
                 finished_at=finished_at,
-                report_json=json.dumps({"telegram_report": report.text}, ensure_ascii=False),
+                report_json=json.dumps(report_data, ensure_ascii=False),
             )
             await self._telegram_chats.mark_sync_finished(
                 chat_id=runtime_chat_id,

@@ -492,6 +492,41 @@ async def test_telegram_delivery_failure_after_success_keeps_success_status(
 
 
 @pytest.mark.asyncio
+async def test_success_report_uses_configured_support_chat_link(
+    migrated_connection: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Проверяет чтение актуальной support URL из singleton-настройки."""
+
+    chat_id = -1504
+    telegram = FakeTelegram()
+    await _insert_ready_chat(migrated_connection, chat_id=chat_id)
+    await migrated_connection.execute(
+        """
+        UPDATE bot_settings
+        SET support_chat_id = ?, support_chat_title = ?, support_url = ?,
+            updated_by_user_id = ?, updated_at = ?
+        WHERE singleton_id = 1
+        """,
+        (-9001, "Support", "https://t.me/+support?a=1&b=2", 1001, NOW),
+    )
+    await migrated_connection.commit()
+    _patch_successful_sync_pipeline(monkeypatch)
+
+    await SyncService(
+        config=make_app_config(),
+        telegram=telegram,  # type: ignore[arg-type]
+        connection=migrated_connection,
+    )._run_sync(runtime_chat_id=chat_id, user_id=1001)
+
+    assert telegram.sent_messages
+    assert (
+        '<a href="https://t.me/+support?a=1&amp;b=2">Чат Леши</a>'
+        in telegram.sent_messages[-1]["text"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_sync_prepares_all_domains_before_any_write(
     migrated_connection: aiosqlite.Connection,
     monkeypatch: pytest.MonkeyPatch,

@@ -7,7 +7,9 @@ from typing import Any
 
 from clash_sheet_sync_bot.models import ColumnProfile, TableType
 from clash_sheet_sync_bot.setup.keyboards import (
+    KnownGroupButton,
     columns_section_keyboard,
+    known_groups_keyboard,
     main_private_keyboard,
     settings_menu_keyboard,
     table_type_from_payload,
@@ -93,8 +95,23 @@ def test_main_menu_adds_support_and_admin_buttons_by_role() -> None:
     regular_buttons = [button for row in regular["inline_keyboard"] for button in row]
     admin_buttons = [button for row in superadmin["inline_keyboard"] for button in row]
     assert {"text": "Техподдержка", "url": "https://t.me/support"} in regular_buttons
+    assert not any(button["text"] == "Подключить группу" for button in regular_buttons)
     assert not any(button["text"] == "Администрирование" for button in regular_buttons)
     assert {
         "text": "Администрирование",
         "callback_data": "admin:menu",
     } in admin_buttons
+
+
+def test_connect_group_button_lives_in_my_groups_menu() -> None:
+    """Проверяет новое расположение действия подключения группы."""
+
+    empty_markup = known_groups_keyboard(())
+    populated_markup = known_groups_keyboard((KnownGroupButton(chat_id=-1001, title="Clan group"),))
+
+    for markup in (empty_markup, populated_markup):
+        buttons = [button for row in markup["inline_keyboard"] for button in row]
+        assert {
+            "text": "Подключить группу",
+            "callback_data": "setup:create_token",
+        } in buttons

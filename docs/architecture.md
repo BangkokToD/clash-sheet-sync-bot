@@ -177,7 +177,7 @@ awaiting_column_rename:<user_id>:<table_type>:<column_key>
 
 ### 6.1. Подключение группы
 
-1. Админ в личке нажимает «Подключить группу».
+1. Админ в личке открывает «Мои группы» и нажимает «Подключить группу».
 2. Бот создаёт одноразовый setup token.
 3. Админ добавляет бота в группу.
 4. Админ отправляет `/connect <token>` в группе.
@@ -496,6 +496,11 @@ Partial write warning означает, что ошибка произошла �
 - unexpected exception после старта write-фазы.
 
 SQLite commit при успешном sync происходит после Google Sheets write. Если Telegram report не доставлен уже после successful commit, сохранённый success не откатывается.
+
+Успешный Telegram report намеренно минимален: перечисляет обновлённые разделы,
+названия кланов, разработчика и настроенную ссылку техподдержки `Чат Леши`.
+Counts, seasons, diff, ссылка на таблицу и warnings в сообщение не выводятся.
+Recoverable warnings при этом сохраняются в `sync_runs.report_json` для диагностики.
 
 ## 17. Sync history и status
 

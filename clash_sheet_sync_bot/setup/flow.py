@@ -208,10 +208,11 @@ class SetupFlow:
         if is_private:
             text = (
                 "Порядок подключения:\n"
-                "1. Нажмите «Подключить группу».\n"
-                "2. Добавьте бота в Telegram-группу.\n"
-                "3. Отправьте в группе команду /connect <token>.\n"
-                "4. Вернитесь в личный чат и откройте /settings."
+                "1. Откройте «Мои группы».\n"
+                "2. Нажмите «Подключить группу».\n"
+                "3. Добавьте бота в Telegram-группу.\n"
+                "4. Отправьте в группе команду /connect <token>.\n"
+                "5. Вернитесь в личный чат и откройте /settings."
             )
         else:
             text = (
@@ -758,7 +759,7 @@ class SetupFlow:
                 text=(
                     "У вас пока нет подключённых групп. Нажмите «Подключить группу», чтобы начать."
                 ),
-                reply_markup=await self._main_private_keyboard(user_id),
+                reply_markup=known_groups_keyboard(()),
             )
             return
 
