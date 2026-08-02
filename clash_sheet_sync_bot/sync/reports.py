@@ -10,6 +10,7 @@ from typing import Final
 from clash_sheet_sync_bot.repositories import SyncStatusSummary
 from clash_sheet_sync_bot.sync.composition import CompositionDiffItem, CompositionSyncResult
 from clash_sheet_sync_bot.sync.cwl import CwlDiffItem, CwlSheetSyncResult
+from clash_sheet_sync_bot.sync.raids import RaidSheetSyncResult
 
 TABLE_LINK_TEXT: Final = "Таблица"
 MAX_TELEGRAM_MESSAGE_LENGTH: Final = 3500
@@ -34,6 +35,7 @@ def build_success_report(
     *,
     composition_result: CompositionSyncResult,
     cwl_result: CwlSheetSyncResult | None,
+    raid_result: RaidSheetSyncResult | None,
     spreadsheet_url: str,
     report_max_items: int,
     is_baseline: bool,
@@ -43,6 +45,7 @@ def build_success_report(
     Args:
         composition_result: Результат синхронизации состава.
         cwl_result: Результат CWL или `None`, если CWL не запускалась.
+        raid_result: Результат raid sync или `None`, если raids не запускались.
         spreadsheet_url: URL Google Spreadsheet.
         report_max_items: Лимит количества diff-строк.
         is_baseline: Является ли запуск первичной синхронизацией.
@@ -52,14 +55,19 @@ def build_success_report(
     """
 
     if is_baseline:
-        return SyncReportPayload(
-            text=(f"Первичная синхронизация завершена.\n\n{_table_link(spreadsheet_url)}"),
-        )
+        lines = ["Первичная синхронизация завершена."]
+        if raid_result is not None:
+            lines.extend(["", *_raid_summary_lines(raid_result)])
+            lines.extend(_raid_warning_lines(raid_result, report_max_items=report_max_items))
+        lines.extend(["", _table_link(spreadsheet_url)])
+        return SyncReportPayload(text=_fit_telegram_length("\n".join(lines), spreadsheet_url))
 
     lines = ["Обновление завершено.", ""]
     lines.extend(_composition_summary_lines(composition_result))
     if cwl_result is not None:
         lines.extend(["", *_cwl_summary_lines(cwl_result)])
+    if raid_result is not None:
+        lines.extend(["", *_raid_summary_lines(raid_result)])
 
     warnings = [*composition_result.warnings]
     if cwl_result is not None:
@@ -72,6 +80,9 @@ def build_success_report(
                 "Если число повторяется после следующего /sync, проверьте таблицу через диагностику.",
             ],
         )
+
+    if raid_result is not None:
+        lines.extend(_raid_warning_lines(raid_result, report_max_items=report_max_items))
 
     lines.extend(["", _table_link(spreadsheet_url)])
     return SyncReportPayload(text=_fit_telegram_length("\n".join(lines), spreadsheet_url))
@@ -129,6 +140,61 @@ def _cwl_summary_lines(cwl_result: CwlSheetSyncResult) -> list[str]:
     return lines
 
 
+def _raid_summary_lines(raid_result: RaidSheetSyncResult) -> list[str]:
+    """Строит краткую сводку raid weekend."""
+
+    lines = ["Рейды:"]
+    if raid_result.season_key is None:
+        lines.append("Рейды сейчас не проводятся. Сохранённых данных за прошлый уикенд нет.")
+        return lines
+
+    state = (
+        "показан сохранённый"
+        if raid_result.showing_saved_season
+        else {
+            "ongoing": "проводится",
+            "ended": "завершён",
+        }.get(raid_result.season_state, "-")
+    )
+    lines.append(f"Сезон: {escape(raid_result.season_key)}. Состояние: {state}.")
+    if raid_result.season_start_at is not None and raid_result.season_end_at is not None:
+        lines.append(
+            f"Период: {escape(raid_result.season_start_at)} — {escape(raid_result.season_end_at)}."
+        )
+    lines.append(
+        f"Клановых блоков: {raid_result.blocks_count}. Участников: {raid_result.rows_count}."
+    )
+    target = raid_result.attacks_target
+    lines.append(f"Выполнили {target}/{target}: {raid_result.attacks_complete_count}.")
+    if raid_result.season_state == "ended":
+        lines.append(f"Не выполнили {target}/{target}: {raid_result.attacks_below_target_count}.")
+    if raid_result.archived_previous_season and raid_result.archive_sheet_name is not None:
+        lines.append(f"Архивирован предыдущий сезон: {escape(raid_result.archive_sheet_name)}.")
+    lines.extend(
+        f"Удалён старый архив: {escape(sheet_name)}."
+        for sheet_name in raid_result.pruned_archive_sheet_names
+    )
+    return lines
+
+
+def _raid_warning_lines(
+    raid_result: RaidSheetSyncResult,
+    *,
+    report_max_items: int,
+) -> list[str]:
+    """Строит ограниченный список raid warnings."""
+
+    if not raid_result.warnings:
+        return []
+    visible_warnings = raid_result.warnings[:report_max_items]
+    lines = ["", "Предупреждения рейдов:"]
+    lines.extend(f"• {escape(warning)}" for warning in visible_warnings)
+    omitted = len(raid_result.warnings) - len(visible_warnings)
+    if omitted > 0:
+        lines.append(f"…ещё {omitted}.")
+    return lines
+
+
 def _count_items_by_kind(
     items: tuple[CompositionDiffItem, ...] | tuple[CwlDiffItem, ...],
 ) -> Counter[str]:
@@ -169,6 +235,7 @@ def build_status_report(summary: SyncStatusSummary | None) -> SyncReportPayload:
     status = _display_sync_status(summary.last_sync_status)
     error = summary.last_sync_error or "-"
     cwl_season = summary.active_cwl_season or "-"
+    raid_season = summary.active_raid_season or "-"
     table = _table_link(summary.spreadsheet_url) if summary.spreadsheet_url else "-"
     lines = [
         f"Последнее обновление: {escape(last_update)}",
@@ -176,6 +243,7 @@ def build_status_report(summary: SyncStatusSummary | None) -> SyncReportPayload:
         f"Ошибка: {escape(error)}",
         f"Активных кланов: {summary.active_clans_count}",
         f"CWL-сезон: {escape(cwl_season)}",
+        f"Рейдовый сезон: {escape(raid_season)}",
         f"Таблица: {table}",
     ]
     return SyncReportPayload(text="\n".join(lines))

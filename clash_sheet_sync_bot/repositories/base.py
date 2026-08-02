@@ -106,7 +106,7 @@ def as_table_type(value: Any) -> TableType:
     """Проверяет тип таблицы профиля колонок."""
 
     raw = as_str(value, "table_type")
-    if raw not in {"composition", "composition_active", "composition_exited", "cwl"}:
+    if raw not in {"composition", "composition_active", "composition_exited", "cwl", "raids"}:
         raise RepositoryError(f"Некорректный table_type: {raw}.")
     return cast(TableType, raw)
 
@@ -124,7 +124,7 @@ def as_column_value_type(value: Any) -> ColumnValueType:
     """Проверяет value_type профиля колонки."""
 
     raw = as_str(value, "value_type")
-    if raw not in {"string", "integer", "datetime"}:
+    if raw not in {"string", "integer", "datetime", "number"}:
         raise RepositoryError(f"Некорректный column value_type: {raw}.")
     return cast(ColumnValueType, raw)
 

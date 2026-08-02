@@ -39,6 +39,7 @@ class SyncStatusSummary:
         last_sync_error: Ошибка последнего `/sync` или `None`.
         active_clans_count: Количество active clans.
         active_cwl_season: Активный CWL-сезон или `None`.
+        active_raid_season: Активный raid season или `None`.
         spreadsheet_url: Ссылка на таблицу или `None`.
     """
 
@@ -50,6 +51,7 @@ class SyncStatusSummary:
     last_sync_error: str | None
     active_clans_count: int
     active_cwl_season: str | None
+    active_raid_season: str | None
     spreadsheet_url: str | None
 
 
@@ -333,6 +335,7 @@ class TelegramChatRepository:
                 c.last_sync_error,
                 b.spreadsheet_url,
                 b.active_cwl_season,
+                b.active_raid_season,
                 COUNT(tc.clan_tag) AS active_clans_count
             FROM telegram_chats AS c
             LEFT JOIN sheet_bindings AS b
@@ -359,6 +362,7 @@ class TelegramChatRepository:
             last_sync_error=as_optional_str(row["last_sync_error"], "last_sync_error"),
             active_clans_count=as_int(row["active_clans_count"], "active_clans_count"),
             active_cwl_season=as_optional_str(row["active_cwl_season"], "active_cwl_season"),
+            active_raid_season=as_optional_str(row["active_raid_season"], "active_raid_season"),
             spreadsheet_url=as_optional_str(row["spreadsheet_url"], "spreadsheet_url"),
         )
 
@@ -429,6 +433,8 @@ class ChatLifecycleRepository:
             "column_profiles",
             "composition_player_state",
             "cwl_row_state",
+            "raid_player_state",
+            "raid_sheet_archives",
             "sheet_blocks",
         ):
             await self._connection.execute(

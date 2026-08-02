@@ -35,6 +35,15 @@ from .clans import ClanSettingsRepository
 from .columns import ColumnProfileRepository
 from .composition_state import CompositionPlayerState, CompositionPlayerStateRepository
 from .cwl_state import CwlRowState, CwlRowStateRepository
+from .raid_state import (
+    RaidDataError,
+    RaidPlayerState,
+    RaidPlayerStateRepository,
+    RaidSheetArchive,
+    RaidSheetArchiveRepository,
+    decode_raid_technical_values,
+    encode_raid_technical_values,
+)
 from .setup_tokens import SetupTokenRepository
 from .sheet_blocks import SheetBlockRepository
 from .sync_runs import SyncRunRepository
@@ -51,6 +60,11 @@ __all__ = [
     "CwlRowStateRepository",
     "KnownAdminChat",
     "PendingSheetLinkSetup",
+    "RaidDataError",
+    "RaidPlayerState",
+    "RaidPlayerStateRepository",
+    "RaidSheetArchive",
+    "RaidSheetArchiveRepository",
     "RepositoryError",
     "RuntimeConfigRepository",
     "SetupTokenRepository",
@@ -73,6 +87,8 @@ __all__ = [
     "as_str",
     "as_table_type",
     "as_user_values",
+    "decode_raid_technical_values",
+    "encode_raid_technical_values",
     "fetch_all",
     "fetch_one",
 ]
