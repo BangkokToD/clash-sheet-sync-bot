@@ -1,5 +1,7 @@
 # Clash Sheet Sync Bot
 
+[![CI](https://github.com/BangkokToD/clash-sheet-sync-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/BangkokToD/clash-sheet-sync-bot/actions/workflows/ci.yml)
+
 Telegram-бот для ручной синхронизации Google Sheets с данными Clash of Clans API.
 
 Бот работает через Telegram Bot API long polling, хранит runtime-состояние в SQLite и обновляет Google Sheets для подключённых Telegram-групп.

@@ -314,9 +314,7 @@ async def test_migration_7_updates_only_legacy_raid_presentation(tmp_path: Path)
         assert profiles[(custom_order_chat_id, "player_name")][1] == 10
         assert profiles[(custom_order_chat_id, "player_tag")][1] == 40
 
-        cursor = await connection.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        )
+        cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
         assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 8))
 
 
