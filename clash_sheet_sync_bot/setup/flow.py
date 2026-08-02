@@ -23,6 +23,7 @@ from clash_sheet_sync_bot.repositories import (
     ChatLifecycleRepository,
     ClanSettingsRepository,
     ColumnProfileRepository,
+    RaidSheetArchiveRepository,
     RuntimeConfigRepository,
     SetupTokenRepository,
     SheetBindingRepository,
@@ -109,6 +110,7 @@ COLUMN_SECTION_TABLE_TYPES: Final[dict[str, TableType]] = {
     "composition_active_columns": "composition_active",
     "composition_exited_columns": "composition_exited",
     "cwl_columns": "cwl",
+    "raids_columns": "raids",
 }
 
 
@@ -157,6 +159,7 @@ class SetupFlow:
         self._admin_chats = AdminChatRepository(connection)
         self._sheet_bindings = SheetBindingRepository(connection)
         self._blocks = SheetBlockRepository(connection)
+        self._raid_archives = RaidSheetArchiveRepository(connection)
         self._transfers = TransferTokenRepository(connection)
         self._lifecycle = ChatLifecycleRepository(connection)
         self._clans = ClanSettingsRepository(connection)
@@ -1158,6 +1161,7 @@ class SetupFlow:
                 f"Текущая таблица:\n{binding.spreadsheet_url}\n\n"
                 f"Spreadsheet ID: {binding.google_sheet_id}\n"
                 f"Лист состава: {binding.composition_sheet_name}\n"
+                f"Лист Рейды: {binding.active_raid_sheet_name}\n"
                 f"Лист CWL: {binding.active_cwl_sheet_name}\n"
                 f"Service account: {service_account_email}\n\n"
                 "Доступны диагностика, смена таблицы, отвязка и перенос в другую группу."
@@ -1414,15 +1418,31 @@ class SetupFlow:
                 active_cwl_sheet_name=setup_result.active_cwl_sheet_name,
                 active_cwl_sheet_id=setup_result.active_cwl_sheet_id,
                 active_cwl_season=setup_result.active_cwl_season,
+                active_raid_sheet_name=setup_result.active_raid_sheet_name,
+                active_raid_sheet_id=setup_result.active_raid_sheet_id,
+                active_raid_season=setup_result.active_raid_season,
                 bot_state_sheet_name=setup_result.bot_state_sheet_name,
                 bot_state_sheet_id=setup_result.bot_state_sheet_id,
                 now=now,
             )
+            for cleanup in setup_result.raid_archive_cleanup:
+                await self._raid_archives.delete(
+                    chat_id=group_chat_id,
+                    season_key=cleanup.season_key,
+                )
+                await self._blocks.delete_blocks(
+                    chat_id=group_chat_id,
+                    sheet_id=cleanup.sheet_id,
+                    block_key_prefixes=("raid:", "raid_message:"),
+                )
+        suffix = ""
+        if setup_result.cleanup_warnings:
+            suffix = "\n\n" + "\n".join(setup_result.cleanup_warnings)
         await _edit_or_send_message(
             telegram=self._telegram,
             chat_id=chat_id,
             message_id=message_id,
-            text="Auto-fix выполнен. Запустите диагностику повторно.",
+            text="Auto-fix выполнен. Запустите диагностику повторно." + suffix,
             reply_markup=diagnostic_keyboard(group_chat_id, has_fixable_issues=False),
         )
 
@@ -1622,6 +1642,9 @@ class SetupFlow:
                 active_cwl_sheet_name=setup_result.active_cwl_sheet_name,
                 active_cwl_sheet_id=setup_result.active_cwl_sheet_id,
                 active_cwl_season=setup_result.active_cwl_season,
+                active_raid_sheet_name=setup_result.active_raid_sheet_name,
+                active_raid_sheet_id=setup_result.active_raid_sheet_id,
+                active_raid_season=setup_result.active_raid_season,
                 bot_state_sheet_name=setup_result.bot_state_sheet_name,
                 bot_state_sheet_id=setup_result.bot_state_sheet_id,
                 timezone=self._config.default_timezone,
@@ -1769,6 +1792,7 @@ class SetupFlow:
         token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
         timeout = httpx.Timeout(30.0, connect=10.0)
         blocks = await self._blocks.list_blocks(binding.chat_id)
+        raid_archives = await self._raid_archives.list_ordered(binding.chat_id)
         async with httpx.AsyncClient(timeout=timeout) as http_client:
             sheets_client = SheetsClient(binding.google_sheet_id, token_provider, http_client)
             admin = SheetAdminService(
@@ -1777,7 +1801,12 @@ class SetupFlow:
                 service_account_email=token_provider.client_email,
                 expected_service_account_email=self._config.google_service_account_email,
             )
-            return await admin.diagnose_binding(binding=binding, blocks=blocks)
+            return await admin.diagnose_binding(
+                binding=binding,
+                blocks=blocks,
+                raid_archives=raid_archives,
+                raid_archive_limit=self._config.raid_archive_sheets_limit,
+            )
 
     async def _run_table_autofix(self, *, binding):
         """Запускает auto-fix Google Sheets и возвращает новые sheet IDs."""
@@ -1785,6 +1814,7 @@ class SetupFlow:
         token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
         timeout = httpx.Timeout(30.0, connect=10.0)
         blocks = await self._blocks.list_blocks(binding.chat_id)
+        raid_archives = await self._raid_archives.list_ordered(binding.chat_id)
         async with httpx.AsyncClient(timeout=timeout) as http_client:
             sheets_client = SheetsClient(binding.google_sheet_id, token_provider, http_client)
             admin = SheetAdminService(
@@ -1793,7 +1823,12 @@ class SetupFlow:
                 service_account_email=token_provider.client_email,
                 expected_service_account_email=self._config.google_service_account_email,
             )
-            return await admin.auto_fix_binding(binding=binding, blocks=blocks)
+            return await admin.auto_fix_binding(
+                binding=binding,
+                blocks=blocks,
+                raid_archives=raid_archives,
+                raid_archive_limit=self._config.raid_archive_sheets_limit,
+            )
 
     async def _lookup_clan(self, clan_tag: str):
         """Проверяет клан через Clash of Clans API.
@@ -2471,7 +2506,7 @@ def _table_type_from_state(setup_state: str, *, prefix: str, user_id: int) -> Ta
     if not setup_state.startswith(expected_prefix):
         return None
     raw_table_type = setup_state.removeprefix(expected_prefix)
-    if raw_table_type not in {"composition_active", "composition_exited", "cwl"}:
+    if raw_table_type not in {"composition_active", "composition_exited", "cwl", "raids"}:
         return None
     return raw_table_type  # type: ignore[return-value]
 
@@ -2493,7 +2528,7 @@ def _rename_state_payload(setup_state: str, user_id: int) -> tuple[TableType, st
     payload = setup_state.removeprefix(expected_prefix)
     raw_table_type, _, column_key = payload.partition(":")
     if (
-        raw_table_type not in {"composition_active", "composition_exited", "cwl"}
+        raw_table_type not in {"composition_active", "composition_exited", "cwl", "raids"}
         or column_key == ""
     ):
         return None

@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -281,6 +281,70 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
         table_type = 'cwl'
         AND column_key IN ('stars', 'destruction_percentage')
     );
+    """,
+    4: """
+    ALTER TABLE sheet_bindings
+    ADD COLUMN active_raid_sheet_name TEXT NOT NULL DEFAULT 'Рейды';
+    ALTER TABLE sheet_bindings ADD COLUMN active_raid_sheet_id INTEGER;
+    ALTER TABLE sheet_bindings ADD COLUMN active_raid_season TEXT;
+
+    CREATE TABLE raid_player_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        season_key TEXT NOT NULL,
+        season_start_at TEXT NOT NULL,
+        season_end_at TEXT NOT NULL,
+        season_state TEXT NOT NULL,
+        row_key TEXT NOT NULL,
+        clan_tag TEXT NOT NULL,
+        player_tag TEXT NOT NULL,
+        technical_values_json TEXT NOT NULL,
+        user_values_json TEXT NOT NULL DEFAULT '{}',
+        row_hash TEXT,
+        updated_at TEXT NOT NULL,
+        UNIQUE(chat_id, season_key, row_key),
+        FOREIGN KEY(chat_id) REFERENCES telegram_chats(chat_id)
+    );
+    CREATE INDEX idx_raid_player_state_chat_season_clan
+    ON raid_player_state(chat_id, season_key, clan_tag);
+
+    CREATE TABLE raid_sheet_archives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        season_key TEXT NOT NULL,
+        season_start_at TEXT NOT NULL,
+        sheet_name TEXT NOT NULL,
+        sheet_id INTEGER NOT NULL,
+        archived_at TEXT NOT NULL,
+        UNIQUE(chat_id, season_key),
+        UNIQUE(chat_id, sheet_id),
+        FOREIGN KEY(chat_id) REFERENCES telegram_chats(chat_id)
+    );
+    CREATE INDEX idx_raid_sheet_archives_order
+    ON raid_sheet_archives(chat_id, season_start_at, archived_at);
+
+    INSERT INTO column_profiles(
+        chat_id, table_type, column_key, title, visible, is_active,
+        sort_order, kind, value_type, created_at, updated_at
+    )
+    SELECT telegram_chats.chat_id, 'raids', raid_defaults.column_key,
+           raid_defaults.title, raid_defaults.visible, 1,
+           raid_defaults.sort_order, raid_defaults.kind, raid_defaults.value_type,
+           strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    FROM telegram_chats
+    CROSS JOIN (
+        SELECT 'bot_key' column_key, '__bot_key' title, 0 visible, 0 sort_order, 'service' kind, 'string' value_type
+        UNION ALL SELECT 'number', '№', 1, 10, 'system', 'integer'
+        UNION ALL SELECT 'player_tag', 'Тег', 1, 20, 'system', 'string'
+        UNION ALL SELECT 'player_name', 'Ник', 1, 30, 'system', 'string'
+        UNION ALL SELECT 'attacks', 'Атаки', 1, 40, 'system', 'string'
+        UNION ALL SELECT 'normal_points', 'Нормо-очки', 1, 50, 'system', 'number'
+        UNION ALL SELECT 'coefficient', 'Коэффициент', 1, 60, 'system', 'number'
+        UNION ALL SELECT 'capital_resources_looted', 'Золото столицы', 1, 70, 'system', 'integer'
+    ) AS raid_defaults
+    WHERE 1
+    ON CONFLICT(chat_id, table_type, column_key) DO NOTHING;
     """,
 }
 

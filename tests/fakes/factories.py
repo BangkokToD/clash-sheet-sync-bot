@@ -13,6 +13,7 @@ from clash_sheet_sync_bot.models import (
     TrackedClan,
 )
 from clash_sheet_sync_bot.repositories import CompositionPlayerState
+from clash_sheet_sync_bot.sync.raids import RaidSheetSyncResult
 
 
 def make_tracked_clan(
@@ -42,6 +43,9 @@ def make_sheet_binding(
     active_cwl_sheet_name: str = "CWL",
     active_cwl_sheet_id: int | None = 222,
     active_cwl_season: str | None = "2026-07",
+    active_raid_sheet_name: str = "Рейды",
+    active_raid_sheet_id: int | None = 444,
+    active_raid_season: str | None = None,
     bot_state_sheet_name: str = "_bot_state",
     bot_state_sheet_id: int | None = 333,
     timezone: str = "Europe/Kyiv",
@@ -57,6 +61,9 @@ def make_sheet_binding(
         active_cwl_sheet_name=active_cwl_sheet_name,
         active_cwl_sheet_id=active_cwl_sheet_id,
         active_cwl_season=active_cwl_season,
+        active_raid_sheet_name=active_raid_sheet_name,
+        active_raid_sheet_id=active_raid_sheet_id,
+        active_raid_season=active_raid_season,
         bot_state_sheet_name=bot_state_sheet_name,
         bot_state_sheet_id=bot_state_sheet_id,
         timezone=timezone,
@@ -71,6 +78,12 @@ def make_app_config(
     google_service_account_email: str | None = None,
     db_path: str | Path = "bot.db",
     dev_mode: bool = False,
+    raid_archive_sheets_limit: int = 4,
+    raid_attacks_target: int = 6,
+    raid_normal_district_attack_norm: int = 2,
+    raid_capital_district_attack_norm: int = 3,
+    raid_season_fetch_limit: int = 5,
+    raid_api_concurrency_limit: int = 5,
 ) -> AppConfig:
     """Создаёт AppConfig для setup/sync service tests."""
 
@@ -86,6 +99,12 @@ def make_app_config(
         sync_cooldown_seconds=60,
         max_concurrent_syncs=3,
         cwl_war_concurrency_limit=5,
+        raid_archive_sheets_limit=raid_archive_sheets_limit,
+        raid_attacks_target=raid_attacks_target,
+        raid_normal_district_attack_norm=raid_normal_district_attack_norm,
+        raid_capital_district_attack_norm=raid_capital_district_attack_norm,
+        raid_season_fetch_limit=raid_season_fetch_limit,
+        raid_api_concurrency_limit=raid_api_concurrency_limit,
         admin_cache_ttl_seconds=300,
         setup_token_ttl_seconds=900,
         transfer_token_ttl_seconds=900,
@@ -254,6 +273,7 @@ def make_composition_column_profiles(chat_id: int = -1001) -> tuple[ColumnProfil
 def make_runtime_config(
     *,
     chat_id: int = -1001,
+    sheet_binding: SheetBinding | None = None,
     active_clans: tuple[TrackedClan, ...] | None = None,
     column_profiles: tuple[ColumnProfile, ...] | None = None,
 ) -> RuntimeChatConfig:
@@ -266,7 +286,7 @@ def make_runtime_config(
     return RuntimeChatConfig(
         chat_id=chat_id,
         status="ready",
-        sheet_binding=make_sheet_binding(chat_id=chat_id),
+        sheet_binding=sheet_binding or make_sheet_binding(chat_id=chat_id),
         active_clans=clans,
         column_profiles=column_profiles or make_composition_column_profiles(chat_id),
         timezone="Europe/Kyiv",
@@ -318,4 +338,43 @@ def make_sheet_block(
         start_cell=start_cell,
         rows_count=rows_count,
         columns_count=columns_count,
+    )
+
+
+def make_raid_sheet_sync_result(
+    *,
+    season_key: str | None = "2026-07-24T07:00:00+00:00",
+    season_state: str | None = "ended",
+    rows_count: int = 8,
+    blocks_count: int = 2,
+    season_start_at: str | None = "2026-07-24T07:00:00+00:00",
+    season_end_at: str | None = "2026-07-27T07:00:00+00:00",
+    attacks_target: int = 6,
+    attacks_complete_count: int = 5,
+    attacks_below_target_count: int = 3,
+    showing_saved_season: bool = False,
+    warnings: tuple[str, ...] = (),
+    archived_previous_season: bool = False,
+    archive_sheet_name: str | None = None,
+    pruned_archive_sheet_names: tuple[str, ...] = (),
+) -> RaidSheetSyncResult:
+    """Создаёт результат raid apply для pipeline/report tests."""
+
+    return RaidSheetSyncResult(
+        season_key=season_key,
+        season_state=season_state,  # type: ignore[arg-type]
+        sheet_name="Рейды",
+        sheet_id=444,
+        rows_count=rows_count,
+        blocks_count=blocks_count,
+        season_start_at=season_start_at,
+        season_end_at=season_end_at,
+        attacks_target=attacks_target,
+        attacks_complete_count=attacks_complete_count,
+        attacks_below_target_count=attacks_below_target_count,
+        showing_saved_season=showing_saved_season,
+        warnings=warnings,
+        archived_previous_season=archived_previous_season,
+        archive_sheet_name=archive_sheet_name,
+        pruned_archive_sheet_names=pruned_archive_sheet_names,
     )

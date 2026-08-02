@@ -121,3 +121,55 @@ class SheetBlockRepository:
 
         for block in blocks:
             await self.upsert_block(block=block, updated_at=updated_at)
+
+    async def rebind_blocks(
+        self,
+        *,
+        chat_id: int,
+        old_sheet_name: str,
+        new_sheet_name: str,
+        sheet_id: int,
+        block_key_prefixes: tuple[str, ...],
+        updated_at: str,
+    ) -> None:
+        """Перепривязывает выбранные blocks при переименовании листа."""
+
+        if not block_key_prefixes:
+            return
+        conditions = " OR ".join("block_key LIKE ?" for _ in block_key_prefixes)
+        await self._connection.execute(
+            f"""
+            UPDATE sheet_blocks
+            SET sheet_name = ?, updated_at = ?
+            WHERE chat_id = ? AND sheet_name = ? AND sheet_id = ?
+              AND ({conditions})
+            """,
+            (
+                new_sheet_name,
+                updated_at,
+                chat_id,
+                old_sheet_name,
+                sheet_id,
+                *(f"{prefix}%" for prefix in block_key_prefixes),
+            ),
+        )
+
+    async def delete_blocks(
+        self,
+        *,
+        chat_id: int,
+        sheet_id: int,
+        block_key_prefixes: tuple[str, ...],
+    ) -> None:
+        """Удаляет metadata только выбранного физического листа."""
+
+        if not block_key_prefixes:
+            return
+        conditions = " OR ".join("block_key LIKE ?" for _ in block_key_prefixes)
+        await self._connection.execute(
+            f"""
+            DELETE FROM sheet_blocks
+            WHERE chat_id = ? AND sheet_id = ? AND ({conditions})
+            """,
+            (chat_id, sheet_id, *(f"{prefix}%" for prefix in block_key_prefixes)),
+        )

@@ -20,6 +20,12 @@ CONFIG_ENV_NAMES = (
     "SYNC_COOLDOWN_SECONDS",
     "MAX_CONCURRENT_SYNCS",
     "CWL_WAR_CONCURRENCY_LIMIT",
+    "RAID_ARCHIVE_SHEETS_LIMIT",
+    "RAID_ATTACKS_TARGET",
+    "RAID_NORMAL_DISTRICT_ATTACK_NORM",
+    "RAID_CAPITAL_DISTRICT_ATTACK_NORM",
+    "RAID_SEASON_FETCH_LIMIT",
+    "RAID_API_CONCURRENCY_LIMIT",
     "ADMIN_CACHE_TTL_SECONDS",
     "SETUP_TOKEN_TTL_SECONDS",
     "TRANSFER_TOKEN_TTL_SECONDS",
@@ -86,6 +92,12 @@ def test_load_config_uses_defaults(
     assert config.sync_cooldown_seconds == 60
     assert config.max_concurrent_syncs == 3
     assert config.cwl_war_concurrency_limit == 5
+    assert config.raid_archive_sheets_limit == 4
+    assert config.raid_attacks_target == 6
+    assert config.raid_normal_district_attack_norm == 2
+    assert config.raid_capital_district_attack_norm == 3
+    assert config.raid_season_fetch_limit == 5
+    assert config.raid_api_concurrency_limit == 5
     assert config.admin_cache_ttl_seconds == 300
     assert config.setup_token_ttl_seconds == 900
     assert config.transfer_token_ttl_seconds == 900
@@ -98,6 +110,12 @@ def test_load_config_uses_defaults(
         ("MAX_CLANS_PER_CHAT", "not-int", "целым числом"),
         ("MAX_CONCURRENT_SYNCS", "0", "положительным числом"),
         ("SYNC_COOLDOWN_SECONDS", "-1", "неотрицательным числом"),
+        ("RAID_ARCHIVE_SHEETS_LIMIT", "0", "положительным числом"),
+        ("RAID_ATTACKS_TARGET", "-1", "положительным числом"),
+        ("RAID_NORMAL_DISTRICT_ATTACK_NORM", "not-int", "целым числом"),
+        ("RAID_CAPITAL_DISTRICT_ATTACK_NORM", "0", "положительным числом"),
+        ("RAID_SEASON_FETCH_LIMIT", "1", "не меньше 2"),
+        ("RAID_API_CONCURRENCY_LIMIT", "0", "положительным числом"),
     ),
 )
 def test_load_config_rejects_invalid_int_values(
@@ -129,6 +147,55 @@ def test_load_config_rejects_invalid_timezone(
 
     with pytest.raises(ConfigError, match="DEFAULT_TIMEZONE"):
         load_config(_empty_env_file(tmp_path))
+
+
+def test_load_config_reads_custom_raid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Проверяет пользовательские значения всех raid-параметров."""
+
+    _clear_config_env(monkeypatch)
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("RAID_ARCHIVE_SHEETS_LIMIT", "7")
+    monkeypatch.setenv("RAID_ATTACKS_TARGET", "8")
+    monkeypatch.setenv("RAID_NORMAL_DISTRICT_ATTACK_NORM", "4")
+    monkeypatch.setenv("RAID_CAPITAL_DISTRICT_ATTACK_NORM", "5")
+    monkeypatch.setenv("RAID_SEASON_FETCH_LIMIT", "9")
+    monkeypatch.setenv("RAID_API_CONCURRENCY_LIMIT", "6")
+
+    config = load_config(_empty_env_file(tmp_path))
+
+    assert config.raid_archive_sheets_limit == 7
+    assert config.raid_attacks_target == 8
+    assert config.raid_normal_district_attack_norm == 4
+    assert config.raid_capital_district_attack_norm == 5
+    assert config.raid_season_fetch_limit == 9
+    assert config.raid_api_concurrency_limit == 6
+
+
+def test_load_config_uses_raid_defaults_for_empty_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Проверяет raid defaults для явно пустых env-переменных."""
+
+    _clear_config_env(monkeypatch)
+    _set_required_env(monkeypatch)
+    for env_name in CONFIG_ENV_NAMES:
+        if env_name.startswith("RAID_"):
+            monkeypatch.setenv(env_name, "")
+
+    config = load_config(_empty_env_file(tmp_path))
+
+    assert (
+        config.raid_archive_sheets_limit,
+        config.raid_attacks_target,
+        config.raid_normal_district_attack_norm,
+        config.raid_capital_district_attack_norm,
+        config.raid_season_fetch_limit,
+        config.raid_api_concurrency_limit,
+    ) == (4, 6, 2, 3, 5, 5)
 
 
 @pytest.mark.parametrize(

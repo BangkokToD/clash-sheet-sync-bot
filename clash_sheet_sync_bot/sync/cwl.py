@@ -32,6 +32,10 @@ from clash_sheet_sync_bot.repositories import (
     SheetBindingRepository,
     SheetBlockRepository,
 )
+from clash_sheet_sync_bot.sheets.admin import (
+    build_bot_state_values,
+    resolve_active_cwl_sheet_metadata,
+)
 from clash_sheet_sync_bot.sheets.client import (
     CellValue,
     SheetMetadata,
@@ -71,8 +75,6 @@ BOT_KEY_PREFIX: Final = "cwl_row:"
 TECHNICAL_HASH_VERSION: Final = "1"
 TITLE_ROWS_COUNT: Final = 2
 DEFAULT_CWL_START_CELL: Final = "A1"
-BOT_STATE_SCHEMA_VERSION: Final = "1"
-MANAGED_BY_VALUE: Final = "clash-sheet-sync-bot"
 MISSING_VALUE_DISPLAY: Final = "—"
 NO_ATTACK_HIGHLIGHT_COLUMN_KEYS: Final = frozenset(
     {"defender_town_hall", "stars", "destruction_percentage"},
@@ -2202,31 +2204,14 @@ async def _resolve_active_cwl_sheet(
     """Находит активный CWL-лист, учитывая незавершённую ротацию."""
 
     metadata = await sheets_client.get_spreadsheet_metadata()
-    configured_title = runtime_config.sheet_binding.active_cwl_sheet_name
-    sheet_by_configured_title = next(
-        (sheet for sheet in metadata.sheets if sheet.title == configured_title),
-        None,
+    active_sheet = resolve_active_cwl_sheet_metadata(
+        metadata,
+        configured_title=runtime_config.sheet_binding.active_cwl_sheet_name,
+        active_sheet_id=runtime_config.sheet_binding.active_cwl_sheet_id,
+        error_cls=CwlDataError,
     )
-    canonical_sheet = next(
-        (sheet for sheet in metadata.sheets if sheet.title == CWL_ACTIVE_SHEET_NAME),
-        None,
-    )
-    active_sheet_id = runtime_config.sheet_binding.active_cwl_sheet_id
-    if active_sheet_id is not None:
-        sheet_by_id = next(
-            (sheet for sheet in metadata.sheets if sheet.sheet_id == active_sheet_id),
-            None,
-        )
-        if sheet_by_id is not None:
-            if sheet_by_id.title == configured_title:
-                return sheet_by_id
-            if canonical_sheet is None:
-                return sheet_by_id
-
-    if sheet_by_configured_title is not None:
-        return sheet_by_configured_title
-    if canonical_sheet is not None:
-        return canonical_sheet
+    if active_sheet is not None:
+        return active_sheet
 
     return await sheets_client.add_sheet(CWL_ACTIVE_SHEET_NAME)
 
@@ -2272,21 +2257,21 @@ async def _write_bot_state(
     """Обновляет `_bot_state` после CWL-записи."""
 
     binding = runtime_config.sheet_binding
-    values: list[list[CellValue]] = [
-        ["managed_by", MANAGED_BY_VALUE],
-        ["schema_version", BOT_STATE_SCHEMA_VERSION],
-        ["chat_id", runtime_config.chat_id],
-        ["google_sheet_id", binding.google_sheet_id],
-        ["composition_sheet_name", binding.composition_sheet_name],
-        ["composition_sheet_id", binding.composition_sheet_id or ""],
-        ["active_cwl_sheet_name", active_cwl_sheet_name],
-        ["active_cwl_sheet_id", active_cwl_sheet_id],
-        ["active_cwl_season", active_cwl_season],
-        ["bot_state_sheet_name", binding.bot_state_sheet_name],
-        ["bot_state_sheet_id", binding.bot_state_sheet_id or ""],
-        ["timezone", binding.timezone],
-        ["updated_at", _utc_now_iso()],
-    ]
+    values = build_bot_state_values(
+        chat_id=runtime_config.chat_id,
+        google_sheet_id=binding.google_sheet_id,
+        composition_sheet_name=binding.composition_sheet_name,
+        composition_sheet_id=binding.composition_sheet_id,
+        active_cwl_sheet_name=active_cwl_sheet_name,
+        active_cwl_sheet_id=active_cwl_sheet_id,
+        active_cwl_season=active_cwl_season,
+        active_raid_sheet_name=binding.active_raid_sheet_name,
+        active_raid_sheet_id=binding.active_raid_sheet_id,
+        active_raid_season=binding.active_raid_season,
+        bot_state_sheet_name=binding.bot_state_sheet_name,
+        bot_state_sheet_id=binding.bot_state_sheet_id,
+        timezone=binding.timezone,
+    )
     await sheets_client.write_values(
         sheet_name=binding.bot_state_sheet_name,
         range_a1=f"A1:B{len(values)}",

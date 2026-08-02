@@ -30,6 +30,7 @@ from clash_sheet_sync_bot.sync.cwl import (
     _prepare_saved_cwl_data,
     _resolve_active_cwl_sheet,
     _resolve_cwl_season,
+    _write_bot_state,
     build_cwl_sheet_blocks,
     build_cwl_sheet_matrix,
     make_cwl_row_key,
@@ -37,6 +38,46 @@ from clash_sheet_sync_bot.sync.cwl import (
 from tests.fakes.factories import make_column_profile, make_runtime_config
 
 JsonObject = dict[str, Any]
+
+
+class RecordingBotStateSheetsClient:
+    """Фиксирует запись служебного зеркала из CWL apply."""
+
+    def __init__(self) -> None:
+        self.writes: list[dict[str, Any]] = []
+
+    async def write_values(self, sheet_name: str, range_a1: str, values: Any) -> None:
+        self.writes.append(
+            {"sheet_name": sheet_name, "range_a1": range_a1, "values": values},
+        )
+
+
+@pytest.mark.asyncio
+async def test_cwl_bot_state_write_preserves_raid_binding_fields() -> None:
+    """Проверяет, что CWL apply не откатывает `_bot_state` к legacy schema."""
+
+    sheets = RecordingBotStateSheetsClient()
+    runtime = make_runtime_config()
+
+    await _write_bot_state(
+        runtime_config=runtime,
+        sheets_client=sheets,  # type: ignore[arg-type]
+        active_cwl_sheet_name="CWL",
+        active_cwl_sheet_id=222,
+        active_cwl_season="2026-08",
+    )
+
+    state = {str(key): value for key, value in sheets.writes[0]["values"]}
+    assert state["schema_version"] == "2"
+    assert sheets.writes[0]["range_a1"] == "A1:B16"
+    assert state["composition_sheet_name"] == runtime.sheet_binding.composition_sheet_name
+    assert state["composition_sheet_id"] == runtime.sheet_binding.composition_sheet_id
+    assert state["active_cwl_sheet_name"] == "CWL"
+    assert state["active_cwl_sheet_id"] == 222
+    assert state["active_cwl_season"] == "2026-08"
+    assert state["active_raid_sheet_name"] == "Рейды"
+    assert state["active_raid_sheet_id"] == 444
+    assert state["active_raid_season"] == ""
 
 
 class FakeClashClient:
