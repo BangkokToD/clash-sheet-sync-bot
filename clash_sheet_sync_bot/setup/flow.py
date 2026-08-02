@@ -28,6 +28,7 @@ from clash_sheet_sync_bot.repositories import (
     SetupTokenRepository,
     SheetBindingRepository,
     SheetBlockRepository,
+    SuperadminRepository,
     TelegramChatRepository,
     TransferTokenRepository,
 )
@@ -122,11 +123,13 @@ class TelegramChatInfo:
         chat_id: ID Telegram-чата.
         title: Название чата или fallback.
         type: Тип Telegram-чата.
+        username: Public username без `@` или `None`.
     """
 
     chat_id: int
     title: str
     type: str
+    username: str | None = None
 
 
 class SetupFlow:
@@ -165,8 +168,9 @@ class SetupFlow:
         self._clans = ClanSettingsRepository(connection)
         self._columns = ColumnProfileRepository(connection)
         self._runtime = RuntimeConfigRepository(connection)
+        self._superadmin = SuperadminRepository(connection)
 
-    async def send_private_start(self, chat_id: int) -> None:
+    async def send_private_start(self, chat_id: int, user_id: int) -> None:
         """Отправляет главное меню личного чата.
 
         Args:
@@ -176,7 +180,7 @@ class SetupFlow:
         await self._telegram.send_message(
             chat_id=chat_id,
             text="Выберите действие.",
-            reply_markup=main_private_keyboard(),
+            reply_markup=await self._main_private_keyboard(user_id),
         )
 
     async def send_group_start(self, chat_id: int) -> None:
@@ -754,7 +758,7 @@ class SetupFlow:
                 text=(
                     "У вас пока нет подключённых групп. Нажмите «Подключить группу», чтобы начать."
                 ),
-                reply_markup=main_private_keyboard(),
+                reply_markup=await self._main_private_keyboard(user_id),
             )
             return
 
@@ -836,7 +840,7 @@ class SetupFlow:
                 chat_id=chat_id,
                 message_id=message_id,
                 text="Выберите действие.",
-                reply_markup=main_private_keyboard(),
+                reply_markup=await self._main_private_keyboard(user_id),
             )
             return
         if callback_data == CALLBACK_MY_GROUPS:
@@ -968,6 +972,15 @@ class SetupFlow:
             callback_query_id,
             "Неизвестная кнопка.",
             show_alert=True,
+        )
+
+    async def _main_private_keyboard(self, user_id: int) -> JsonObject:
+        """Builds the role-aware private menu from runtime settings."""
+
+        support_group = await self._superadmin.get_support_group()
+        return main_private_keyboard(
+            support_url=support_group.url if support_group is not None else None,
+            is_superadmin=user_id == self._config.superadmin_user_id,
         )
 
     async def _show_group_settings_menu(

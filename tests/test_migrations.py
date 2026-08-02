@@ -117,6 +117,10 @@ async def test_apply_migrations_creates_required_tables(
         "sheet_blocks",
         "sync_runs",
         "transfer_tokens",
+        "bot_users",
+        "bot_settings",
+        "support_setup_tokens",
+        "broadcasts",
     }.issubset(table_names)
 
     cursor = await migrated_connection.execute("PRAGMA table_info(sheet_bindings)")
@@ -163,6 +167,57 @@ async def test_apply_migrations_records_current_schema_version(
 
 
 @pytest.mark.asyncio
+async def test_migration_6_repairs_claimed_version_5_without_superadmin_tables(
+    tmp_path: Path,
+) -> None:
+    """Проверяет production-коллизию: version 5 записана, а admin-схемы нет."""
+
+    database = Database(tmp_path / "claimed-version-5.db")
+    async with database.connect() as connection:
+        await connection.executescript(SCHEMA_SQL)
+        for version in (1, 2, 3, 4):
+            if version > 1:
+                await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+            await connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (version,),
+            )
+        await _insert_chat(connection, chat_id=-5001)
+        await connection.execute(
+            """
+            INSERT INTO chat_admin_links(chat_id, user_id, linked_at)
+            VALUES (?, ?, ?)
+            """,
+            (-5001, 1001, NOW),
+        )
+        await connection.execute("INSERT INTO schema_migrations(version) VALUES (5)")
+        await connection.commit()
+
+        await apply_migrations(connection)
+
+        cursor = await connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('bot_users', 'bot_settings', 'support_setup_tokens', 'broadcasts')
+            """
+        )
+        assert {row["name"] for row in await cursor.fetchall()} == {
+            "bot_users",
+            "bot_settings",
+            "support_setup_tokens",
+            "broadcasts",
+        }
+        cursor = await connection.execute(
+            "SELECT private_chat_id FROM bot_users WHERE user_id = ?",
+            (1001,),
+        )
+        assert (await cursor.fetchone())["private_chat_id"] == 1001
+        cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
+        assert [row["version"] for row in await cursor.fetchall()] == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.asyncio
 async def test_migration_4_upgrades_version_3_without_losing_existing_state(
     tmp_path: Path,
 ) -> None:
@@ -179,6 +234,13 @@ async def test_migration_4_upgrades_version_3_without_losing_existing_state(
                 (version,),
             )
         await _insert_chat(connection, chat_id=-4001)
+        await connection.execute(
+            """
+            INSERT INTO chat_admin_links(chat_id, user_id, linked_at)
+            VALUES (?, ?, ?)
+            """,
+            (-4001, 1001, NOW),
+        )
         await connection.execute(
             """
             INSERT INTO sheet_bindings(
@@ -266,6 +328,11 @@ async def test_migration_4_upgrades_version_3_without_losing_existing_state(
             (-4001,),
         )
         assert (await cursor.fetchone())["count"] == 8
+        cursor = await connection.execute(
+            "SELECT private_chat_id, is_active FROM bot_users WHERE user_id = ?",
+            (1001,),
+        )
+        assert tuple(await cursor.fetchone()) == (1001, 1)
 
 
 @pytest.mark.asyncio

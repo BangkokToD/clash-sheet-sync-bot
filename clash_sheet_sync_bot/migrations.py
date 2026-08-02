@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 4
+SCHEMA_VERSION: Final = 6
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -195,6 +195,67 @@ CREATE TABLE IF NOT EXISTS transfer_tokens (
 );
 """
 
+SUPERADMIN_SCHEMA_SQL: Final = """
+CREATE TABLE IF NOT EXISTS bot_users (
+    user_id INTEGER PRIMARY KEY,
+    private_chat_id INTEGER NOT NULL UNIQUE,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    pending_action TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_users_active
+ON bot_users(is_active, user_id);
+
+INSERT INTO bot_users(
+    user_id, private_chat_id, is_active, created_at, updated_at, last_seen_at
+)
+SELECT
+    user_id, user_id, 1, MIN(linked_at), MAX(linked_at), MAX(linked_at)
+FROM chat_admin_links
+GROUP BY user_id
+ON CONFLICT(user_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS bot_settings (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    support_chat_id INTEGER,
+    support_chat_title TEXT,
+    support_url TEXT,
+    updated_by_user_id INTEGER,
+    updated_at TEXT
+);
+
+INSERT OR IGNORE INTO bot_settings(singleton_id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS support_setup_tokens (
+    token TEXT PRIMARY KEY,
+    created_by_user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_chat_id INTEGER,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS broadcasts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_by_user_id INTEGER NOT NULL,
+    text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 4096),
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    user_targets_count INTEGER,
+    group_targets_count INTEGER,
+    delivered_count INTEGER,
+    failed_count INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_broadcasts_creator_status
+ON broadcasts(created_by_user_id, status, created_at);
+"""
+
 MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
     2: """
     INSERT INTO column_profiles(
@@ -346,6 +407,10 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
     WHERE 1
     ON CONFLICT(chat_id, table_type, column_key) DO NOTHING;
     """,
+    5: SUPERADMIN_SCHEMA_SQL,
+    # Production DBs may already contain an unrelated recorded version 5.
+    # Re-running the idempotent schema as version 6 repairs that collision.
+    6: SUPERADMIN_SCHEMA_SQL,
 }
 
 

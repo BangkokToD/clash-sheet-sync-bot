@@ -7,6 +7,8 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 ## Возможности
 
 - Подключение Telegram-группы через личный чат с ботом.
+- Ссылка на группу техподдержки в главном меню.
+- Закрытое меню superadmin для настройки техподдержки и общей рассылки.
 - Привязка Google Sheets через Google service account.
 - Управление отслеживаемыми кланами.
 - Настройка колонок состава и CWL через inline-меню.
@@ -44,6 +46,7 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 clash-sheet-sync-bot/
 ├── clash_sheet_sync_bot/
 │   ├── coc/
+│   ├── admin/
 │   ├── common/
 │   ├── repositories/
 │   ├── setup/
@@ -79,6 +82,7 @@ clash_sheet_sync_bot/migrations.py          SQLite migrations
 clash_sheet_sync_bot/models.py              доменные модели и типы
 clash_sheet_sync_bot/storage.py             SQLite connection/transaction helpers
 clash_sheet_sync_bot/coc/                   Clash of Clans API client
+clash_sheet_sync_bot/admin/                 superadmin-flow, техподдержка и рассылки
 clash_sheet_sync_bot/common/                общие helpers
 clash_sheet_sync_bot/repositories/          SQLite repository layer
 clash_sheet_sync_bot/setup/                 setup-flow и inline keyboards
@@ -123,6 +127,7 @@ nano .env
 
 ```env
 TELEGRAM_BOT_TOKEN=put_telegram_token_here
+SUPERADMIN_USER_ID=put_telegram_user_id_here
 COC_API_TOKEN=put_coc_api_token_here
 GOOGLE_SERVICE_ACCOUNT_FILE=credentials.json
 GOOGLE_SERVICE_ACCOUNT_EMAIL=
@@ -147,6 +152,10 @@ REPORT_MAX_ITEMS=50
 `DEV_MODE=True` отключает cooldown между последовательными `/sync` для разработки.
 Если переменная отсутствует, пуста или равна `False`, cooldown работает. Защитные
 блокировки одновременных sync остаются включёнными в любом режиме.
+
+`SUPERADMIN_USER_ID` — положительный Telegram user ID единственного владельца
+админского меню. Без него бот не запускается. Узнать свой ID можно у Telegram
+ботов, показывающих поле `user.id`.
 
 ## Google service account
 
@@ -192,6 +201,25 @@ telegram polling started
 11. Добавить хотя бы один клан.
 12. Запустить `/sync` в группе.
 
+## Администрирование
+
+У пользователя с ID из `SUPERADMIN_USER_ID` в личном главном меню появляется
+кнопка «Администрирование».
+
+- «Подключить техподдержку» создаёт одноразовую команду
+  `/connect_support <token>`. Для закрытой группы бот должен быть
+  администратором с правом создавать ссылки-приглашения.
+- После подключения все пользователи видят кнопку «Техподдержка» со ссылкой на
+  эту группу.
+- «Рассылка всем» принимает одно текстовое сообщение, показывает аудиторию и
+  предпросмотр, затем требует явного подтверждения. Получатели — известные
+  личные пользователи и все настроенные, не отключённые группы.
+
+Бот начинает учитывать обычного пользователя для рассылки после его первого
+взаимодействия с ботом в личном чате. Миграция также переносит в аудиторию уже
+известных администраторов групп. Telegram не позволяет восстановить остальных
+пользователей, которые писали боту до появления этого реестра.
+
 ## Команды Telegram
 
 | Команда | Где | Назначение |
@@ -199,6 +227,7 @@ telegram polling started
 | `/start` | личка/группа | главное меню или короткая инструкция |
 | `/help` | личка/группа | справка |
 | `/connect <token>` | группа | подключение группы |
+| `/connect_support <token>` | группа | подключение группы техподдержки superadmin’ом |
 | `/settings` | личка/группа | настройки |
 | `/accept_transfer <token>` | новая группа | перенос таблицы |
 | `/sync` | подключённая группа | синхронизация |

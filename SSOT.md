@@ -48,6 +48,8 @@ SQLite — главный **runtime source of truth**, но не источни�
 | Текущий состав кланов и технические поля игроков | Clash of Clans API | SQLite и Google Sheets |
 | Текущие CWL group/war/attack data | Clash of Clans API | `technical_values_json` и Google Sheets |
 | Актуальные права администратора группы | Telegram Bot API | Положительный cache в SQLite |
+| ID единственного superadmin | Environment или `.env` | `AppConfig` в памяти |
+| Группа техподдержки и история рассылок | SQLite | Telegram-кнопки и сообщения |
 | Конфигурация процесса | Environment, затем `.env`, затем defaults | `AppConfig` в памяти |
 | Google service account identity и ключ | `credentials.json` | Ожидаемый email в `.env` |
 | Структура SQLite | `clash_sheet_sync_bot/migrations.py` | Схема конкретного файла БД |
@@ -89,6 +91,10 @@ SQLite-файл задаётся `DB_PATH`. Значение по умолчан
 | `chat_admin_links` | Связи пользователей с группами и положительный admin cache |
 | `setup_tokens` | Lifecycle одноразовых токенов подключения |
 | `transfer_tokens` | Lifecycle одноразовых токенов переноса |
+| `bot_users` | Известные личные пользователи, активность и ожидаемое admin-действие |
+| `bot_settings` | Текущая группа и ссылка техподдержки |
+| `support_setup_tokens` | Lifecycle одноразовых токенов подключения техподдержки |
+| `broadcasts` | Текст, статус и итоговые счётчики массовых рассылок |
 | `sheet_bindings` | Активная привязка чата, spreadsheet ID, имена/ID служебных листов, timezone, активный CWL-сезон |
 | `tracked_clans` | Набор отслеживаемых кланов, active flag и порядок |
 | `column_profiles` | Ключи, заголовки, типы, видимость и порядок колонок |
@@ -224,6 +230,12 @@ check перекрывает положительный cache из `chat_admin_l
 - добавление, удаление и перемещение кланов;
 - создание, переименование, удаление и перемещение колонок.
 
+Доступ к меню техподдержки и рассылок определяется только точным совпадением
+Telegram `user.id` с обязательным `SUPERADMIN_USER_ID`. Видимость кнопки не
+является проверкой доступа: каждый admin callback и команда подключения
+техподдержки валидируют ID повторно. Подключающий техподдержку superadmin также
+должен быть актуальным администратором выбранной группы.
+
 ## 8. Конфигурация процесса и секреты
 
 Приоритет конфигурации:
@@ -237,6 +249,7 @@ check перекрывает положительный cache из `chat_admin_l
 - `TELEGRAM_BOT_TOKEN`;
 - `COC_API_TOKEN`;
 - `GOOGLE_SERVICE_ACCOUNT_FILE`.
+- `SUPERADMIN_USER_ID`.
 
 `credentials.json` или другой файл по `GOOGLE_SERVICE_ACCOUNT_FILE` является
 авторитетным источником ключа и `client_email` Google service account.

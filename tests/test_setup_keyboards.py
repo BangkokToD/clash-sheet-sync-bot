@@ -8,6 +8,7 @@ from typing import Any
 from clash_sheet_sync_bot.models import ColumnProfile, TableType
 from clash_sheet_sync_bot.setup.keyboards import (
     columns_section_keyboard,
+    main_private_keyboard,
     settings_menu_keyboard,
     table_type_from_payload,
     table_type_payload,
@@ -78,3 +79,22 @@ def test_settings_menu_contains_raid_columns_section() -> None:
         "text": "Колонки рейдов",
         "callback_data": "settings:section:-1001:raids_columns",
     } in [button for row in markup["inline_keyboard"] for button in row]
+
+
+def test_main_menu_adds_support_and_admin_buttons_by_role() -> None:
+    """Проверяет, что привилегированная кнопка не видна обычному пользователю."""
+
+    regular = main_private_keyboard(support_url="https://t.me/support")
+    superadmin = main_private_keyboard(
+        support_url="https://t.me/support",
+        is_superadmin=True,
+    )
+
+    regular_buttons = [button for row in regular["inline_keyboard"] for button in row]
+    admin_buttons = [button for row in superadmin["inline_keyboard"] for button in row]
+    assert {"text": "Техподдержка", "url": "https://t.me/support"} in regular_buttons
+    assert not any(button["text"] == "Администрирование" for button in regular_buttons)
+    assert {
+        "text": "Администрирование",
+        "callback_data": "admin:menu",
+    } in admin_buttons

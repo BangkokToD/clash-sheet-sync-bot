@@ -10,6 +10,7 @@ from clash_sheet_sync_bot.config import ConfigError, load_config
 
 CONFIG_ENV_NAMES = (
     "TELEGRAM_BOT_TOKEN",
+    "SUPERADMIN_USER_ID",
     "COC_API_TOKEN",
     "GOOGLE_SERVICE_ACCOUNT_FILE",
     "GOOGLE_SERVICE_ACCOUNT_EMAIL",
@@ -52,6 +53,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Выставляет минимальные обязательные env-переменные."""
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setenv("SUPERADMIN_USER_ID", "1001")
     monkeypatch.setenv("COC_API_TOKEN", "coc-token")
     monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
 
@@ -82,6 +84,7 @@ def test_load_config_uses_defaults(
     config = load_config(_empty_env_file(tmp_path))
 
     assert config.telegram_bot_token == "telegram-token"
+    assert config.superadmin_user_id == 1001
     assert config.coc_api_token == "coc-token"
     assert config.google_service_account_file == Path("credentials.json")
     assert config.google_service_account_email is None
@@ -146,6 +149,22 @@ def test_load_config_rejects_invalid_timezone(
     monkeypatch.setenv("DEFAULT_TIMEZONE", "Invalid/Timezone")
 
     with pytest.raises(ConfigError, match="DEFAULT_TIMEZONE"):
+        load_config(_empty_env_file(tmp_path))
+
+
+@pytest.mark.parametrize("raw_value", ("", "not-int", "0", "-1"))
+def test_load_config_requires_positive_superadmin_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw_value: str,
+) -> None:
+    """Проверяет fail-fast для отсутствующего или невалидного superadmin ID."""
+
+    _clear_config_env(monkeypatch)
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SUPERADMIN_USER_ID", raw_value)
+
+    with pytest.raises(ConfigError, match="SUPERADMIN_USER_ID"):
         load_config(_empty_env_file(tmp_path))
 
 

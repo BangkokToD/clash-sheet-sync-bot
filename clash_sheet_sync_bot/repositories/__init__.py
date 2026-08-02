@@ -46,11 +46,20 @@ from .raid_state import (
 )
 from .setup_tokens import SetupTokenRepository
 from .sheet_blocks import SheetBlockRepository
+from .superadmin import (
+    BotUserRepository,
+    Broadcast,
+    SuperadminRepository,
+    SupportGroup,
+    SupportSetupToken,
+)
 from .sync_runs import SyncRunRepository
 from .transfer_tokens import TransferToken, TransferTokenRepository
 
 __all__ = [
     "AdminChatRepository",
+    "BotUserRepository",
+    "Broadcast",
     "ChatLifecycleRepository",
     "ClanSettingsRepository",
     "ColumnProfileRepository",
@@ -70,6 +79,9 @@ __all__ = [
     "SetupTokenRepository",
     "SheetBindingRepository",
     "SheetBlockRepository",
+    "SuperadminRepository",
+    "SupportGroup",
+    "SupportSetupToken",
     "SyncRunRepository",
     "SyncStatusSummary",
     "TelegramChatRepository",

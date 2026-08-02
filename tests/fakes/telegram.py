@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from clash_sheet_sync_bot.telegram.access import AdminCheckResult
-from clash_sheet_sync_bot.telegram.client import TelegramMessageNotModifiedError
+from clash_sheet_sync_bot.telegram.client import TelegramInviteLink, TelegramMessageNotModifiedError
 
 
 @dataclass(slots=True)
@@ -19,6 +19,8 @@ class FakeTelegram:
     edit_attempts: list[dict[str, Any]] = field(default_factory=list)
     edited_messages: list[dict[str, Any]] = field(default_factory=list)
     answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
+    invite_link: str = "https://t.me/+test-support-link"
+    invite_link_requests: list[dict[str, Any]] = field(default_factory=list)
 
     async def send_message(
         self,
@@ -91,6 +93,12 @@ class FakeTelegram:
                 "show_alert": show_alert,
             },
         )
+
+    async def create_chat_invite_link(self, chat_id: int, *, name: str) -> TelegramInviteLink:
+        """Records an invite-link request."""
+
+        self.invite_link_requests.append({"chat_id": chat_id, "name": name})
+        return TelegramInviteLink(invite_link=self.invite_link)
 
 
 @dataclass(slots=True)

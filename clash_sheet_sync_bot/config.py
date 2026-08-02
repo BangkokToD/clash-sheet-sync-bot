@@ -45,6 +45,7 @@ def load_config(env_file: str | Path = ".env") -> AppConfig:
         coc_api_token=_required_env("COC_API_TOKEN"),
         google_service_account_file=Path(_required_env("GOOGLE_SERVICE_ACCOUNT_FILE")),
         google_service_account_email=_optional_nullable_env("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
+        superadmin_user_id=_required_positive_int_env("SUPERADMIN_USER_ID"),
         db_path=Path(_optional_env("DB_PATH", "bot.db")),
         default_timezone=default_timezone,
         dev_mode=_bool_env("DEV_MODE", False),
@@ -164,6 +165,19 @@ def _positive_int_env(name: str, default: int) -> int:
     """
 
     value = _int_env(name, default)
+    if value <= 0:
+        raise ConfigError(f"{name} должен быть положительным числом.")
+    return value
+
+
+def _required_positive_int_env(name: str) -> int:
+    """Читает обязательный положительный Telegram ID."""
+
+    raw_value = _required_env(name)
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} должен быть целым числом.") from exc
     if value <= 0:
         raise ConfigError(f"{name} должен быть положительным числом.")
     return value

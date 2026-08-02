@@ -13,6 +13,9 @@ README остаётся коротким документом для запус�
 
 ```text
 clash_sheet_sync_bot/
+├── admin/
+│   ├── flow.py
+│   └── keyboards.py
 ├── coc/
 │   └── client.py
 ├── common/
@@ -74,6 +77,7 @@ python bot.py
 | Module | Responsibility |
 |---|---|
 | `clash_sheet_sync_bot.bot` | Telegram polling, routing commands/callbacks, application lifecycle |
+| `clash_sheet_sync_bot.admin.flow` | Superadmin access, support-group setup, preview/confirm broadcasts |
 | `clash_sheet_sync_bot.config` | `.env` loading and validation |
 | `clash_sheet_sync_bot.migrations` | SQLite schema and idempotent migrations |
 | `clash_sheet_sync_bot.models` | Domain dataclasses and shared types |
@@ -139,6 +143,7 @@ Telegram response
 | `/start` в личке | главное меню личного чата |
 | `/start` в группе | короткая инструкция |
 | `/connect <token>` | подключение группы |
+| `/connect_support <token>` | подключение техподдержки единственным superadmin |
 | `/accept_transfer <token>` | перенос таблицы |
 | `/settings` | указатель в личный чат / меню настроек |
 | `/cancel` | сброс setup-state пользователя |
@@ -146,6 +151,13 @@ Telegram response
 | `/status` | последний sync summary |
 | callback query | setup/settings navigation |
 | private text | продолжение setup-flow состояния |
+
+До маршрутизации private update пользователь фиксируется в `bot_users`.
+Superadmin-flow получает admin-callback раньше публичного setup-flow, но каждое
+привилегированное действие повторно проверяет `SUPERADMIN_USER_ID` и требует
+личный чат. Рассылка атомарно переводится из `draft` в `sending`, поэтому
+повторное нажатие кнопки подтверждения не запускает её второй раз. Ошибка одного
+получателя учитывается в итоговом отчёте и не останавливает остальных.
 
 ## 6. Setup-flow
 

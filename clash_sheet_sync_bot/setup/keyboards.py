@@ -13,6 +13,7 @@ CALLBACK_CONNECT_GROUP: Final = "setup:create_token"
 CALLBACK_PRIVATE_START: Final = "setup:start"
 CALLBACK_MY_GROUPS: Final = "setup:my_groups"
 CALLBACK_HELP: Final = "setup:help"
+CALLBACK_ADMIN_MENU: Final = "admin:menu"
 CALLBACK_SETTINGS_PREFIX: Final = "settings:open:"
 CALLBACK_SETTINGS_SECTION_PREFIX: Final = "settings:section:"
 CALLBACK_BIND_SHEET_PREFIX: Final = "sheet:bind:"
@@ -88,15 +89,24 @@ class KnownGroupButton:
     title: str
 
 
-def main_private_keyboard() -> JsonObject:
+def main_private_keyboard(
+    *,
+    support_url: str | None = None,
+    is_superadmin: bool = False,
+) -> JsonObject:
     """Создаёт главное меню личного чата."""
 
+    rows: list[list[dict[str, str]]] = [
+        [{"text": "Подключить группу", "callback_data": CALLBACK_CONNECT_GROUP}],
+        [{"text": "Мои группы", "callback_data": CALLBACK_MY_GROUPS}],
+    ]
+    if support_url is not None:
+        rows.append([{"text": "Техподдержка", "url": support_url}])
+    if is_superadmin:
+        rows.append([{"text": "Администрирование", "callback_data": CALLBACK_ADMIN_MENU}])
+    rows.append([{"text": "Помощь", "callback_data": CALLBACK_HELP}])
     return {
-        "inline_keyboard": [
-            [{"text": "Подключить группу", "callback_data": CALLBACK_CONNECT_GROUP}],
-            [{"text": "Мои группы", "callback_data": CALLBACK_MY_GROUPS}],
-            [{"text": "Помощь", "callback_data": CALLBACK_HELP}],
-        ],
+        "inline_keyboard": rows,
     }
 
 

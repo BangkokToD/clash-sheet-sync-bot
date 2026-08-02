@@ -29,6 +29,13 @@ bot.db-wal
 
 `bot.db` — главный production state. Потеря `bot.db` означает потерю привязок групп, tracked clans, column profiles, managed blocks и sync history.
 
+`SUPERADMIN_USER_ID` обязателен. Перед первым запуском версии с админским меню
+добавьте в `.env` положительный Telegram user ID владельца бота. После запуска
+миграция создаёт реестр пользователей, настройку техподдержки и журнал рассылок;
+поэтому перед обновлением особенно важен backup SQLite.
+Admin-схема закреплена repair-миграцией version 6: она безопасно создаёт
+недостающие таблицы даже если version 5 уже присутствовала в старой базе.
+
 ## 2. Package layout on disk
 
 Application code находится в package:
