@@ -250,6 +250,149 @@ def test_plan_player_states_preserves_user_values_missing_from_current_profile()
     }
 
 
+def test_plan_player_states_copies_matched_active_value_to_exited_column() -> None:
+    """Проверяет перенос свежего active-value в одноимённую колонку вышедших."""
+
+    profiles = tuple(
+        replace(profile, column_key="active_note", title="Заметка")
+        if profile.table_type == "composition_active" and profile.column_key == "note"
+        else replace(profile, column_key="exited_note", title="  ЗАМЕТКА  ")
+        if profile.table_type == "composition_exited" and profile.column_key == "note"
+        else profile
+        for profile in make_composition_column_profiles()
+    )
+    runtime_config = make_runtime_config(column_profiles=profiles)
+    previous = make_composition_state(
+        player_tag="#P1",
+        status="active",
+        clan_tag="#AAA111",
+        nickname="Player",
+        user_values={"active_note": "old", "exited_note": "stale exited value"},
+    )
+    imported = CompositionImportResult(
+        players={
+            "#P1": ImportedPlayerValues(
+                player_tag="#P1",
+                is_exited=False,
+                clan_tag="#AAA111",
+                town_hall=15,
+                nickname="Player",
+                exited_at=None,
+                user_values={"active_note": "fresh active value"},
+            ),
+        },
+        warnings=(),
+    )
+
+    planned, _ = _plan_player_states(
+        runtime_config=runtime_config,
+        existing_state=(previous,),
+        imported=imported,
+        current_members={},
+        detected_at=DETECTED_AT,
+    )
+
+    assert planned["#P1"].status == "exited"
+    assert planned["#P1"].user_values == {
+        "active_note": "fresh active value",
+        "exited_note": "fresh active value",
+    }
+    exited_block = build_composition_blocks(
+        runtime_config=runtime_config,
+        planned_states=planned,
+    )[-1]
+    assert any(str(value).strip() == "ЗАМЕТКА" for value in exited_block.values[1])
+    assert "fresh active value" in exited_block.values[2]
+
+
+def test_plan_player_states_copies_matched_exited_value_when_player_returns() -> None:
+    """Проверяет обратный перенос из вышедших при возвращении игрока."""
+
+    profiles = tuple(
+        replace(profile, column_key="active_contact", title="Контакт")
+        if profile.table_type == "composition_active" and profile.column_key == "note"
+        else replace(profile, column_key="exited_contact", title="контакт")
+        if profile.table_type == "composition_exited" and profile.column_key == "note"
+        else profile
+        for profile in make_composition_column_profiles()
+    )
+    runtime_config = make_runtime_config(column_profiles=profiles)
+    previous = make_composition_state(
+        player_tag="#P1",
+        status="exited",
+        clan_tag=None,
+        nickname="Player",
+        exited_at="2026-07-01T00:00:00+00:00",
+        user_values={"active_contact": "old", "exited_contact": "old"},
+    )
+    imported = CompositionImportResult(
+        players={
+            "#P1": ImportedPlayerValues(
+                player_tag="#P1",
+                is_exited=True,
+                clan_tag=None,
+                town_hall=15,
+                nickname="Player",
+                exited_at="2026-07-01T00:00:00+00:00",
+                user_values={"exited_contact": "updated while exited"},
+            ),
+        },
+        warnings=(),
+        saw_exited_block=True,
+    )
+
+    planned, _ = _plan_player_states(
+        runtime_config=runtime_config,
+        existing_state=(previous,),
+        imported=imported,
+        current_members={"#P1": _member(player_tag="#P1")},
+        detected_at=DETECTED_AT,
+    )
+
+    assert planned["#P1"].status == "active"
+    assert planned["#P1"].user_values == {
+        "active_contact": "updated while exited",
+        "exited_contact": "updated while exited",
+    }
+
+
+def test_plan_player_states_does_not_link_different_user_column_titles() -> None:
+    """Проверяет отсутствие переноса и создания колонки при разных title."""
+
+    profiles = tuple(
+        replace(profile, column_key="active_note", title="Заметка")
+        if profile.table_type == "composition_active" and profile.column_key == "note"
+        else replace(profile, column_key="exited_reason", title="Причина выхода")
+        if profile.table_type == "composition_exited" and profile.column_key == "note"
+        else profile
+        for profile in make_composition_column_profiles()
+    )
+    runtime_config = make_runtime_config(column_profiles=profiles)
+    previous = make_composition_state(
+        player_tag="#P1",
+        status="active",
+        clan_tag="#AAA111",
+        nickname="Player",
+        user_values={"active_note": "active only"},
+    )
+
+    planned, _ = _plan_player_states(
+        runtime_config=runtime_config,
+        existing_state=(previous,),
+        imported=CompositionImportResult(players={}, warnings=()),
+        current_members={},
+        detected_at=DETECTED_AT,
+    )
+
+    assert planned["#P1"].user_values == {"active_note": "active only"}
+    exited_block = build_composition_blocks(
+        runtime_config=runtime_config,
+        planned_states=planned,
+    )[-1]
+    assert exited_block.values[1][-2:] == ["Причина выхода", "Дата выхода"]
+    assert exited_block.values[2][-2] == ""
+
+
 def test_build_composition_blocks_places_exited_after_visible_active_columns() -> None:
     """Проверяет, что блок Вышедшие ставится после видимых active-колонок."""
 
