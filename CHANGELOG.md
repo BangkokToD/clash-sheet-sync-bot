@@ -2,14 +2,24 @@
 
 Все заметные изменения проекта фиксируются в этом файле.
 
-Формат близок к [Keep a Changelog](https://keepachangelog.com/), но без жёсткой привязки к SemVer: проект пока развивается как учебный/production-ready bot без публичных релизных тегов.
+Формат близок к [Keep a Changelog](https://keepachangelog.com/), а версии
+следуют [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+Пока нет невыпущенных изменений.
+
+## [1.0.0] - 2026-08-02
+
 ### Added
 
+- GitHub Actions CI для format-check, Ruff, `py_compile` и полного pytest suite.
 - Память одноимённых пользовательских колонок между активным составом и
   «Вышедшими» без автоматического создания новых колонок.
+- Учёт Raid Weekend в общем `/sync`: рейтинг, user-колонки,
+  межсезонный fallback, staging-ротация и четыре bot-owned архива.
+- SQLite-таблицы `raid_player_state` и `raid_sheet_archives`, raid binding,
+  настройка raid-колонок, диагностика и auto-fix.
 - Обязательный `SUPERADMIN_USER_ID` и закрытое админское меню.
 - Подключение публичной или закрытой группы техподдержки через одноразовый токен.
 - Кнопка «Техподдержка» в главном меню после настройки группы поддержки.
@@ -26,13 +36,16 @@
   - column profiles;
   - composition player state;
   - CWL row state;
+  - raid player state и archive registry;
   - managed sheet blocks;
   - sync run history.
 - `/sync` pipeline с staged-подходом:
   - подготовка состава;
   - подготовка CWL;
+  - подготовка рейдов;
   - запись состава;
   - запись CWL;
+  - запись рейдов;
   - сохранение SQLite state;
   - Telegram report.
 - `/status` с summary последнего sync.
@@ -113,3 +126,5 @@
 - Мёртвые boundary helpers для `/sync` и `/status`.
 - Неиспользуемые report helper-функции.
 - Монолитный `repositories.py` в пользу пакета `repositories/`.
+
+[1.0.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/releases/tag/v1.0.0

@@ -32,6 +32,7 @@ clash_sheet_sync_bot/
 ├── sync/
 │   ├── composition.py
 │   ├── cwl.py
+│   ├── raids.py
 │   ├── reports.py
 │   └── service.py
 ├── telegram/
@@ -68,7 +69,7 @@ python bot.py
 |---|---|
 | SQLite | Runtime source of truth: настройки групп, привязки таблиц, tracked clans, column profiles, state, sync history |
 | Google Sheets | Пользовательское рабочее пространство и storage ручных user-values |
-| Clash of Clans API | Technical source: текущий состав кланов, CWL league group, CWL wars |
+| Clash of Clans API | Technical source: текущий состав кланов, CWL и Raid Weekend |
 
 Ключевой принцип: бот не пытается считать Google Sheets главным состоянием системы. Таблица — внешний интерфейс для людей и место, где живут ручные значения. Runtime-решения принимает SQLite.
 
@@ -94,6 +95,7 @@ python bot.py
 | `clash_sheet_sync_bot.sync.service` | `/sync` orchestration, locks, rate limit, reports |
 | `clash_sheet_sync_bot.sync.composition` | Composition import/plan/write logic |
 | `clash_sheet_sync_bot.sync.cwl` | CWL import/plan/write logic |
+| `clash_sheet_sync_bot.sync.raids` | Raid Weekend import, calculation, rotation and write logic |
 | `clash_sheet_sync_bot.sync.reports` | Telegram HTML reports |
 | `clash_sheet_sync_bot.repositories.*` | Focused SQLite repositories |
 
@@ -202,6 +204,7 @@ awaiting_column_rename:<user_id>:<table_type>:<column_key>
 7. Бот создаёт обязательные листы:
    - `Состав`;
    - `CWL`;
+   - `Рейды`;
    - `_bot_state`.
 8. Бот сохраняет binding в SQLite.
 9. Бот создаёт default column profiles.
@@ -227,6 +230,7 @@ Column profiles живут в SQLite в `column_profiles`.
 composition_active
 composition_exited
 cwl
+raids
 ```
 
 Колонки бывают:
@@ -260,6 +264,7 @@ SQLite — главный runtime source of truth.
 - column profiles;
 - composition player state;
 - CWL row state;
+- Raid Weekend player state и archive registry;
 - managed sheet blocks;
 - sync runs;
 - последний sync status/error.
@@ -305,6 +310,13 @@ Clash of Clans API — источник технических данных.
 - destruction percentage;
 - town hall участников.
 
+Для Raid Weekend:
+
+- raid seasons и их `state`, `startTime`, `endTime`;
+- `members` выбранного сезона;
+- атаки и разрушение районов;
+- количество атак и добытое золото столицы.
+
 Technical fields не берутся из Google Sheets как истина. Если пользователь руками поменяет техническую колонку, следующая синхронизация восстановит значение из CoC API.
 
 ## 10. `/sync` pipeline
@@ -320,9 +332,13 @@ prepare composition
         ↓
 prepare CWL
         ↓
+prepare Raid Weekend
+        ↓
 write composition to Google Sheets
         ↓
 write CWL to Google Sheets
+        ↓
+write Raid Weekend to Google Sheets
         ↓
 write SQLite state
         ↓
@@ -387,6 +403,8 @@ composition_active:#AAA111
 composition_exited
 cwl:#AAA111
 cwl_message:#AAA111
+raid:#AAA111
+raid_message:#AAA111
 ```
 
 Бот использует managed blocks, чтобы:
@@ -414,6 +432,7 @@ cwl_message:#AAA111
 ```text
 composition_player:#PLAYER
 cwl_row:<season>|<clan_tag>|<round>|<attacker_tag>|<marker>
+raid_row:<season_key>|<clan_tag>|<player_tag>
 ```
 
 Если `__bot_key` повреждён, бот может попытаться восстановить связь по visible technical columns. Это fallback, а не основной контракт.
@@ -434,6 +453,9 @@ composition_sheet_id
 active_cwl_sheet_name
 active_cwl_sheet_id
 active_cwl_season
+active_raid_sheet_name
+active_raid_sheet_id
+active_raid_season
 bot_state_sheet_name
 bot_state_sheet_id
 timezone
@@ -446,7 +468,7 @@ updated_at
 - проверка, что SQLite binding соответствует таблице;
 - восстановление sheet IDs через auto-fix;
 - безопасная служебная write-проверка;
-- хранение активного CWL-листа и сезона рядом с таблицей.
+- хранение активных CWL/Raid-листов и сезонов рядом с таблицей.
 
 Лист `_bot_state` скрывается от пользователя.
 
@@ -477,7 +499,18 @@ Telegram-группы и её активных кланов.
 При появлении нового сезона прежний активный лист атомарно переименовывается в
 `CWL <старый сезон>`, а подготовленный staging-лист становится новым `CWL`.
 
-## 17. Partial write warning
+## 17. Raid Weekend между сезонами
+
+Бот выбирает один общий raid season для активных кланов. Строки строятся
+только из `members` выбранного сезона; атаки используются для расчёта
+технических показателей, но не добавляют в рейтинг посторонних игроков.
+
+В межсезонье показывается последний сохранённый общий сезон. Новый сезон
+записывается через staging-лист и атомарную ротацию. Предыдущие bot-owned листы
+регистрируются в `raid_sheet_archives`; сверх лимита удаляются только листы из этого
+реестра.
+
+## 18. Partial write warning
 
 Partial write warning означает, что ошибка произошла после начала записи в Google Sheets.
 
@@ -499,6 +532,7 @@ Partial write warning означает, что ошибка произошла �
 
 - ошибка после начала записи состава;
 - ошибка после начала записи CWL;
+- ошибка после начала записи Raid Weekend;
 - unexpected exception после старта write-фазы.
 
 SQLite commit при успешном sync происходит после Google Sheets write. Если Telegram report не доставлен уже после successful commit, сохранённый success не откатывается.
@@ -516,7 +550,7 @@ coefficient до визуального округления. Migration 7 обн
 Recoverable warnings при этом сохраняются в
 `sync_runs.report_json` для диагностики.
 
-## 17. Sync history и status
+## 19. Sync history и status
 
 Каждый `/sync` создаёт запись в `sync_runs`.
 
@@ -537,7 +571,7 @@ report_json
 
 `/status` берёт summary из SQLite.
 
-## 18. Transfer flow
+## 20. Transfer flow
 
 Transfer flow переносит активную таблицу и runtime state на другой Telegram chat.
 
@@ -552,11 +586,12 @@ Transfer flow переносит активную таблицу и runtime stat
    - column profiles;
    - composition player state;
    - CWL row state;
+   - Raid Weekend player state и archive registry;
    - sheet blocks.
 6. Старый chat получает status `disabled`.
 7. Новый chat получает status `ready`.
 
-## 19. Инварианты
+## 21. Инварианты
 
 Ключевые инварианты проекта:
 
@@ -570,4 +605,6 @@ Transfer flow переносит активную таблицу и runtime stat
 - Одна Telegram-группа не должна иметь два параллельных sync.
 - Одна Google-таблица не должна получать две параллельные записи.
 - CWL-лист не должен смешивать разные seasons.
+- Raid-строки строятся только из `members` выбранного сезона.
+- Удаляться могут только bot-owned raid-архивы из SQLite registry.
 - Telegram delivery failure после успешного SQLite commit не откатывает success.

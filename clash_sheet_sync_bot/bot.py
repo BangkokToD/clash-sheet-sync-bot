@@ -9,6 +9,7 @@ from typing import Any, Final
 
 import httpx
 
+from clash_sheet_sync_bot import __version__
 from clash_sheet_sync_bot.admin import SuperadminFlow
 from clash_sheet_sync_bot.config import ConfigError, load_config
 from clash_sheet_sync_bot.migrations import apply_migrations
@@ -448,7 +449,7 @@ async def async_main() -> int:
         async with httpx.AsyncClient(timeout=timeout) as http_client:
             telegram = TelegramClient(config.telegram_bot_token, http_client)
             identity = await telegram.get_me()
-            logger.info("bot started")
+            logger.info("bot started, version=%s", __version__)
             app = BotApp(
                 config=config,
                 telegram=telegram,
