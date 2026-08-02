@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 6
+SCHEMA_VERSION: Final = 7
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -411,6 +411,49 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
     # Production DBs may already contain an unrelated recorded version 5.
     # Re-running the idempotent schema as version 6 repairs that collision.
     6: SUPERADMIN_SCHEMA_SQL,
+    7: """
+    UPDATE column_profiles
+    SET title = 'Выполнение нормы',
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE table_type = 'raids'
+      AND column_key = 'coefficient'
+      AND kind = 'system'
+      AND title = 'Коэффициент';
+
+    DROP TABLE IF EXISTS migration_7_raid_default_order_chats;
+
+    CREATE TEMP TABLE migration_7_raid_default_order_chats(
+        chat_id INTEGER PRIMARY KEY
+    );
+
+    INSERT INTO migration_7_raid_default_order_chats(chat_id)
+    SELECT player_tag.chat_id
+    FROM column_profiles AS player_tag
+    JOIN column_profiles AS player_name
+      ON player_name.chat_id = player_tag.chat_id
+     AND player_name.table_type = player_tag.table_type
+    WHERE player_tag.table_type = 'raids'
+      AND player_tag.column_key = 'player_tag'
+      AND player_tag.kind = 'system'
+      AND player_tag.sort_order = 20
+      AND player_name.column_key = 'player_name'
+      AND player_name.kind = 'system'
+      AND player_name.sort_order = 30;
+
+    UPDATE column_profiles
+    SET sort_order = CASE column_key
+            WHEN 'player_name' THEN 20
+            WHEN 'player_tag' THEN 30
+            ELSE sort_order
+        END,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE table_type = 'raids'
+      AND kind = 'system'
+      AND column_key IN ('player_name', 'player_tag')
+      AND chat_id IN (SELECT chat_id FROM migration_7_raid_default_order_chats);
+
+    DROP TABLE migration_7_raid_default_order_chats;
+    """,
 }
 
 

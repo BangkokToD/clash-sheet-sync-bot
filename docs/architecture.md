@@ -497,6 +497,12 @@ Partial write warning означает, что ошибка произошла �
 
 SQLite commit при успешном sync происходит после Google Sheets write. Если Telegram report не доставлен уже после successful commit, сохранённый success не откатывается.
 
+Raid presentation привязан к стабильным `column_key`, а не к отображаемым
+заголовкам: `normal_points` получает формат `0.00`, `coefficient` — `0%`,
+`capital_resources_looted` — `#,##0`. Сортировка выполняется по точному
+coefficient до визуального округления. Migration 7 обновляет только прежние
+стандартные raid-заголовок и порядок, сохраняя ручные настройки профиля.
+
 Успешный Telegram report намеренно минимален: перечисляет обновлённые разделы,
 названия кланов, ссылку на разработчика `t.me/BangkokToD`, ссылку на таблицу и
 настроенную ссылку техподдержки `Чат Леши`. Counts, seasons, diff и warnings в сообщение не

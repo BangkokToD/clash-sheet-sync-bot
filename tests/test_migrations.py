@@ -214,7 +214,110 @@ async def test_migration_6_repairs_claimed_version_5_without_superadmin_tables(
         )
         assert (await cursor.fetchone())["private_chat_id"] == 1001
         cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        assert [row["version"] for row in await cursor.fetchall()] == [1, 2, 3, 4, 5, 6]
+        assert [row["version"] for row in await cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7]
+
+
+@pytest.mark.asyncio
+async def test_migration_7_updates_only_legacy_raid_presentation(tmp_path: Path) -> None:
+    """Проверяет обновление дефолтов без перезаписи ручных настроек."""
+
+    database = Database(tmp_path / "version-6.db")
+    async with database.connect() as connection:
+        await connection.executescript(SCHEMA_SQL)
+        for version in (1, 2, 3, 4, 5, 6):
+            if version > 1:
+                await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+            await connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (version,),
+            )
+
+        legacy_chat_id = -7001
+        custom_title_chat_id = -7002
+        custom_order_chat_id = -7003
+        for chat_id in (legacy_chat_id, custom_title_chat_id, custom_order_chat_id):
+            await _insert_chat(connection, chat_id=chat_id)
+
+        for chat_id, coefficient_title, tag_order, name_order in (
+            (legacy_chat_id, "Коэффициент", 20, 30),
+            (custom_title_chat_id, "Моя эффективность", 20, 30),
+            (custom_order_chat_id, "Коэффициент", 40, 10),
+        ):
+            await _insert_column_profile(
+                connection,
+                chat_id=chat_id,
+                table_type="raids",
+                column_key="player_tag",
+                title="Тег",
+                sort_order=tag_order,
+            )
+            await _insert_column_profile(
+                connection,
+                chat_id=chat_id,
+                table_type="raids",
+                column_key="player_name",
+                title="Ник",
+                sort_order=name_order,
+            )
+            await _insert_column_profile(
+                connection,
+                chat_id=chat_id,
+                table_type="raids",
+                column_key="coefficient",
+                title=coefficient_title,
+                sort_order=60,
+                value_type="number",
+            )
+
+        await _insert_column_profile(
+            connection,
+            chat_id=legacy_chat_id,
+            table_type="raids",
+            column_key="user_note",
+            title="Заметка",
+            sort_order=25,
+            kind="user",
+        )
+        await connection.commit()
+
+        await apply_migrations(connection)
+        await apply_migrations(connection)
+
+        cursor = await connection.execute(
+            """
+            SELECT chat_id, column_key, title, sort_order, kind
+            FROM column_profiles
+            WHERE table_type = 'raids'
+            ORDER BY chat_id, column_key
+            """
+        )
+        rows = await cursor.fetchall()
+        profiles = {
+            (row["chat_id"], row["column_key"]): (
+                row["title"],
+                row["sort_order"],
+                row["kind"],
+            )
+            for row in rows
+        }
+
+        assert profiles[(legacy_chat_id, "coefficient")][:2] == ("Выполнение нормы", 60)
+        assert profiles[(legacy_chat_id, "player_name")][1] == 20
+        assert profiles[(legacy_chat_id, "player_tag")][1] == 30
+        assert profiles[(legacy_chat_id, "user_note")] == ("Заметка", 25, "user")
+
+        assert profiles[(custom_title_chat_id, "coefficient")][0] == "Моя эффективность"
+        assert profiles[(custom_title_chat_id, "player_name")][1] == 20
+        assert profiles[(custom_title_chat_id, "player_tag")][1] == 30
+
+        assert profiles[(custom_order_chat_id, "coefficient")][0] == "Выполнение нормы"
+        assert profiles[(custom_order_chat_id, "player_name")][1] == 10
+        assert profiles[(custom_order_chat_id, "player_tag")][1] == 40
+
+        cursor = await connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+        assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 8))
 
 
 @pytest.mark.asyncio
@@ -328,6 +431,24 @@ async def test_migration_4_upgrades_version_3_without_losing_existing_state(
             (-4001,),
         )
         assert (await cursor.fetchone())["count"] == 8
+        cursor = await connection.execute(
+            """
+            SELECT column_key, title
+            FROM column_profiles
+            WHERE chat_id = ? AND table_type = 'raids' AND visible = 1
+            ORDER BY sort_order, column_key
+            """,
+            (-4001,),
+        )
+        assert [tuple(row) for row in await cursor.fetchall()] == [
+            ("number", "№"),
+            ("player_name", "Ник"),
+            ("player_tag", "Тег"),
+            ("attacks", "Атаки"),
+            ("normal_points", "Нормо-очки"),
+            ("coefficient", "Выполнение нормы"),
+            ("capital_resources_looted", "Золото столицы"),
+        ]
         cursor = await connection.execute(
             "SELECT private_chat_id, is_active FROM bot_users WHERE user_id = ?",
             (1001,),

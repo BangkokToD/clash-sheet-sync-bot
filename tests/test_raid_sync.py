@@ -978,6 +978,36 @@ async def test_prepare_selects_ongoing_members_ranks_ties_and_performs_no_sheet_
 
 
 @pytest.mark.asyncio
+async def test_prepare_sorts_by_exact_coefficient_before_percent_display_rounding() -> None:
+    """Проверяет рейтинг по точному coefficient при одинаковых экранных 85%."""
+
+    payload = _season(
+        members=[
+            _member("#LOW", attacks=3, name="A lower exact value"),
+            _member("#HIGH", attacks=3, name="Z higher exact value"),
+        ],
+        districts=[
+            _district(101, [_attack("#LOW", 100)]),
+            _district(102, [_attack("#LOW", 100)]),
+            _district(103, [_attack("#LOW", 54)]),
+            _district(201, [_attack("#HIGH", 100)]),
+            _district(202, [_attack("#HIGH", 100)]),
+            _district(203, [_attack("#HIGH", 55)]),
+        ],
+    )
+
+    prepared = await _prepare(
+        runtime=_runtime(),
+        clash=FakeRaidClash({"#AAA111": [payload]}),
+    )
+
+    rows = prepared.selected_season.blocks[0].rows
+    assert [row.technical_values.player_tag for row in rows] == ["#HIGH", "#LOW"]
+    assert rows[0].technical_values.coefficient == Decimal(510) / Decimal(600)
+    assert rows[1].technical_values.coefficient == Decimal(508) / Decimal(600)
+
+
+@pytest.mark.asyncio
 async def test_prepare_public_raid_sync_selects_season_ranks_and_merges_values() -> None:
     """Сохраняет исходный regression сценарий preparation из коммита 3."""
 
@@ -1228,15 +1258,15 @@ async def test_prepare_imports_registered_block_and_merges_snapshot_and_composit
                 [
                     "__bot_key",
                     "№",
-                    "Тег",
                     "Ник",
+                    "Тег",
                     "Атаки",
                     "Нормо-очки",
-                    "Коэффициент",
+                    "Выполнение нормы",
                     "Золото столицы",
                     "ЗАМЕТКА",
                 ],
-                [row_key, 1, "#PLAYER", "Player", "1/6", 2, "0.33", 1000, ""],
+                [row_key, 1, "Player", "#PLAYER", "1/6", 2, "33%", 1000, ""],
             ],
         }
     )
@@ -1329,15 +1359,15 @@ async def test_prepare_manual_import_wins_over_composition() -> None:
                 [
                     "__bot_key",
                     "№",
-                    "Тег",
                     "Ник",
+                    "Тег",
                     "Атаки",
                     "Нормо-очки",
-                    "Коэффициент",
+                    "Выполнение нормы",
                     "Золото столицы",
                     "ЗАМЕТКА",
                 ],
-                [row_key, 1, "#PLAYER", "Player", "1/6", 2, "0.33", 1000, "manual"],
+                [row_key, 1, "Player", "#PLAYER", "1/6", 2, "33%", 1000, "manual"],
             ],
         }
     )
@@ -1391,15 +1421,15 @@ async def test_prepare_uses_unique_technical_fallback_and_rejects_ambiguous_rows
     header = [
         "__bot_key",
         "№",
-        "Тег",
         "Ник",
+        "Тег",
         "Атаки",
         "Нормо-очки",
-        "Коэффициент",
+        "Выполнение нормы",
         "Золото столицы",
         "ЗАМЕТКА",
     ]
-    data_row = ["", 1, "#PLAYER", "Player", "1/6", 2, "0.33", 1000, "manual"]
+    data_row = ["", 1, "Player", "#PLAYER", "1/6", 2, "33%", 1000, "manual"]
     sheets = FakeSheetsClient(values_by_range={("Рейды", "A1:I3"): [header, data_row]})
     blocks = RecordingSheetBlockRepository(
         blocks=(
@@ -1610,6 +1640,7 @@ def _planned_raid_row(
     attacks: int = 5,
     normal_points: Decimal = Decimal("2.50"),
     coefficient: Decimal = Decimal("0.42"),
+    capital_resources_looted: int = 1234,
     user_values: dict[str, str] | None = None,
 ) -> RaidPlannedRow:
     """Создаёт готовую raid row для apply-контрактов."""
@@ -1625,7 +1656,7 @@ def _planned_raid_row(
             attacks=attacks,
             attack_limit=5,
             bonus_attack_limit=1,
-            capital_resources_looted=1234,
+            capital_resources_looted=capital_resources_looted,
             weighted_damage_units=250,
             normal_points=normal_points,
             coefficient=coefficient,
@@ -1824,14 +1855,21 @@ async def _apply_raid_twice(
 async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_state() -> None:
     """Покрывает первый лист, матрицу, numeric values, format и runtime state."""
 
-    first = _planned_raid_row(player_tag="#P1", player_name="Five", attacks=5)
+    first = _planned_raid_row(
+        player_tag="#P1",
+        player_name="Five",
+        attacks=5,
+        coefficient=Decimal("0.85"),
+        capital_resources_looted=29_870,
+    )
     complete = _planned_raid_row(
         player_tag="#P2",
         player_name="Six",
         rank=2,
         attacks=6,
         normal_points=Decimal("3.75"),
-        coefficient=Decimal("0.625"),
+        coefficient=Decimal("1.18"),
+        capital_resources_looted=31_005,
     )
     prepared = _prepared_raid_apply(
         blocks=(
@@ -1866,11 +1904,11 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
     assert updates[0].values[1] == [
         "__bot_key",
         "№",
-        "Тег",
         "Ник",
+        "Тег",
         "Атаки",
         "Нормо-очки",
-        "Коэффициент",
+        "Выполнение нормы",
         "Золото столицы",
         " ЗАМЕТКА ",
     ]
@@ -1879,25 +1917,41 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
     assert first_values == [
         first.row_key,
         1,
-        "#P1",
         "Five",
+        "#P1",
         "5/6",
         2.5,
-        0.42,
-        1234,
+        0.85,
+        29_870,
         "",
     ]
-    assert complete_values[1:8] == [2, "#P2", "Six", "6/6", 3.75, 0.625, 1234]
+    assert complete_values[1:8] == [2, "Six", "#P2", "6/6", 3.75, 1.18, 31_005]
     assert isinstance(first_values[1], int)
     assert isinstance(first_values[5], float)
     assert isinstance(first_values[6], float)
     assert isinstance(first_values[7], int)
 
-    expected_number_format = {
+    expected_points_format = {
         "userEnteredFormat": {
             "numberFormat": {
                 "type": "NUMBER",
                 "pattern": "0.00",
+            },
+        },
+    }
+    expected_completion_format = {
+        "userEnteredFormat": {
+            "numberFormat": {
+                "type": "PERCENT",
+                "pattern": "0%",
+            },
+        },
+    }
+    expected_gold_format = {
+        "userEnteredFormat": {
+            "numberFormat": {
+                "type": "NUMBER",
+                "pattern": "#,##0",
             },
         },
     }
@@ -1910,7 +1964,7 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
                 start_column=5,
                 end_column=6,
             ),
-            "cell": expected_number_format,
+            "cell": expected_points_format,
             "fields": "userEnteredFormat.numberFormat",
         },
         {
@@ -1921,7 +1975,18 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
                 start_column=6,
                 end_column=7,
             ),
-            "cell": expected_number_format,
+            "cell": expected_completion_format,
+            "fields": "userEnteredFormat.numberFormat",
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=2,
+                end_row=3,
+                start_column=7,
+                end_column=8,
+            ),
+            "cell": expected_gold_format,
             "fields": "userEnteredFormat.numberFormat",
         },
         {
@@ -1932,7 +1997,7 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
                 start_column=5,
                 end_column=6,
             ),
-            "cell": expected_number_format,
+            "cell": expected_points_format,
             "fields": "userEnteredFormat.numberFormat",
         },
         {
@@ -1943,7 +2008,18 @@ async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_s
                 start_column=6,
                 end_column=7,
             ),
-            "cell": expected_number_format,
+            "cell": expected_completion_format,
+            "fields": "userEnteredFormat.numberFormat",
+        },
+        {
+            "range": _grid_range(
+                sheet_id=result.sheet_id,
+                start_row=3,
+                end_row=4,
+                start_column=7,
+                end_column=8,
+            ),
+            "cell": expected_gold_format,
             "fields": "userEnteredFormat.numberFormat",
         },
     ]
@@ -2492,7 +2568,7 @@ async def test_apply_reassigns_attack_fill_after_row_reorder() -> None:
     second_updates = sheets.batch_value_updates[1]
     assert [update.range_a1 for update in second_updates] == ["A1:H4", "A1:H4"]
     assert second_updates[0].values == [["" for _ in range(8)] for _ in range(4)]
-    assert [row[2] for row in second_updates[1].values[2:]] == ["#P2", "#P1"]
+    assert [row[3] for row in second_updates[1].values[2:]] == ["#P2", "#P1"]
     assert _format_reset_ranges(sheets, batch_index=1) == [
         _grid_range(
             sheet_id=444,
@@ -2613,7 +2689,7 @@ async def test_apply_replaces_message_block_with_rows() -> None:
     assert [update.range_a1 for update in second_updates] == ["A1:H2", "A1:H4"]
     assert second_updates[0].values == [["" for _ in range(8)] for _ in range(2)]
     assert all(old_message not in str(cell) for row in second_updates[1].values for cell in row)
-    assert [row[2] for row in second_updates[1].values[2:]] == ["#P1", "#P2"]
+    assert [row[3] for row in second_updates[1].values[2:]] == ["#P1", "#P2"]
     assert _format_reset_ranges(sheets, batch_index=1) == [
         _grid_range(
             sheet_id=444,
