@@ -10,10 +10,10 @@ from clash_sheet_sync_bot.repositories import SyncStatusSummary
 from clash_sheet_sync_bot.sync.composition import CompositionSyncResult
 from clash_sheet_sync_bot.sync.cwl import CwlSheetSyncResult
 from clash_sheet_sync_bot.sync.raids import RaidSheetSyncResult
+from clash_sheet_sync_bot.telegram.client import JsonObject
 
 TABLE_LINK_TEXT: Final = "Таблица"
 DEVELOPER_NAME: Final = "BangkokToD"
-DEVELOPER_URL: Final = "https://t.me/BangkokToD"
 SUPPORT_LINK_TEXT: Final = "Чат Леши"
 
 
@@ -25,11 +25,13 @@ class SyncReportPayload:
         text: HTML-текст сообщения.
         parse_mode: Режим разметки Telegram.
         disable_web_page_preview: Нужно ли отключить preview ссылки.
+        reply_markup: Необязательная inline-клавиатура сообщения.
     """
 
     text: str
     parse_mode: str = "HTML"
     disable_web_page_preview: bool = True
+    reply_markup: JsonObject | None = None
 
 
 def build_success_report(
@@ -61,16 +63,13 @@ def build_success_report(
 
     lines = [f"Обновлены {_human_list(sections)} для кланов:"]
     lines.extend(f"• {escape(clan_name)}" for clan_name, _ in composition_result.active_counts)
-    lines.extend(
-        [
-            "",
-            f'Разработчик: <a href="{DEVELOPER_URL}">{DEVELOPER_NAME}</a>',
-            _table_link(spreadsheet_url),
-        ]
-    )
+    lines.extend(["", f"Разработчик: {DEVELOPER_NAME}"])
     if support_url is not None:
         lines.append(f'<a href="{escape(support_url, quote=True)}">{SUPPORT_LINK_TEXT}</a>')
-    return SyncReportPayload(text="\n".join(lines))
+    return SyncReportPayload(
+        text="\n".join(lines),
+        reply_markup=_table_button(spreadsheet_url),
+    )
 
 
 def _human_list(items: list[str]) -> str:
@@ -85,9 +84,10 @@ def build_error_report(*, reason: str, spreadsheet_url: str | None = None) -> Sy
     """Строит отчёт ошибки `/sync`."""
 
     lines = ["Обновление отменено.", "", f"Причина: {escape(reason)}"]
-    if spreadsheet_url is not None:
-        lines.extend(["", _table_link(spreadsheet_url)])
-    return SyncReportPayload(text="\n".join(lines))
+    return SyncReportPayload(
+        text="\n".join(lines),
+        reply_markup=_table_button(spreadsheet_url) if spreadsheet_url is not None else None,
+    )
 
 
 def build_status_report(summary: SyncStatusSummary | None) -> SyncReportPayload:
@@ -132,3 +132,18 @@ def _table_link(spreadsheet_url: str) -> str:
     """Строит HTML-ссылку на таблицу."""
 
     return f'<a href="{escape(spreadsheet_url, quote=True)}">{TABLE_LINK_TEXT}</a>'
+
+
+def _table_button(spreadsheet_url: str) -> JsonObject:
+    """Строит inline-кнопку на привязанную таблицу."""
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": TABLE_LINK_TEXT,
+                    "url": spreadsheet_url,
+                }
+            ]
+        ]
+    }

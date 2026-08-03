@@ -1,8 +1,12 @@
 # Clash Sheet Sync Bot
 
+[![CI](https://github.com/BangkokToD/clash-sheet-sync-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/BangkokToD/clash-sheet-sync-bot/actions/workflows/ci.yml)
+
 Telegram-бот для ручной синхронизации Google Sheets с данными Clash of Clans API.
 
 Бот работает через Telegram Bot API long polling, хранит runtime-состояние в SQLite и обновляет Google Sheets для подключённых Telegram-групп.
+
+Текущая версия: `1.0.0`.
 
 ## Возможности
 
@@ -11,8 +15,10 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 - Закрытое меню superadmin для настройки техподдержки и общей рассылки.
 - Привязка Google Sheets через Google service account.
 - Управление отслеживаемыми кланами.
-- Настройка колонок состава и CWL через inline-меню.
-- Ручной `/sync` для обновления листов `Состав` и `CWL`.
+- Настройка колонок состава, CWL и рейдов через inline-меню.
+- Перенос ручных значений между одноимёнными колонками состава и «Вышедших».
+- Учёт Raid Weekend с рейтингом, межсезонным fallback и архивами.
+- Ручной `/sync` для обновления листов `Состав`, `CWL` и `Рейды`.
 - `/status` с результатом последней синхронизации.
 - Диагностика и auto-fix привязанной таблицы.
 - Перенос таблицы и runtime-state в другую Telegram-группу.
@@ -26,7 +32,7 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 |---|---|
 | SQLite | runtime source of truth: группы, таблицы, кланы, колонки, state, sync history |
 | Google Sheets | пользовательская таблица и ручные user-values |
-| Clash of Clans API | technical source: состав кланов и CWL |
+| Clash of Clans API | technical source: состав кланов, CWL и Raid Weekend |
 
 Ключевые идеи:
 
@@ -44,6 +50,9 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 
 ```text
 clash-sheet-sync-bot/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── clash_sheet_sync_bot/
 │   ├── coc/
 │   ├── admin/
@@ -87,7 +96,7 @@ clash_sheet_sync_bot/common/                общие helpers
 clash_sheet_sync_bot/repositories/          SQLite repository layer
 clash_sheet_sync_bot/setup/                 setup-flow и inline keyboards
 clash_sheet_sync_bot/sheets/                Google Sheets client/admin/ranges/columns
-clash_sheet_sync_bot/sync/                  sync orchestration, composition, CWL, reports
+clash_sheet_sync_bot/sync/                  sync orchestration, composition, CWL, raids, reports
 clash_sheet_sync_bot/telegram/              Telegram client и access checks
 ```
 
@@ -143,6 +152,12 @@ MAX_CLANS_PER_CHAT=20
 SYNC_COOLDOWN_SECONDS=60
 MAX_CONCURRENT_SYNCS=3
 CWL_WAR_CONCURRENCY_LIMIT=5
+RAID_API_CONCURRENCY_LIMIT=5
+RAID_SEASON_FETCH_LIMIT=5
+RAID_ARCHIVE_SHEETS_LIMIT=4
+RAID_ATTACKS_TARGET=6
+RAID_NORMAL_DISTRICT_ATTACK_NORM=2
+RAID_CAPITAL_DISTRICT_ATTACK_NORM=3
 ADMIN_CACHE_TTL_SECONDS=300
 SETUP_TOKEN_TTL_SECONDS=900
 TRANSFER_TOKEN_TTL_SECONDS=900
@@ -182,7 +197,7 @@ python bot.py
 Ожидаемые логи:
 
 ```text
-bot started
+bot started, version=1.0.0
 telegram polling started
 ```
 
@@ -235,6 +250,12 @@ telegram polling started
 | `/cancel` | личка | сброс текущего setup-state пользователя |
 
 ## Проверки
+
+Установить dev-зависимости:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
 
 Быстрая проверка:
 
