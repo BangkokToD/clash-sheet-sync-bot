@@ -369,8 +369,9 @@ coefficient = weighted_damage_units / (100 * raid_attacks_target)
 
 Формат:
 
-- `normal_points` и `coefficient`: `0.00`;
-- `capital_resources_looted` и `№`: целые;
+- `normal_points`: `0.00`;
+- `coefficient`: `0%` с сохранением точного числового значения для сортировки;
+- `capital_resources_looted`: `#,##0`, `№`: целое;
 - `Атаки`: строка `x/<raid_attacks_target>`;
 - красная заливка применяется только к ячейке `Атаки`, только для ended и
   только при `< raid_attacks_target`;

@@ -1,16 +1,24 @@
 # Clash Sheet Sync Bot
 
+[![CI](https://github.com/BangkokToD/clash-sheet-sync-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/BangkokToD/clash-sheet-sync-bot/actions/workflows/ci.yml)
+
 Telegram-бот для ручной синхронизации Google Sheets с данными Clash of Clans API.
 
 Бот работает через Telegram Bot API long polling, хранит runtime-состояние в SQLite и обновляет Google Sheets для подключённых Telegram-групп.
 
+Текущая версия: `1.0.0`.
+
 ## Возможности
 
 - Подключение Telegram-группы через личный чат с ботом.
+- Ссылка на группу техподдержки в главном меню.
+- Закрытое меню superadmin для настройки техподдержки и общей рассылки.
 - Привязка Google Sheets через Google service account.
 - Управление отслеживаемыми кланами.
-- Настройка колонок состава и CWL через inline-меню.
-- Ручной `/sync` для обновления листов `Состав` и `CWL`.
+- Настройка колонок состава, CWL и рейдов через inline-меню.
+- Перенос ручных значений между одноимёнными колонками состава и «Вышедших».
+- Учёт Raid Weekend с рейтингом, межсезонным fallback и архивами.
+- Ручной `/sync` для обновления листов `Состав`, `CWL` и `Рейды`.
 - `/status` с результатом последней синхронизации.
 - Диагностика и auto-fix привязанной таблицы.
 - Перенос таблицы и runtime-state в другую Telegram-группу.
@@ -24,7 +32,7 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 |---|---|
 | SQLite | runtime source of truth: группы, таблицы, кланы, колонки, state, sync history |
 | Google Sheets | пользовательская таблица и ручные user-values |
-| Clash of Clans API | technical source: состав кланов и CWL |
+| Clash of Clans API | technical source: состав кланов, CWL и Raid Weekend |
 
 Ключевые идеи:
 
@@ -42,8 +50,12 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 
 ```text
 clash-sheet-sync-bot/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── clash_sheet_sync_bot/
 │   ├── coc/
+│   ├── admin/
 │   ├── common/
 │   ├── repositories/
 │   ├── setup/
@@ -79,11 +91,12 @@ clash_sheet_sync_bot/migrations.py          SQLite migrations
 clash_sheet_sync_bot/models.py              доменные модели и типы
 clash_sheet_sync_bot/storage.py             SQLite connection/transaction helpers
 clash_sheet_sync_bot/coc/                   Clash of Clans API client
+clash_sheet_sync_bot/admin/                 superadmin-flow, техподдержка и рассылки
 clash_sheet_sync_bot/common/                общие helpers
 clash_sheet_sync_bot/repositories/          SQLite repository layer
 clash_sheet_sync_bot/setup/                 setup-flow и inline keyboards
 clash_sheet_sync_bot/sheets/                Google Sheets client/admin/ranges/columns
-clash_sheet_sync_bot/sync/                  sync orchestration, composition, CWL, reports
+clash_sheet_sync_bot/sync/                  sync orchestration, composition, CWL, raids, reports
 clash_sheet_sync_bot/telegram/              Telegram client и access checks
 ```
 
@@ -123,6 +136,7 @@ nano .env
 
 ```env
 TELEGRAM_BOT_TOKEN=put_telegram_token_here
+SUPERADMIN_USER_ID=put_telegram_user_id_here
 COC_API_TOKEN=put_coc_api_token_here
 GOOGLE_SERVICE_ACCOUNT_FILE=credentials.json
 GOOGLE_SERVICE_ACCOUNT_EMAIL=
@@ -138,6 +152,12 @@ MAX_CLANS_PER_CHAT=20
 SYNC_COOLDOWN_SECONDS=60
 MAX_CONCURRENT_SYNCS=3
 CWL_WAR_CONCURRENCY_LIMIT=5
+RAID_API_CONCURRENCY_LIMIT=5
+RAID_SEASON_FETCH_LIMIT=5
+RAID_ARCHIVE_SHEETS_LIMIT=4
+RAID_ATTACKS_TARGET=6
+RAID_NORMAL_DISTRICT_ATTACK_NORM=2
+RAID_CAPITAL_DISTRICT_ATTACK_NORM=3
 ADMIN_CACHE_TTL_SECONDS=300
 SETUP_TOKEN_TTL_SECONDS=900
 TRANSFER_TOKEN_TTL_SECONDS=900
@@ -147,6 +167,10 @@ REPORT_MAX_ITEMS=50
 `DEV_MODE=True` отключает cooldown между последовательными `/sync` для разработки.
 Если переменная отсутствует, пуста или равна `False`, cooldown работает. Защитные
 блокировки одновременных sync остаются включёнными в любом режиме.
+
+`SUPERADMIN_USER_ID` — положительный Telegram user ID единственного владельца
+админского меню. Без него бот не запускается. Узнать свой ID можно у Telegram
+ботов, показывающих поле `user.id`.
 
 ## Google service account
 
@@ -173,7 +197,7 @@ python bot.py
 Ожидаемые логи:
 
 ```text
-bot started
+bot started, version=1.0.0
 telegram polling started
 ```
 
@@ -181,7 +205,7 @@ telegram polling started
 
 1. Открыть личный чат с ботом.
 2. Отправить `/start`.
-3. Нажать «Подключить группу».
+3. Открыть «Мои группы» и нажать «Подключить группу».
 4. Добавить бота в Telegram-группу.
 5. Отправить в группе команду `/connect <token>`.
 6. Вернуться в личный чат.
@@ -192,6 +216,25 @@ telegram polling started
 11. Добавить хотя бы один клан.
 12. Запустить `/sync` в группе.
 
+## Администрирование
+
+У пользователя с ID из `SUPERADMIN_USER_ID` в личном главном меню появляется
+кнопка «Администрирование».
+
+- «Подключить техподдержку» создаёт одноразовую команду
+  `/connect_support <token>`. Для закрытой группы бот должен быть
+  администратором с правом создавать ссылки-приглашения.
+- После подключения все пользователи видят кнопку «Техподдержка» со ссылкой на
+  эту группу.
+- «Рассылка всем» принимает одно текстовое сообщение, показывает аудиторию и
+  предпросмотр, затем требует явного подтверждения. Получатели — известные
+  личные пользователи и все настроенные, не отключённые группы.
+
+Бот начинает учитывать обычного пользователя для рассылки после его первого
+взаимодействия с ботом в личном чате. Миграция также переносит в аудиторию уже
+известных администраторов групп. Telegram не позволяет восстановить остальных
+пользователей, которые писали боту до появления этого реестра.
+
 ## Команды Telegram
 
 | Команда | Где | Назначение |
@@ -199,6 +242,7 @@ telegram polling started
 | `/start` | личка/группа | главное меню или короткая инструкция |
 | `/help` | личка/группа | справка |
 | `/connect <token>` | группа | подключение группы |
+| `/connect_support <token>` | группа | подключение группы техподдержки superadmin’ом |
 | `/settings` | личка/группа | настройки |
 | `/accept_transfer <token>` | новая группа | перенос таблицы |
 | `/sync` | подключённая группа | синхронизация |
@@ -206,6 +250,12 @@ telegram polling started
 | `/cancel` | личка | сброс текущего setup-state пользователя |
 
 ## Проверки
+
+Установить dev-зависимости:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
 
 Быстрая проверка:
 

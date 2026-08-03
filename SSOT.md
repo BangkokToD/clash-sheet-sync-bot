@@ -47,7 +47,10 @@ SQLite — главный **runtime source of truth**, но не источни�
 | Ручные значения в user-колонках | Google Sheets | `user_values_json` в SQLite |
 | Текущий состав кланов и технические поля игроков | Clash of Clans API | SQLite и Google Sheets |
 | Текущие CWL group/war/attack data | Clash of Clans API | `technical_values_json` и Google Sheets |
+| Текущие Raid Weekend season/member/attack data | Clash of Clans API | `raid_player_state` и Google Sheets |
 | Актуальные права администратора группы | Telegram Bot API | Положительный cache в SQLite |
+| ID единственного superadmin | Environment или `.env` | `AppConfig` в памяти |
+| Группа техподдержки и история рассылок | SQLite | Telegram-кнопки и сообщения |
 | Конфигурация процесса | Environment, затем `.env`, затем defaults | `AppConfig` в памяти |
 | Google service account identity и ключ | `credentials.json` | Ожидаемый email в `.env` |
 | Структура SQLite | `clash_sheet_sync_bot/migrations.py` | Схема конкретного файла БД |
@@ -89,11 +92,17 @@ SQLite-файл задаётся `DB_PATH`. Значение по умолчан
 | `chat_admin_links` | Связи пользователей с группами и положительный admin cache |
 | `setup_tokens` | Lifecycle одноразовых токенов подключения |
 | `transfer_tokens` | Lifecycle одноразовых токенов переноса |
-| `sheet_bindings` | Активная привязка чата, spreadsheet ID, имена/ID служебных листов, timezone, активный CWL-сезон |
+| `bot_users` | Известные личные пользователи, активность и ожидаемое admin-действие |
+| `bot_settings` | Текущая группа и ссылка техподдержки |
+| `support_setup_tokens` | Lifecycle одноразовых токенов подключения техподдержки |
+| `broadcasts` | Текст, статус и итоговые счётчики массовых рассылок |
+| `sheet_bindings` | Активная привязка чата, spreadsheet ID, имена/ID служебных листов, timezone, активные CWL- и raid-сезоны |
 | `tracked_clans` | Набор отслеживаемых кланов, active flag и порядок |
 | `column_profiles` | Ключи, заголовки, типы, видимость и порядок колонок |
 | `composition_player_state` | Последнее известное состояние игрока и snapshot его user-values |
 | `cwl_row_state` | История CWL-строк, technical snapshot и snapshot user-values |
+| `raid_player_state` | Агрегированные raid-строки по сезонам, technical snapshot и snapshot user-values |
+| `raid_sheet_archives` | Bot-owned реестр архивных raid-листов по `season_key` и `sheet_id` |
 | `sheet_blocks` | Реестр областей Google Sheets, управляемых ботом |
 | `sync_runs` | История принятых запусков `/sync`, их результат и ошибки |
 | `schema_migrations` | Применённые версии схемы |
@@ -111,6 +120,8 @@ SQLite определяет, какие группы, таблицы, кланы
 - Миграции применяются при старте до обработки Telegram updates.
 - Production-схема не изменяется ручным SQL без соответствующей миграции.
 - Legacy data не удаляются без отдельного решения, миграции и теста.
+- Migration 7 меняет raid presentation только при совпадении со старым
+  стандартным заголовком или порядком; ручные настройки профиля сохраняются.
 
 Старый файл БД является экземпляром runtime-state, а не спецификацией схемы.
 
@@ -135,7 +146,8 @@ Google Sheets является авторитетным источником р�
 
 Для CWL действует отдельное производное правило: если импортированное значение
 пусто, бот может заполнить его непустым значением одноимённой видимой
-user-колонки состава этого игрока. Связь строится по нормализованному заголовку,
+user-колонки состава этого игрока. Для рейдов действует то же правило, причём CWL
+не является промежуточным источником. Связь строится по нормализованному заголовку,
 а не по `column_key`. Поэтому очистка CWL-ячейки не гарантирует, что она
 останется пустой, пока связанное значение состава заполнено.
 
@@ -152,7 +164,7 @@ user-колонки состава этого игрока. Связь стро�
 - tracked clans;
 - порядок и active status кланов;
 - конфигурация профилей колонок;
-- технические значения состава и CWL;
+- технические значения состава, CWL и рейдов;
 - chat binding;
 - sync history;
 - координаты managed blocks.
@@ -167,9 +179,10 @@ user-колонки состава этого игрока. Связь стро�
 Бот имеет право изменять:
 
 - зарегистрированные managed blocks;
-- обязательные листы `Состав`, активный `CWL` и `_bot_state` в рамках их
+- обязательные листы `Состав`, активные `CWL`, `Рейды` и `_bot_state` в рамках их
   служебного контракта;
 - staging- и архивные CWL-листы, созданные его pipeline;
+- staging- и зарегистрированные архивные raid-листы, созданные его pipeline;
 - форматирование и скрытие служебных колонок внутри управляемых областей.
 
 Произвольные пользовательские области вне managed blocks боту не принадлежат.
@@ -194,6 +207,13 @@ Clash of Clans API является авторитетным источнико�
 - stars и destruction percentage;
 - технические данные участников и соперников.
 
+Для Raid Weekend это:
+
+- сезон, `state`, `startTime` и `endTime`;
+- `members`, счётчики атак и золото столицы;
+- накопительное разрушение районов и вычисленный вклад атак;
+- агрегированные `weighted_damage_units`, нормо-очки и coefficient.
+
 SQLite и Google Sheets содержат snapshots или представления этих данных.
 Ручное изменение технического значения в таблице или устаревшее значение в
 SQLite не перекрывает успешный ответ CoC API.
@@ -203,6 +223,10 @@ write-фазы. Бот не выдаёт устаревший snapshot за ак
 явный межсезонный CWL-режим: когда активные кланы сейчас не участвуют в CWL,
 бот показывает последний подходящий сезон из SQLite и помечает его как
 предыдущий.
+
+Для рейдов также действует явный межсезонный режим: если API не вернул актуальный
+уикенд, бот может показать последний snapshot этой же Telegram-группы и её
+активных кланов.
 
 ## 7. Telegram Bot API: access source
 
@@ -224,6 +248,12 @@ check перекрывает положительный cache из `chat_admin_l
 - добавление, удаление и перемещение кланов;
 - создание, переименование, удаление и перемещение колонок.
 
+Доступ к меню техподдержки и рассылок определяется только точным совпадением
+Telegram `user.id` с обязательным `SUPERADMIN_USER_ID`. Видимость кнопки не
+является проверкой доступа: каждый admin callback и команда подключения
+техподдержки валидируют ID повторно. Подключающий техподдержку superadmin также
+должен быть актуальным администратором выбранной группы.
+
 ## 8. Конфигурация процесса и секреты
 
 Приоритет конфигурации:
@@ -237,6 +267,7 @@ check перекрывает положительный cache из `chat_admin_l
 - `TELEGRAM_BOT_TOKEN`;
 - `COC_API_TOKEN`;
 - `GOOGLE_SERVICE_ACCOUNT_FILE`.
+- `SUPERADMIN_USER_ID`.
 
 `credentials.json` или другой файл по `GOOGLE_SERVICE_ACCOUNT_FILE` является
 авторитетным источником ключа и `client_email` Google service account.
@@ -250,8 +281,8 @@ check перекрывает положительный cache из `chat_admin_l
 
 ### 9.1. User-values в SQLite
 
-`composition_player_state.user_values_json` и
-`cwl_row_state.user_values_json` хранят последний известный snapshot ручных
+`composition_player_state.user_values_json`, `cwl_row_state.user_values_json` и
+`raid_player_state.user_values_json` хранят последний известный snapshot ручных
 значений. Он нужен для:
 
 - переноса значений между перезаписями managed blocks;
@@ -264,10 +295,16 @@ check перекрывает положительный cache из `chat_admin_l
 значения имеют приоритет над SQLite snapshot. Значения других профилей, которых
 нет в импортируемом блоке, сохраняются в snapshot и не стираются случайно.
 
+User-колонки `composition_active` и `composition_exited` связываются по
+нормализованному заголовку без учёта регистра. Значение текущего managed block
+копируется в уже существующую однозначную пару при переходе игрока между
+активным составом и «Вышедшими». Такая связь не создаёт новые колонки и не
+объединяет колонки с разными заголовками.
+
 ### 9.2. Technical values в SQLite
 
-Технические значения в composition/CWL state нужны для истории, diff,
-стабильного планирования и межсезонного CWL fallback. Для текущего sync они не
+Технические значения в composition/CWL/raid state нужны для истории, diff,
+стабильного планирования и межсезонного fallback. Для текущего sync они не
 перекрывают успешный ответ CoC API.
 
 ### 9.3. `_bot_state`
@@ -302,6 +339,7 @@ SQLite binding имеет приоритет над `_bot_state`. При auto-fi
 | CoC API и сохранённое technical value | CoC API | Новое значение записывается в представление и SQLite snapshot |
 | User-cell в managed block и SQLite snapshot | Google Sheets | Импортированное значение переносится в planned state |
 | Пустая CWL user-cell и одноимённое непустое значение состава | Значение состава | CWL получает производное значение по совпадающему заголовку |
+| Пустая raid user-cell и одноимённое непустое значение состава | Значение состава | Рейды получают производное значение напрямую из состава |
 | Конфигурация колонок в SQLite и ручной заголовок/порядок в Sheets | SQLite | Следующий sync восстанавливает настроенное представление |
 | Sheet binding в SQLite и `_bot_state` | SQLite | Диагностика сообщает mismatch; auto-fix переписывает зеркало |
 | Fresh Telegram admin check и cache | Fresh check | Чувствительное действие разрешается только по свежему результату |
@@ -325,6 +363,9 @@ warning либо пропускает строку.
 - `column_key` — стабильная identity колонки внутри профиля;
 - `__bot_key` — стабильная identity строки Google Sheets;
 - CWL `row_key` — identity строки сезона, клана, раунда, игрока и marker;
+- raid `season_key` — нормализованный UTC `startTime` уикенда;
+- raid `row_key` — identity сезона, клана и `player_tag`;
+- `raid_sheet_archives.sheet_id` — physical identity bot-owned архива;
 - `block_key` — identity managed block внутри листа.
 
 Отображаемые названия, nickname, заголовки и координаты строк не заменяют
@@ -346,9 +387,13 @@ warning либо пропускает строку.
         ↓
 подготовить CWL из SQLite + Sheets + CoC API
         ↓
+подготовить raids из SQLite + Sheets + CoC API
+        ↓
 записать composition в Google Sheets
         ↓
-записать CWL и _bot_state в Google Sheets
+записать CWL в Google Sheets
+        ↓
+записать raids и итоговый _bot_state в Google Sheets
         ↓
 сохранить SQLite state и commit
         ↓
@@ -361,10 +406,18 @@ Google Sheets и SQLite не образуют общей распределён�
 - После начала write-фазы таблица может быть изменена частично.
 - При ошибке write-фазы незакоммиченные SQLite-изменения откатываются.
 - Ошибка после начала записи обязана сопровождаться partial write warning.
+- Ошибка удаления лишнего зарегистрированного raid-архива после успешной ротации —
+  recoverable cleanup warning; pruning повторяется на следующем sync.
 - После partial write пользователь должен запустить диагностику и повторить
   `/sync`.
 - Ошибка доставки Telegram report после успешного SQLite commit не откатывает
   успешный sync.
+- Успешный пользовательский report содержит только обновлённые разделы,
+  названия отслеживаемых кланов, обычную строку `Разработчик: BangkokToD` и,
+  если техподдержка настроена, ссылку `Чат Леши`. Привязанная Google Spreadsheet
+  открывается inline-кнопкой `Таблица` под report.
+- Recoverable warnings успешного sync сохраняются в `sync_runs.report_json`,
+  но не добавляются в компактный пользовательский report.
 
 ## 13. Concurrency
 
@@ -399,6 +452,10 @@ locks и global semaphore.
 11. Telegram delivery failure после SQLite commit не меняет success на error.
 12. Изменение схемы SQLite проходит через версионированную миграцию.
 13. Секреты и production-state не попадают в Git.
+14. Raid-рейтинг сортируется по точному coefficient до форматирования значения
+    целым процентом в Google Sheets.
+15. Raid-строки строятся только из `members` выбранного API-сезона.
+16. Автоудаление raid-листа разрешено только для архива, зарегистрированного по `sheet_id`.
 
 ## 15. Legacy и совместимость
 
@@ -406,7 +463,7 @@ locks и global semaphore.
   актуальным кодом.
 - Legacy table type `composition` сохраняется только для миграции и обратной
   совместимости. Актуальные профили: `composition_active`,
-  `composition_exited` и `cwl`.
+  `composition_exited`, `cwl` и `raids`.
 - Корневой `bot.py` — compatibility launcher. Runtime-код находится в package
   `clash_sheet_sync_bot`.
 

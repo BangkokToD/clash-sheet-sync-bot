@@ -23,6 +23,7 @@ from clash_sheet_sync_bot.repositories import (
     RuntimeConfigRepository,
     SheetBindingRepository,
     SheetBlockRepository,
+    SuperadminRepository,
     SyncRunRepository,
     TelegramChatRepository,
 )
@@ -53,7 +54,7 @@ from clash_sheet_sync_bot.sync.reports import (
     build_status_report,
     build_success_report,
 )
-from clash_sheet_sync_bot.telegram.client import TelegramApiError, TelegramClient
+from clash_sheet_sync_bot.telegram.client import JsonObject, TelegramApiError, TelegramClient
 
 CHAT_SYNC_LOCKS: dict[int, asyncio.Lock] = {}
 SHEET_SYNC_LOCKS: dict[str, asyncio.Lock] = {}
@@ -195,6 +196,7 @@ class SyncService:
         await self._telegram.send_message(
             chat_id=chat.chat_id,
             text=payload.text,
+            reply_markup=payload.reply_markup,
             parse_mode=payload.parse_mode,
             disable_web_page_preview=payload.disable_web_page_preview,
         )
@@ -233,8 +235,6 @@ class SyncService:
             return
 
         spreadsheet_url = runtime.sheet_binding.spreadsheet_url
-        is_baseline = not await self._sync_runs.has_successful_sync(runtime_chat_id)
-
         try:
             token_provider = GoogleAccessTokenProvider(self._config.google_service_account_file)
             async with httpx.AsyncClient(
@@ -349,20 +349,30 @@ class SyncService:
                 diff_items=prepared_composition.diff_items,
                 warnings=prepared_composition.warnings,
             )
+            support_group = await SuperadminRepository(self._connection).get_support_group()
             report = build_success_report(
                 composition_result=composition_result,
                 cwl_result=cwl_result,
                 raid_result=raid_result,
                 spreadsheet_url=spreadsheet_url,
-                report_max_items=self._config.report_max_items,
-                is_baseline=is_baseline,
+                support_url=support_group.url if support_group is not None else None,
             )
+            report_data: dict[str, object] = {"telegram_report": report.text}
+            if report.reply_markup is not None:
+                report_data["telegram_reply_markup"] = report.reply_markup
+            warnings = [*composition_result.warnings]
+            if cwl_result is not None:
+                warnings.extend(cwl_result.warnings)
+            if raid_result is not None:
+                warnings.extend(raid_result.warnings)
+            if warnings:
+                report_data["warnings"] = warnings
             finished_at = _format_dt(_utc_now())
             await self._sync_runs.finish_sync_run(
                 sync_run_id=sync_run_id,
                 status="success",
                 finished_at=finished_at,
-                report_json=json.dumps({"telegram_report": report.text}, ensure_ascii=False),
+                report_json=json.dumps(report_data, ensure_ascii=False),
             )
             await self._telegram_chats.mark_sync_finished(
                 chat_id=runtime_chat_id,
@@ -377,6 +387,7 @@ class SyncService:
                     chat_id=runtime_chat_id,
                     message_id=progress_message_id,
                     text=report.text,
+                    reply_markup=report.reply_markup,
                     parse_mode=report.parse_mode,
                     disable_web_page_preview=report.disable_web_page_preview,
                 )
@@ -432,7 +443,13 @@ class SyncService:
             finished_at=finished_at,
             error_stage=error_stage,
             error_message=reason,
-            report_json=json.dumps({"telegram_report": report.text}, ensure_ascii=False),
+            report_json=json.dumps(
+                {
+                    "telegram_report": report.text,
+                    "telegram_reply_markup": report.reply_markup,
+                },
+                ensure_ascii=False,
+            ),
         )
         await self._telegram_chats.mark_sync_finished(
             chat_id=chat_id,
@@ -445,6 +462,7 @@ class SyncService:
             chat_id=chat_id,
             message_id=progress_message_id,
             text=report.text,
+            reply_markup=report.reply_markup,
             parse_mode=report.parse_mode,
             disable_web_page_preview=report.disable_web_page_preview,
         )
@@ -455,6 +473,7 @@ class SyncService:
         chat_id: int,
         message_id: int | None,
         text: str,
+        reply_markup: JsonObject | None = None,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
     ) -> None:
@@ -466,6 +485,7 @@ class SyncService:
                     chat_id=chat_id,
                     message_id=message_id,
                     text=text,
+                    reply_markup=reply_markup,
                     parse_mode=parse_mode,
                     disable_web_page_preview=disable_web_page_preview,
                 )
@@ -476,6 +496,7 @@ class SyncService:
         await self._telegram.send_message(
             chat_id=chat_id,
             text=text,
+            reply_markup=reply_markup,
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
         )

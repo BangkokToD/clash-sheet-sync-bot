@@ -27,7 +27,16 @@ bot.db-shm
 bot.db-wal
 ```
 
-`bot.db` — главный production state. Потеря `bot.db` означает потерю привязок групп, tracked clans, column profiles, managed blocks и sync history.
+`bot.db` — главный production state. Потеря `bot.db` означает потерю привязок групп, tracked clans, column profiles, composition/CWL/Raid state, managed blocks и sync history.
+
+`SUPERADMIN_USER_ID` обязателен. Перед первым запуском версии с админским меню
+добавьте в `.env` положительный Telegram user ID владельца бота. После запуска
+миграция создаёт реестр пользователей, настройку техподдержки и журнал рассылок;
+поэтому перед обновлением особенно важен backup SQLite.
+Admin-схема закреплена repair-миграцией version 6: она безопасно создаёт
+недостающие таблицы даже если version 5 уже присутствовала в старой базе.
+Migration 7 точечно восстанавливает прежние стандартные raid-заголовки и порядок,
+не затрагивая пользовательские названия и ручной порядок колонок.
 
 ## 2. Package layout on disk
 
@@ -76,6 +85,7 @@ python3.12 -m venv .venv
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 Создать `.env`:
@@ -128,6 +138,23 @@ sudo systemctl status clash-sheet-sync-bot --no-pager
 ```
 
 Если обновление включает миграции, они применятся при старте бота. Перед обновлением обязательно сделать backup `bot.db`.
+
+### 4.1. Checklist релиза 1.0.0
+
+1. Остановить service и сделать backup SQLite.
+2. Перейти на release tag `v1.0.0` и установить runtime/dev dependencies.
+3. До запуска выполнить `make check`, `make lint` и `git diff --check`.
+4. Запустить service и убедиться, что в логе есть `bot started, version=1.0.0`.
+5. Проверить `PRAGMA integrity_check;` и наличие миграций 1–7.
+6. Выполнить `/status`, затем один контрольный `/sync`.
+7. Проверить inline-кнопку «Таблица», листы `Состав`/`CWL`/`Рейды` и
+   перенос ручных значений в одноимённых колонках «Вышедших».
+
+Команда проверки миграций:
+
+```bash
+sqlite3 bot.db "SELECT version FROM schema_migrations ORDER BY version;"
+```
 
 ## 5. Backup `bot.db`
 
@@ -444,6 +471,7 @@ LIMIT 5;
 | `prepared` | ошибка до записи Google Sheets |
 | `composition_written` | ошибка после начала записи состава |
 | `cwl_written` | ошибка после начала записи CWL |
+| `raids_written` | ошибка после начала записи Raid Weekend |
 | `sqlite_committed` | SQLite уже сохранил success |
 
 ## 13. CWL season mismatch
@@ -517,6 +545,7 @@ Transfer flow нужен, когда одна Google-таблица и runtime-�
 - column profiles;
 - composition player state;
 - CWL row state;
+- Raid Weekend player state и archive registry;
 - sheet blocks.
 
 ## 16. Бот не отвечает
@@ -608,7 +637,9 @@ LIMIT 10;
 
 ```bash
 sqlite3 bot.db "
-SELECT chat_id, google_sheet_id, composition_sheet_name, active_cwl_sheet_name, active_cwl_season
+SELECT chat_id, google_sheet_id, composition_sheet_name,
+       active_cwl_sheet_name, active_cwl_season,
+       active_raid_sheet_name, active_raid_season
 FROM sheet_bindings
 WHERE is_active = 1;
 "

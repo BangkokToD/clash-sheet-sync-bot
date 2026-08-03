@@ -44,6 +44,13 @@ class TelegramChatMember:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class TelegramInviteLink:
+    """Invite link created by the bot for a private group."""
+
+    invite_link: str
+
+
 class TelegramClient:
     """Минимальный клиент Telegram Bot API.
 
@@ -204,6 +211,20 @@ class TelegramClient:
         if not isinstance(status, str):
             raise TelegramApiError("Telegram getChatMember не вернул status.")
         return TelegramChatMember(status=status)
+
+    async def create_chat_invite_link(self, chat_id: int, *, name: str) -> TelegramInviteLink:
+        """Creates a non-expiring invite link for a support group."""
+
+        result = await self._request(
+            "createChatInviteLink",
+            {"chat_id": chat_id, "name": name},
+        )
+        if not isinstance(result, dict):
+            raise TelegramApiError("Telegram createChatInviteLink вернул некорректный result.")
+        invite_link = result.get("invite_link")
+        if not isinstance(invite_link, str) or not invite_link.startswith("https://"):
+            raise TelegramApiError("Telegram createChatInviteLink не вернул ссылку.")
+        return TelegramInviteLink(invite_link=invite_link)
 
     async def _request(self, method: str, payload: JsonObject) -> Any:
         """Выполняет Telegram API-запрос.

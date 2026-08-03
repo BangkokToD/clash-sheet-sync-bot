@@ -9,6 +9,8 @@ from typing import Any, Final
 
 import httpx
 
+from clash_sheet_sync_bot import __version__
+from clash_sheet_sync_bot.admin import SuperadminFlow
 from clash_sheet_sync_bot.config import ConfigError, load_config
 from clash_sheet_sync_bot.migrations import apply_migrations
 from clash_sheet_sync_bot.models import AppConfig
@@ -160,11 +162,20 @@ class BotApp:
             return
 
         flow = self._setup_flow(connection)
+        admin_flow = self._superadmin_flow(connection)
         is_private = chat.type == "private"
+        if is_private:
+            await admin_flow.observe_private_user(user_id=user_id, private_chat_id=chat.chat_id)
         raw_text = message.get("text")
         command = _extract_command(raw_text, self._bot_username)
         if command is None:
             if is_private and isinstance(raw_text, str):
+                if await admin_flow.handle_private_text(
+                    chat_id=chat.chat_id,
+                    user_id=user_id,
+                    text=raw_text,
+                ):
+                    return
                 await flow.handle_private_text(
                     chat_id=chat.chat_id,
                     user_id=user_id,
@@ -174,7 +185,7 @@ class BotApp:
 
         if command.name == "/start":
             if is_private:
-                await flow.send_private_start(chat.chat_id)
+                await admin_flow.send_private_start(chat_id=chat.chat_id, user_id=user_id)
             else:
                 await flow.send_group_start(chat.chat_id)
             return
@@ -185,6 +196,8 @@ class BotApp:
 
         if command.name == "/cancel":
             if is_private:
+                if await admin_flow.cancel_pending_action(chat_id=chat.chat_id, user_id=user_id):
+                    return
                 await flow.cancel_private_setup(chat_id=chat.chat_id, user_id=user_id)
             else:
                 await self._telegram.send_message(
@@ -195,6 +208,14 @@ class BotApp:
 
         if command.name == "/connect":
             await flow.connect_group(chat=chat, user_id=user_id, raw_token=command.args)
+            return
+
+        if command.name == "/connect_support":
+            await admin_flow.connect_support_group(
+                chat=chat,
+                user_id=user_id,
+                raw_token=command.args,
+            )
             return
 
         if command.name == "/settings":
@@ -247,6 +268,17 @@ class BotApp:
             return
 
         flow = self._setup_flow(connection)
+        admin_flow = self._superadmin_flow(connection)
+        if chat.type == "private":
+            await admin_flow.observe_private_user(user_id=user_id, private_chat_id=chat.chat_id)
+        if await admin_flow.handle_callback(
+            callback_data=data,
+            callback_query_id=callback_query_id,
+            chat_id=chat.chat_id,
+            message_id=message_id,
+            user_id=user_id,
+        ):
+            return
         await flow.handle_callback(
             callback_data=data,
             callback_query_id=callback_query_id,
@@ -288,6 +320,21 @@ class BotApp:
             config=self._config,
             telegram=self._telegram,
             connection=connection,
+        )
+
+    def _superadmin_flow(self, connection: Any) -> SuperadminFlow:
+        """Создаёт superadmin-flow поверх SQLite-подключения update."""
+
+        access = TelegramAccessService(
+            telegram=self._telegram,
+            connection=connection,
+            admin_cache_ttl_seconds=self._config.admin_cache_ttl_seconds,
+        )
+        return SuperadminFlow(
+            config=self._config,
+            telegram=self._telegram,
+            connection=connection,
+            access=access,
         )
 
 
@@ -368,7 +415,15 @@ def _extract_chat_info(message: JsonObject) -> TelegramChatInfo | None:
     else:
         display_title = str(chat_id)
 
-    return TelegramChatInfo(chat_id=chat_id, title=display_title, type=chat_type)
+    normalized_username = (
+        username.strip() if isinstance(username, str) and username.strip() else None
+    )
+    return TelegramChatInfo(
+        chat_id=chat_id,
+        title=display_title,
+        type=chat_type,
+        username=normalized_username,
+    )
 
 
 async def async_main() -> int:
@@ -394,7 +449,7 @@ async def async_main() -> int:
         async with httpx.AsyncClient(timeout=timeout) as http_client:
             telegram = TelegramClient(config.telegram_bot_token, http_client)
             identity = await telegram.get_me()
-            logger.info("bot started")
+            logger.info("bot started, version=%s", __version__)
             app = BotApp(
                 config=config,
                 telegram=telegram,

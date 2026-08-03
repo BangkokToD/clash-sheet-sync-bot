@@ -1129,10 +1129,15 @@ def _build_raid_format_requests(
             ),
         )
 
-    number_column_indexes = tuple(
-        index
+    number_formats_by_key = {
+        "normal_points": ("NUMBER", "0.00"),
+        "coefficient": ("PERCENT", "0%"),
+        "capital_resources_looted": ("NUMBER", "#,##0"),
+    }
+    number_formats = tuple(
+        (index, *number_formats_by_key[column.column_key])
         for index, column in enumerate(columns)
-        if column.column_key in {"normal_points", "coefficient"}
+        if column.column_key in number_formats_by_key
     )
     attacks_column_index = next(
         (index for index, column in enumerate(columns) if column.column_key == "attacks"),
@@ -1197,7 +1202,7 @@ def _build_raid_format_requests(
                         "userEnteredFormat.backgroundColorStyle",
                     ),
                 )
-            for column_index in number_column_indexes:
+            for column_index, number_type, pattern in number_formats:
                 requests.append(
                     _repeat_raid_cell_request(
                         _raid_block_cell_range(
@@ -1209,8 +1214,8 @@ def _build_raid_format_requests(
                         {
                             "userEnteredFormat": {
                                 "numberFormat": {
-                                    "type": "NUMBER",
-                                    "pattern": "0.00",
+                                    "type": number_type,
+                                    "pattern": pattern,
                                 },
                             },
                         },

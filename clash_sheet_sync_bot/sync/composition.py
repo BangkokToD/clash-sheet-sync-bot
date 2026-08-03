@@ -32,6 +32,7 @@ from clash_sheet_sync_bot.sheets.client import (
 from clash_sheet_sync_bot.sheets.column_profiles import (
     BOT_KEY_COLUMN_KEY,
     BOT_KEY_TITLE,
+    column_title_identity,
     table_title,
 )
 from clash_sheet_sync_bot.sheets.ranges import (
@@ -602,7 +603,12 @@ def _plan_player_states(
 
     for player_tag, member in current_members.items():
         previous = state_by_tag.get(player_tag)
-        user_values = _user_values_for(player_tag, previous, imported)
+        user_values = _user_values_for(
+            player_tag,
+            previous,
+            imported,
+            runtime_config.column_profiles,
+        )
         if previous is None or previous.status == "untracked":
             diff_items.append(
                 CompositionDiffItem("added", f"Новый игрок: {member.nickname} ({player_tag}).")
@@ -638,7 +644,12 @@ def _plan_player_states(
     for player_tag, previous in state_by_tag.items():
         if player_tag in current_members:
             continue
-        user_values = _user_values_for(player_tag, previous, imported)
+        user_values = _user_values_for(
+            player_tag,
+            previous,
+            imported,
+            runtime_config.column_profiles,
+        )
         if previous.status == "active":
             if previous.clan_tag in active_clan_tags:
                 exited_at = detected_at_text
@@ -1398,6 +1409,7 @@ def _user_values_for(
     player_tag: str,
     previous: CompositionPlayerState | None,
     imported: CompositionImportResult,
+    column_profiles: Sequence[ColumnProfile],
 ) -> JsonDict:
     """Возвращает user-values игрока, сохраняя значения колонок из других профилей.
 
@@ -1411,6 +1423,69 @@ def _user_values_for(
     imported_player = imported.players.get(player_tag)
     if imported_player is not None:
         result.update(imported_player.user_values)
+        source_table = (
+            COMPOSITION_EXITED_TABLE if imported_player.is_exited else COMPOSITION_ACTIVE_TABLE
+        )
+    elif previous is not None and previous.status in {"active", "exited"}:
+        source_table = (
+            COMPOSITION_EXITED_TABLE if previous.status == "exited" else COMPOSITION_ACTIVE_TABLE
+        )
+    else:
+        source_table = None
+
+    return _copy_linked_composition_user_values(
+        user_values=result,
+        source_table=source_table,
+        column_profiles=column_profiles,
+    )
+
+
+def _copy_linked_composition_user_values(
+    *,
+    user_values: JsonDict,
+    source_table: TableType | None,
+    column_profiles: Sequence[ColumnProfile],
+) -> JsonDict:
+    """Копирует значения между существующими active/exited user-колонками по title.
+
+    Текущий managed block является источником значения. Связь создаётся только
+    для однозначной пары активных профилей с одинаковым нормализованным title;
+    сами профили и колонки эта функция не создаёт.
+    """
+
+    result = dict(user_values)
+    if source_table not in {COMPOSITION_ACTIVE_TABLE, COMPOSITION_EXITED_TABLE}:
+        return result
+
+    profiles_by_title: dict[str, list[ColumnProfile]] = {}
+    for profile in column_profiles:
+        if (
+            profile.table_type not in {COMPOSITION_ACTIVE_TABLE, COMPOSITION_EXITED_TABLE}
+            or profile.kind != "user"
+            or not profile.is_active
+        ):
+            continue
+        profiles_by_title.setdefault(column_title_identity(profile.title), []).append(profile)
+
+    for profiles in profiles_by_title.values():
+        active_profiles = [
+            profile for profile in profiles if profile.table_type == COMPOSITION_ACTIVE_TABLE
+        ]
+        exited_profiles = [
+            profile for profile in profiles if profile.table_type == COMPOSITION_EXITED_TABLE
+        ]
+        if len(active_profiles) != 1 or len(exited_profiles) != 1:
+            continue
+
+        source_profile = (
+            active_profiles[0] if source_table == COMPOSITION_ACTIVE_TABLE else exited_profiles[0]
+        )
+        if source_profile.column_key not in result:
+            continue
+        value = result[source_profile.column_key]
+        result[active_profiles[0].column_key] = value
+        result[exited_profiles[0].column_key] = value
+
     return result
 
 

@@ -42,6 +42,7 @@ class AppConfig:
         coc_api_token: Токен Clash of Clans API.
         google_service_account_file: Путь к JSON-файлу service account.
         google_service_account_email: Ожидаемый email service account или `None`.
+        superadmin_user_id: Telegram user ID единственного superadmin.
         db_path: Путь к SQLite-файлу.
         default_timezone: IANA-таймзона для новых привязок.
         dev_mode: Отключает cooldown `/sync` для разработки.
@@ -65,6 +66,7 @@ class AppConfig:
     coc_api_token: str
     google_service_account_file: Path
     google_service_account_email: str | None
+    superadmin_user_id: int
     db_path: Path
     default_timezone: str
     dev_mode: bool
