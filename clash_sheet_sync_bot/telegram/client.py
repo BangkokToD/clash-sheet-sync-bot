@@ -16,7 +16,11 @@ class TelegramApiError(RuntimeError):
     """Ошибка Telegram Bot API без вывода секретов в лог."""
 
 
-class TelegramMessageNotModifiedError(TelegramApiError):
+class TelegramBadRequestError(TelegramApiError):
+    """Telegram Bot API ответил HTTP 400."""
+
+
+class TelegramMessageNotModifiedError(TelegramBadRequestError):
     """Telegram отказался редактировать сообщение без изменений."""
 
 
@@ -49,6 +53,24 @@ class TelegramInviteLink:
     """Invite link created by the bot for a private group."""
 
     invite_link: str
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramMessageEntity:
+    """Entity Telegram Bot API с offsets в UTF-16 code units."""
+
+    type: str
+    offset: int
+    length: int
+    custom_emoji_id: str | None = None
+
+    def to_payload(self) -> JsonObject:
+        """Преобразует entity в JSON payload Telegram."""
+
+        payload: JsonObject = {"type": self.type, "offset": self.offset, "length": self.length}
+        if self.custom_emoji_id is not None:
+            payload["custom_emoji_id"] = self.custom_emoji_id
+        return payload
 
 
 class TelegramClient:
@@ -112,6 +134,7 @@ class TelegramClient:
         *,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
+        entities: tuple[TelegramMessageEntity, ...] | None = None,
     ) -> int | None:
         """Отправляет сообщение в Telegram.
 
@@ -129,6 +152,7 @@ class TelegramClient:
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
+            entities=entities,
         )
         result = await self._request("sendMessage", payload)
         if isinstance(result, dict):
@@ -146,6 +170,7 @@ class TelegramClient:
         *,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
+        entities: tuple[TelegramMessageEntity, ...] | None = None,
     ) -> None:
         """Редактирует сообщение Telegram.
 
@@ -164,6 +189,7 @@ class TelegramClient:
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
+            entities=entities,
         )
         payload["message_id"] = message_id
         await self._request("editMessageText", payload)
@@ -261,6 +287,8 @@ class TelegramClient:
                 description = "неизвестная ошибка"
             if response.status_code == 400 and "message is not modified" in description.lower():
                 raise TelegramMessageNotModifiedError("Telegram message is not modified.")
+            if response.status_code == 400:
+                raise TelegramBadRequestError(f"Telegram API HTTP 400: {description}.")
             raise TelegramApiError(f"Telegram API HTTP {response.status_code}: {description}.")
 
         if data.get("ok") is not True:
@@ -278,6 +306,7 @@ def _message_payload(
     reply_markup: JsonObject | None,
     parse_mode: str | None,
     disable_web_page_preview: bool | None,
+    entities: tuple[TelegramMessageEntity, ...] | None,
 ) -> JsonObject:
     """Собирает payload для отправки или редактирования сообщения.
 
@@ -292,6 +321,8 @@ def _message_payload(
         JSON-совместимый payload Telegram Bot API.
     """
 
+    if parse_mode is not None and entities is not None:
+        raise ValueError("parse_mode и entities нельзя использовать одновременно.")
     payload: JsonObject = {"chat_id": chat_id, "text": text}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
@@ -299,4 +330,6 @@ def _message_payload(
         payload["parse_mode"] = parse_mode
     if disable_web_page_preview is not None:
         payload["disable_web_page_preview"] = disable_web_page_preview
+    if entities is not None:
+        payload["entities"] = [entity.to_payload() for entity in entities]
     return payload
