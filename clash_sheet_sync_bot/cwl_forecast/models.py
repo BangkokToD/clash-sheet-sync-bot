@@ -118,3 +118,26 @@ class ForecastMessage:
     text: str
     entities: tuple[TelegramMessageEntity, ...]
     fallback_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastReady:
+    """Готовое к Telegram delivery сообщение одного клана."""
+
+    clan_name: str
+    message: ForecastMessage
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastInactive:
+    """У клана нет current/preparation CWL war."""
+
+    clan_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastScheduleRequired:
+    """Прогноз заблокирован отсутствующим или конфликтным schedule."""
+
+    clan_name: str
+    reason: str

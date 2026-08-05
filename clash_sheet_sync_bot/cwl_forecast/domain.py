@@ -221,6 +221,14 @@ def validate_schedule(
     if selected_round == total_rounds:
         return {}
     if saved_opponents is None:
+        future_rounds = range(selected_round + 1, total_rounds + 1)
+        if all(round_number in known_opponents for round_number in future_rounds):
+            return {
+                round_number: _schedule_tag(
+                    known_opponents[round_number], f"known round {round_number}"
+                )
+                for round_number in future_rounds
+            }
         raise CwlScheduleError("Расписание будущих раундов не заполнено.")
     expected_rounds = set(range(1, total_rounds + 1))
     if any(not isinstance(number, int) or isinstance(number, bool) for number in saved_opponents):
