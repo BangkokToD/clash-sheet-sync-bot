@@ -21,6 +21,8 @@ CONFIG_ENV_NAMES = (
     "SYNC_COOLDOWN_SECONDS",
     "MAX_CONCURRENT_SYNCS",
     "CWL_WAR_CONCURRENCY_LIMIT",
+    "CWL_FORECAST_COOLDOWN_SECONDS",
+    "CWL_FORECAST_SCHEDULE_TTL_SECONDS",
     "RAID_ARCHIVE_SHEETS_LIMIT",
     "RAID_ATTACKS_TARGET",
     "RAID_NORMAL_DISTRICT_ATTACK_NORM",
@@ -95,6 +97,8 @@ def test_load_config_uses_defaults(
     assert config.sync_cooldown_seconds == 60
     assert config.max_concurrent_syncs == 3
     assert config.cwl_war_concurrency_limit == 5
+    assert config.cwl_forecast_cooldown_seconds == 60
+    assert config.cwl_forecast_schedule_ttl_seconds == 600
     assert config.raid_archive_sheets_limit == 4
     assert config.raid_attacks_target == 6
     assert config.raid_normal_district_attack_norm == 2
@@ -119,6 +123,8 @@ def test_load_config_uses_defaults(
         ("RAID_CAPITAL_DISTRICT_ATTACK_NORM", "0", "положительным числом"),
         ("RAID_SEASON_FETCH_LIMIT", "1", "не меньше 2"),
         ("RAID_API_CONCURRENCY_LIMIT", "0", "положительным числом"),
+        ("CWL_FORECAST_COOLDOWN_SECONDS", "0", "положительным числом"),
+        ("CWL_FORECAST_SCHEDULE_TTL_SECONDS", "not-int", "целым числом"),
     ),
 )
 def test_load_config_rejects_invalid_int_values(

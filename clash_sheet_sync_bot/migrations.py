@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 7
+SCHEMA_VERSION: Final = 8
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -453,6 +453,55 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
       AND chat_id IN (SELECT chat_id FROM migration_7_raid_default_order_chats);
 
     DROP TABLE migration_7_raid_default_order_chats;
+    """,
+    8: """
+    CREATE TABLE cwl_forecast_chat_state (
+        chat_id INTEGER PRIMARY KEY,
+        last_started_at TEXT NOT NULL,
+        FOREIGN KEY(chat_id) REFERENCES telegram_chats(chat_id)
+    );
+
+    CREATE TABLE cwl_forecast_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        season TEXT NOT NULL,
+        group_fingerprint TEXT NOT NULL,
+        clan_tag TEXT NOT NULL,
+        created_by_user_id INTEGER NOT NULL,
+        source_chat_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(season, group_fingerprint, clan_tag)
+    );
+    CREATE INDEX idx_cwl_forecast_schedules_lookup
+    ON cwl_forecast_schedules(season, group_fingerprint, clan_tag);
+
+    CREATE TABLE cwl_forecast_rounds (
+        schedule_id INTEGER NOT NULL,
+        round_number INTEGER NOT NULL CHECK(round_number > 0),
+        opponent_clan_tag TEXT NOT NULL,
+        source TEXT NOT NULL CHECK(source IN ('api', 'manual')),
+        PRIMARY KEY(schedule_id, round_number),
+        UNIQUE(schedule_id, opponent_clan_tag),
+        FOREIGN KEY(schedule_id) REFERENCES cwl_forecast_schedules(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE cwl_forecast_schedule_sessions (
+        id TEXT PRIMARY KEY,
+        season TEXT NOT NULL,
+        group_fingerprint TEXT NOT NULL,
+        clan_tag TEXT NOT NULL,
+        source_chat_id INTEGER NOT NULL,
+        created_by_user_id INTEGER NOT NULL,
+        message_id INTEGER,
+        draft_json TEXT NOT NULL,
+        current_step INTEGER NOT NULL CHECK(current_step >= 0),
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(season, group_fingerprint, clan_tag)
+    );
+    CREATE INDEX idx_cwl_forecast_sessions_expiry
+    ON cwl_forecast_schedule_sessions(expires_at);
     """,
 }
 

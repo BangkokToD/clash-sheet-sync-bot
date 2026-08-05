@@ -53,6 +53,10 @@ def load_config(env_file: str | Path = ".env") -> AppConfig:
         sync_cooldown_seconds=_non_negative_int_env("SYNC_COOLDOWN_SECONDS", 60),
         max_concurrent_syncs=_positive_int_env("MAX_CONCURRENT_SYNCS", 3),
         cwl_war_concurrency_limit=_positive_int_env("CWL_WAR_CONCURRENCY_LIMIT", 5),
+        cwl_forecast_cooldown_seconds=_positive_int_env("CWL_FORECAST_COOLDOWN_SECONDS", 60),
+        cwl_forecast_schedule_ttl_seconds=_positive_int_env(
+            "CWL_FORECAST_SCHEDULE_TTL_SECONDS", 600
+        ),
         raid_archive_sheets_limit=_positive_int_env("RAID_ARCHIVE_SHEETS_LIMIT", 4),
         raid_attacks_target=_positive_int_env("RAID_ATTACKS_TARGET", 6),
         raid_normal_district_attack_norm=_positive_int_env(
