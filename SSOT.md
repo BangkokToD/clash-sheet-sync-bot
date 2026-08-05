@@ -47,6 +47,8 @@ SQLite — главный **runtime source of truth**, но не источни�
 | Ручные значения в user-колонках | Google Sheets | `user_values_json` в SQLite |
 | Текущий состав кланов и технические поля игроков | Clash of Clans API | SQLite и Google Sheets |
 | Текущие CWL group/war/attack data | Clash of Clans API | `technical_values_json` и Google Sheets |
+| API-известные пары раундов прогноза ЛВК | Clash of Clans API | Строки `cwl_forecast_rounds` |
+| Ручные пары будущих раундов ЛВК | Подтверждение Telegram-администратора | Черновик schedule session |
 | Текущие Raid Weekend season/member/attack data | Clash of Clans API | `raid_player_state` и Google Sheets |
 | Актуальные права администратора группы | Telegram Bot API | Положительный cache в SQLite |
 | ID единственного superadmin | Environment или `.env` | `AppConfig` в памяти |
@@ -101,6 +103,10 @@ SQLite-файл задаётся `DB_PATH`. Значение по умолчан
 | `column_profiles` | Ключи, заголовки, типы, видимость и порядок колонок |
 | `composition_player_state` | Последнее известное состояние игрока и snapshot его user-values |
 | `cwl_row_state` | История CWL-строк, technical snapshot и snapshot user-values |
+| `cwl_forecast_chat_state` | Время последнего принятого `/cwl_forecast` конкретного chat |
+| `cwl_forecast_schedules` | Глобальный ключ расписания ЛВК и audit metadata |
+| `cwl_forecast_rounds` | Подтверждённые теги соперников по раундам и источник пары |
+| `cwl_forecast_schedule_sessions` | Временные изолированные черновики кнопочного ввода |
 | `raid_player_state` | Агрегированные raid-строки по сезонам, technical snapshot и snapshot user-values |
 | `raid_sheet_archives` | Bot-owned реестр архивных raid-листов по `season_key` и `sheet_id` |
 | `sheet_blocks` | Реестр областей Google Sheets, управляемых ботом |
@@ -122,6 +128,8 @@ SQLite определяет, какие группы, таблицы, кланы
 - Legacy data не удаляются без отдельного решения, миграции и теста.
 - Migration 7 меняет raid presentation только при совпадении со старым
   стандартным заголовком или порядком; ручные настройки профиля сохраняются.
+- Migration 8 добавляет отдельные forecast cooldown, schedules, rounds и
+  sessions, не переиспользуя `telegram_chats.setup_state`.
 
 Старый файл БД является экземпляром runtime-state, а не спецификацией схемы.
 
@@ -207,6 +215,12 @@ Clash of Clans API является авторитетным источнико�
 - stars и destruction percentage;
 - технические данные участников и соперников.
 
+Для прогноза ЛВК CoC API также определяет season, состав League Group,
+`teamSize`, фактические стороны созданных войн и все появившиеся реальные
+пары. Ручное расписание владеет только ещё неизвестными парами `#0`. Как только
+API публикует реальный `warTag`, несовпадение не исправляется автоматически:
+прогноз блокируется до нового подтверждения администратором.
+
 Для Raid Weekend это:
 
 - сезон, `state`, `startTime` и `endTime`;
@@ -247,6 +261,7 @@ check перекрывает положительный cache из `chat_admin_l
 - создание transfer token;
 - добавление, удаление и перемещение кланов;
 - создание, переименование, удаление и перемещение колонок.
+- создание и изменение ручного расписания прогноза ЛВК.
 
 Доступ к меню техподдержки и рассылок определяется только точным совпадением
 Telegram `user.id` с обязательным `SUPERADMIN_USER_ID`. Видимость кнопки не
@@ -347,6 +362,7 @@ SQLite binding имеет приоритет над `_bot_state`. При auto-fi
 | Текущая схема кода и старая схема БД | Миграции | При старте применяются отсутствующие версии |
 | Корректный `__bot_key` и видимые поля строки | `__bot_key` | Видимые поля используются только как безопасный fallback |
 | Два разных CWL season в одном sync | Ни один | Sync останавливается до записи |
+| Реальная CWL-пара и ручное расписание | Clash of Clans API | Прогноз блокируется; администратор вводит расписание заново |
 
 Повреждённый или неоднозначный идентификатор строки не разрешает угадывать
 значение. Бот применяет только предусмотренный строгий fallback, добавляет
@@ -367,6 +383,9 @@ warning либо пропускает строку.
 - raid `row_key` — identity сезона, клана и `player_tag`;
 - `raid_sheet_archives.sheet_id` — physical identity bot-owned архива;
 - `block_key` — identity managed block внутри листа.
+- `season + group_fingerprint + clan_tag` — глобальная identity расписания
+  прогноза ЛВК; fingerprint является SHA-256 отсортированных нормализованных
+  тегов кланов и не зависит от названий, уровней или API-порядка.
 
 Отображаемые названия, nickname, заголовки и координаты строк не заменяют
 стабильные ключи.
@@ -426,6 +445,8 @@ Google Sheets и SQLite не образуют общей распределён�
 - chat lock — не допускает два одновременных sync одного чата;
 - sheet lock — не допускает две одновременные записи одной Google-таблицы;
 - global semaphore — ограничивает общее число параллельных sync.
+- отдельный chat lock `/cwl_forecast` — не допускает два одновременных прогноза
+  одного чата; persisted timestamp сохраняет cooldown после restart.
 
 Эти примитивы process-local. Запуск нескольких процессов бота с одним Telegram
 token или общей runtime-БД не является поддерживаемой моделью и не должен
@@ -456,6 +477,10 @@ locks и global semaphore.
     целым процентом в Google Sheets.
 15. Raid-строки строятся только из `members` выбранного API-сезона.
 16. Автоудаление raid-листа разрешено только для архива, зарегистрированного по `sheet_id`.
+17. Неизвестные будущие CWL-пары не выводятся из порядка `clans` и не
+    угадываются; источник — подтверждённое администратором расписание.
+18. Конфликт сохранённого расписания с реальной CWL war блокирует прогноз, а не
+    изменяет schedule молча.
 
 ## 15. Legacy и совместимость
 
@@ -481,6 +506,9 @@ Legacy-артефакт не становится источником исти�
 - пользовательские Google Sheets.
 
 Потеря SQLite означает потерю runtime-конфигурации, привязок, state и истории.
+В том числе будут потеряны forecast cooldown, глобальные расписания и активные
+schedule sessions. Transfer Telegram-чата их не переносит: schedules глобальны
+и остаются доступными по своему ключу, а cooldown принадлежит исходному chat.
 Google Sheets может сохранить пользовательские значения, но не является
 полной резервной копией SQLite.
 
