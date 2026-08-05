@@ -183,6 +183,44 @@ class CwlForecastRepository:
             raise RuntimeError("Сохранённое расписание исчезло после транзакции.")
         return schedule
 
+    async def confirm_schedule_from_session(
+        self,
+        *,
+        session_id: str,
+        key: CwlForecastScheduleKey,
+        rounds: tuple[CwlForecastRound, ...],
+        created_by_user_id: int,
+        source_chat_id: int,
+        now: datetime,
+    ) -> CwlForecastSchedule:
+        """Сохраняет schedule и удаляет подтверждённую сессию одной транзакцией."""
+
+        _require_aware(now, "now")
+        timestamp = now.isoformat()
+        async with transaction(self._connection):
+            session_row = await fetch_one(
+                self._connection,
+                """SELECT 1 FROM cwl_forecast_schedule_sessions
+                WHERE id = ? AND season = ? AND group_fingerprint = ? AND clan_tag = ?""",
+                (session_id, *_key_values(key)),
+            )
+            if session_row is None:
+                raise RuntimeError("Сессия подтверждения не найдена.")
+            await self._upsert_schedule_rows(
+                key=key,
+                rounds=rounds,
+                created_by_user_id=created_by_user_id,
+                source_chat_id=source_chat_id,
+                timestamp=timestamp,
+            )
+            await self._connection.execute(
+                "DELETE FROM cwl_forecast_schedule_sessions WHERE id = ?", (session_id,)
+            )
+        schedule = await self.get_schedule(key)
+        if schedule is None:
+            raise RuntimeError("Расписание исчезло после подтверждения.")
+        return schedule
+
     async def acquire_session(
         self,
         *,
@@ -273,6 +311,50 @@ class CwlForecastRepository:
                 session.created_at.isoformat(),
                 session.updated_at.isoformat(),
             ),
+        )
+
+    async def _upsert_schedule_rows(
+        self,
+        *,
+        key: CwlForecastScheduleKey,
+        rounds: tuple[CwlForecastRound, ...],
+        created_by_user_id: int,
+        source_chat_id: int,
+        timestamp: str,
+    ) -> None:
+        """Заменяет schedule rows внутри уже открытой транзакции."""
+
+        await self._connection.execute(
+            """INSERT INTO cwl_forecast_schedules(
+                season, group_fingerprint, clan_tag, created_by_user_id,
+                source_chat_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(season, group_fingerprint, clan_tag) DO UPDATE SET
+                created_by_user_id = excluded.created_by_user_id,
+                source_chat_id = excluded.source_chat_id,
+                updated_at = excluded.updated_at""",
+            (*_key_values(key), created_by_user_id, source_chat_id, timestamp, timestamp),
+        )
+        row = await fetch_one(
+            self._connection,
+            """SELECT id FROM cwl_forecast_schedules
+            WHERE season = ? AND group_fingerprint = ? AND clan_tag = ?""",
+            _key_values(key),
+        )
+        if row is None:
+            raise RuntimeError("Не удалось получить schedule id.")
+        schedule_id = as_int(row["id"], "id")
+        await self._connection.execute(
+            "DELETE FROM cwl_forecast_rounds WHERE schedule_id = ?", (schedule_id,)
+        )
+        await self._connection.executemany(
+            """INSERT INTO cwl_forecast_rounds(
+                schedule_id, round_number, opponent_clan_tag, source
+            ) VALUES (?, ?, ?, ?)""",
+            [
+                (schedule_id, item.round_number, item.opponent_clan_tag, item.source)
+                for item in rounds
+            ],
         )
 
 

@@ -65,6 +65,19 @@ class TelegramChatRepository:
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
 
+    async def is_connected_group(self, chat_id: int) -> bool:
+        """Проверяет, что chat подключён и является группой/supergroup."""
+
+        row = await fetch_one(
+            self._connection,
+            """SELECT 1 FROM telegram_chats
+            WHERE chat_id = ?
+              AND type IN ('group', 'supergroup')
+              AND status NOT IN ('not_configured', 'disabled')""",
+            (chat_id,),
+        )
+        return row is not None
+
     async def upsert_connected_chat(
         self,
         *,

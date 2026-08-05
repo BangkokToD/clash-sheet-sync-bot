@@ -12,6 +12,10 @@ import httpx
 from clash_sheet_sync_bot import __version__
 from clash_sheet_sync_bot.admin import SuperadminFlow
 from clash_sheet_sync_bot.config import ConfigError, load_config
+from clash_sheet_sync_bot.cwl_forecast.schedule_flow import (
+    CALLBACK_PREFIX as CWL_FORECAST_CALLBACK_PREFIX,
+    CwlForecastScheduleFlow,
+)
 from clash_sheet_sync_bot.migrations import apply_migrations
 from clash_sheet_sync_bot.models import AppConfig
 from clash_sheet_sync_bot.setup.flow import SetupFlow, TelegramChatInfo
@@ -229,6 +233,14 @@ class BotApp:
             await flow.accept_transfer(chat=chat, user_id=user_id, raw_token=command.args)
             return
 
+        if command.name == "/cwl_forecast_schedule":
+            await self._cwl_forecast_schedule_flow(connection).handle_command(
+                chat_id=chat.chat_id,
+                chat_type=chat.type,
+                user_id=user_id,
+            )
+            return
+
         if command.name == "/sync":
             await self._sync_service(connection).handle_sync_command(
                 chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
@@ -271,6 +283,15 @@ class BotApp:
         admin_flow = self._superadmin_flow(connection)
         if chat.type == "private":
             await admin_flow.observe_private_user(user_id=user_id, private_chat_id=chat.chat_id)
+        if data.startswith(CWL_FORECAST_CALLBACK_PREFIX):
+            await self._cwl_forecast_schedule_flow(connection).handle_callback(
+                callback_data=data,
+                callback_query_id=callback_query_id,
+                chat_id=chat.chat_id,
+                message_id=message_id,
+                user_id=user_id,
+            )
+            return
         if await admin_flow.handle_callback(
             callback_data=data,
             callback_query_id=callback_query_id,
@@ -320,6 +341,21 @@ class BotApp:
             config=self._config,
             telegram=self._telegram,
             connection=connection,
+        )
+
+    def _cwl_forecast_schedule_flow(self, connection: Any) -> CwlForecastScheduleFlow:
+        """Создаёт flow ручного расписания ЛВК для текущего update."""
+
+        access = TelegramAccessService(
+            telegram=self._telegram,
+            connection=connection,
+            admin_cache_ttl_seconds=self._config.admin_cache_ttl_seconds,
+        )
+        return CwlForecastScheduleFlow(
+            config=self._config,
+            telegram=self._telegram,
+            connection=connection,
+            access=access,
         )
 
     def _superadmin_flow(self, connection: Any) -> SuperadminFlow:
