@@ -158,12 +158,20 @@ def test_nearest_preparation_uses_time_then_round_then_tag() -> None:
     assert selected is not None and selected.war_tag == "#WARA"
 
 
-def test_actual_roster_sorts_map_position_and_prediction_sorts_th_then_tag() -> None:
-    war = parse_cwl_war(_war(state="inWar"))
+def test_actual_and_predicted_rosters_sort_th_desc_then_tag() -> None:
+    data = _war(state="inWar")
+    clan_data = data["clan"]
+    assert isinstance(clan_data, dict)
+    members = clan_data["members"]
+    assert isinstance(members, list)
+    assert isinstance(members[0], dict) and isinstance(members[1], dict)
+    members[0]["townhallLevel"] = 18  # mapPosition 2
+    members[1]["townhallLevel"] = 15  # mapPosition 1
+    war = parse_cwl_war(data)
     group = parse_league_group(_fixture())
     clan = group.clan("#CLAN001")
 
-    assert actual_roster(war.clan, 2) == (17, 16)
+    assert actual_roster(war.clan, 2) == (18, 15)
     expected = tuple(
         member.town_hall_level
         for member in sorted(

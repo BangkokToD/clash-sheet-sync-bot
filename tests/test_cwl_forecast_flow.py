@@ -245,6 +245,7 @@ async def test_http_400_retries_plain_exactly_once(
     assert telegram.sent_messages[0]["entities"]
     assert telegram.sent_messages[1]["entities"] is None
     assert telegram.sent_messages[1]["text"].splitlines()[2] == "18|16|18|18"
+    assert telegram.sent_messages[1]["text"].splitlines()[-1] == "35  31  35  35"
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,7 @@ Codex может уточнить разбиение, если сохранит 
 - поиск войны нашего клана;
 - выбор `inWar`/ближайшей `preparation`;
 - определение фактического соперника;
-- сортировка actual rosters по `mapPosition`;
+- сортировка actual rosters по TH/tag;
 - сортировка predicted roster по TH/tag;
 - объединение API-известных и ручных раундов;
 - выявление неполного или конфликтного расписания.
@@ -42,6 +42,7 @@ message IDs. Времена API парсятся в timezone-aware UTC.
 ### Formatting
 
 - построение логической матрицы;
+- расчёт итоговой суммы уровней ратуш для каждой колонки;
 - Unicode keycap labels;
 - сборка текста и custom emoji entities;
 - расчёт UTF-16 offsets;

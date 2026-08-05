@@ -189,13 +189,16 @@ def select_current_war(
 
 
 def actual_roster(clan: WarClan, team_size: int) -> tuple[int | None, ...]:
-    """Сортирует фактический roster по mapPosition и дополняет до teamSize."""
+    """Сортирует фактический roster по TH DESC и tag ASC."""
 
     if team_size <= 0 or len(clan.members) != team_size:
         raise CwlForecastDataError("Фактический roster должен содержать ровно teamSize игроков.")
     return tuple(
         member.town_hall_level
-        for member in sorted(clan.members, key=lambda item: item.map_position)
+        for member in sorted(
+            clan.members,
+            key=lambda item: (-item.town_hall_level, item.tag),
+        )
     )
 
 

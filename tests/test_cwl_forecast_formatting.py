@@ -27,18 +27,20 @@ def test_forecast_message_exact_layout_and_entities() -> None:
     assert lines[0] == "Клан 🏆 | test | #ABC123"
     assert lines[1] == "🛡️  🔰  4️⃣  5️⃣"
     assert "|" not in lines[1]
-    assert lines[2:] == [
+    assert lines[2:-1] == [
         "🏠|🏠|🏠|🏠",
         "🏠|🏠|—|🏠",
         "—|🏠|🏠|🏠",
     ]
-    assert all(" | " not in line for line in lines[2:])
+    assert lines[-1] == "35  45  24  27"
+    assert all(" | " not in line for line in lines[2:-1])
     assert message.fallback_text.splitlines() == [
         "Клан 🏆 | test | #ABC123",
         "⭕️  ⚔️  4️⃣  5️⃣",
         "18|16|13|10",
         "17|15|—|9",
         "—|14|11|8",
+        "35  45  24  27",
     ]
     assert len(message.entities) == 2 + 10
     first = message.entities[0]

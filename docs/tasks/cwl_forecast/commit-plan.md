@@ -136,7 +136,7 @@ Scope:
 - `inWar` приоритетнее `preparation`;
 - ближайшая preparation стабильна;
 - сторона нашего клана определяется независимо от home/away;
-- actual `mapPosition ASC`;
+- actual TH DESC + tag ASC;
 - prediction TH DESC + tag ASC;
 - cut до teamSize и padding `—`;
 - все будущие раунды;
@@ -144,6 +144,7 @@ Scope:
 - incomplete/duplicate/foreign/conflicting schedule;
 - header без `|`, ровно два пробела;
 - body только `|`, без пробелов;
+- суммы TH колонок через два пробела;
 - Unicode keycap rounds;
 - exact UTF-16 entities и plain fallback.
 

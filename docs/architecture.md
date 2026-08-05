@@ -623,10 +623,10 @@ Transfer flow переносит активную таблицу и runtime stat
 загружает реальные `warTag` с общим на запуск cache и выбирает `inWar`, иначе
 ближайшую `preparation` по API-времени, номеру раунда и тегу войны.
 
-`teamSize` выбранной войны задаёт высоту матрицы. Фактические стороны
-сортируются по `mapPosition`; потенциальный roster — по `townHallLevel DESC`,
-затем player tag. Для неизвестных будущих пар нужен полный schedule. Частичная
-матрица при missing/conflicting schedule не отправляется.
+`teamSize` выбранной войны задаёт высоту матрицы. Все составы сортируются
+по уровню ратуши по убыванию, затем по player tag. После матрицы идёт
+строка сумм уровней ратуш по колонкам. Для неизвестных будущих пар нужен
+полный schedule. Частичная матрица при missing/conflicting schedule не отправляется.
 
 Форматтер одновременно строит fallback-текст и custom emoji entities с
 offsets/lengths в UTF-16 code units. Catalog

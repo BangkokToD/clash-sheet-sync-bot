@@ -30,6 +30,8 @@
 
 ### Changed
 
+- Все колонки forecast-матрицы сортируются по ратушам по убыванию, а итоговая
+  строка показывает сумму уровней ратуш для каждой колонки.
 - README, SSOT, архитектурная документация и production runbook описывают
   forecast data ownership, ручное расписание, conflict recovery и migration 8.
 

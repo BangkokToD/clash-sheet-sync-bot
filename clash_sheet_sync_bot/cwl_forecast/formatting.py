@@ -60,6 +60,13 @@ def build_forecast_message(
         if row_index + 1 < row_count:
             custom.append("\n")
             plain_parts.append("\n")
+    custom.append("\n")
+    plain_parts.append("\n")
+    totals = "  ".join(
+        str(sum(value for value in roster if value is not None)) for roster in rosters
+    )
+    custom.append(totals)
+    plain_parts.append(totals)
     text, entities = custom.build()
     return ForecastMessage(text=text, entities=entities, fallback_text="".join(plain_parts))
 

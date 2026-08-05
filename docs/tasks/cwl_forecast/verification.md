@@ -108,10 +108,11 @@ git status --short
 
 ### Rosters
 
-- actual: `mapPosition ASC`;
+- actual: `townhallLevel DESC`, tag `ASC`;
 - future: `townHallLevel DESC`, tag `ASC`;
 - ровно `teamSize` строк;
 - недостаток — `—`;
+- последняя строка содержит суммы TH колонок через два пробела;
 - неизвестный TH вне catalog даёт controlled clan error.
 
 ### Schedule
