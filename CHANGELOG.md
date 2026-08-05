@@ -9,6 +9,30 @@
 
 Пока нет невыпущенных изменений.
 
+## [1.1.0] - 2026-08-05
+
+### Added
+
+- `/cwl_forecast` для матрицы фактических составов текущей CWL war и
+  потенциальной силы всех оставшихся соперников по раундам.
+- `/cwl_forecast_schedule` с fresh admin checks, кнопочным вводом неизвестных
+  пар, back/cancel/confirm/edit и глобальным переиспользованием расписания.
+- SQLite migration 8 с отдельными forecast cooldown, schedules, rounds и
+  временными sessions; upgrade с schema 7 и идемпотентный migration runner.
+- Persisted cooldown `/cwl_forecast`, per-chat singleflight и общий war cache
+  одного запуска с существующим `CWL_WAR_CONCURRENCY_LIMIT`.
+- Строгий League Group/CWL war domain: fingerprint, выбор current war,
+  actual/predicted rosters и блокировка неполного или конфликтного schedule.
+- Startup-валидация Telegram emoji catalog, UTF-16 custom emoji entities и
+  ровно один plain fallback только после HTTP 400.
+- Конфигурация `CWL_FORECAST_COOLDOWN_SECONDS` и
+  `CWL_FORECAST_SCHEDULE_TTL_SECONDS`.
+
+### Changed
+
+- README, SSOT, архитектурная документация и production runbook описывают
+  forecast data ownership, ручное расписание, conflict recovery и migration 8.
+
 ## [1.0.0] - 2026-08-02
 
 ### Added
@@ -127,4 +151,5 @@
 - Неиспользуемые report helper-функции.
 - Монолитный `repositories.py` в пользу пакета `repositories/`.
 
+[1.1.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/releases/tag/v1.0.0
