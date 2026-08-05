@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "emojis": {
+    "clan_war": {
+      "custom_emoji_id": "5852479659102442931",
+      "fallback": "🔰",
+      "fallback_text": "⚔️",
+      "description": "Война кланов"
+    },
+    "defense_shield": {
+      "custom_emoji_id": "5201936828386528976",
+      "fallback": "🛡️",
+      "fallback_text": "⭕️",
+      "description": "Обороняющийся щит"
+    },
+    "townhall_1": {
+      "custom_emoji_id": "5217784029348142914",
+      "fallback": "🏠",
+      "fallback_text": "1",
+      "description": "Иконка 1 ратуши"
+    },
+    "townhall_10": {
+      "custom_emoji_id": "5217572454964172610",
+      "fallback": "🏠",
+      "fallback_text": "10",
+      "description": "Иконка 10 ратуши"
+    },
+    "townhall_11": {
+      "custom_emoji_id": "5215510131927720728",
+      "fallback": "🏠",
+      "fallback_text": "11",
+      "description": "Иконка 11 ратуши"
+    },
+    "townhall_12": {
+      "custom_emoji_id": "5215186128184845446",
+      "fallback": "🏠",
+      "fallback_text": "12",
+      "description": "Иконка 12 ратуши"
+    },
+    "townhall_13": {
+      "custom_emoji_id": "5215451591523477031",
+      "fallback": "🏠",
+      "fallback_text": "13",
+      "description": "Иконка 13 ратуши"
+    },
+    "townhall_14": {
+      "custom_emoji_id": "5217522298336090137",
+      "fallback": "🏠",
+      "fallback_text": "14",
+      "description": "Иконка 14 ратуши"
+    },
+    "townhall_15": {
+      "custom_emoji_id": "5217703790769116546",
+      "fallback": "🏠",
+      "fallback_text": "15",
+      "description": "Иконка 15 ратуши"
+    },
+    "townhall_16": {
+      "custom_emoji_id": "5217821159340413054",
+      "fallback": "🏠",
+      "fallback_text": "16",
+      "description": "Иконка 16 ратуши"
+    },
+    "townhall_17": {
+      "custom_emoji_id": "5217906959902088888",
+      "fallback": "🏠",
+      "fallback_text": "17",
+      "description": "Иконка 17 ратуши"
+    },
+    "townhall_18": {
+      "custom_emoji_id": "5215364816004226003",
+      "fallback": "🏠",
+      "fallback_text": "18",
+      "description": "Иконка 18 ратуши"
+    },
+    "townhall_2": {
+      "custom_emoji_id": "5217572493618878876",
+      "fallback": "🏠",
+      "fallback_text": "2",
+      "description": "Иконка 2 ратуши"
+    },
+    "townhall_3": {
+      "custom_emoji_id": "5217636754919559423",
+      "fallback": "🏠",
+      "fallback_text": "3",
+      "description": "Иконка 3 ратуши"
+    },
+    "townhall_4": {
+      "custom_emoji_id": "5217691099140753538",
+      "fallback": "🏠",
+      "fallback_text": "4",
+      "description": "Иконка 4 ратуши"
+    },
+    "townhall_5": {
+      "custom_emoji_id": "5217801290821704913",
+      "fallback": "🏠",
+      "fallback_text": "5",
+      "description": "Иконка 5 ратуши"
+    },
+    "townhall_6": {
+      "custom_emoji_id": "5217901702862116140",
+      "fallback": "🏠",
+      "fallback_text": "6",
+      "description": "Иконка 6 ратуши"
+    },
+    "townhall_7": {
+      "custom_emoji_id": "5217622152030753062",
+      "fallback": "🏠",
+      "fallback_text": "7",
+      "description": "Иконка 7 ратуши"
+    },
+    "townhall_8": {
+      "custom_emoji_id": "5217610083172652101",
+      "fallback": "🏠",
+      "fallback_text": "8",
+      "description": "Иконка 8 ратуши"
+    },
+    "townhall_9": {
+      "custom_emoji_id": "5217529475226441576",
+      "fallback": "🏠",
+      "fallback_text": "9",
+      "description": "Иконка 9 ратуши"
+    }
+  }
+}
