@@ -27,7 +27,8 @@ NOW = "2026-08-05T12:00:00+00:00"
 
 
 def _member(tag: str, th: int, position: int | None = None) -> dict[str, object]:
-    result: dict[str, object] = {"tag": tag, "name": tag, "townHallLevel": th}
+    town_hall_key = "townhallLevel" if position is not None else "townHallLevel"
+    result: dict[str, object] = {"tag": tag, "name": tag, town_hall_key: th}
     if position is not None:
         result["mapPosition"] = position
     return result

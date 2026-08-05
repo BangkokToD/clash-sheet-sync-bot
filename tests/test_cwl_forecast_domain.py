@@ -31,7 +31,7 @@ def _fixture() -> dict[str, object]:
 
 
 def _member(tag: str, th: int, position: int) -> dict[str, object]:
-    return {"tag": tag, "name": tag, "townHallLevel": th, "mapPosition": position}
+    return {"tag": tag, "name": tag, "townhallLevel": th, "mapPosition": position}
 
 
 def _war(
@@ -111,6 +111,22 @@ def test_league_parser_rejects_invalid_member_fields(mutation: object) -> None:
 
     with pytest.raises(CwlForecastDataError):
         parse_league_group(data)
+
+
+def test_cwl_war_parser_uses_lowercase_hall_api_field() -> None:
+    data = _war(state="inWar")
+    war = parse_cwl_war(data)
+
+    assert tuple(member.town_hall_level for member in war.clan.members) == (16, 17)
+
+    clan = data["clan"]
+    assert isinstance(clan, dict)
+    members = clan["members"]
+    assert isinstance(members, list) and isinstance(members[0], dict)
+    members[0]["townHallLevel"] = members[0].pop("townhallLevel")
+
+    with pytest.raises(CwlForecastDataError, match="townhallLevel"):
+        parse_cwl_war(data)
 
 
 def test_select_inwar_over_preparation_and_home_away_independent() -> None:

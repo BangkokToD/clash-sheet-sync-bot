@@ -57,7 +57,11 @@ def parse_league_group(data: Mapping[str, object]) -> LeagueGroup:
                 LeagueMember(
                     tag=member_tag,
                     name=_string(member, "name", f"league member {member_tag}"),
-                    town_hall_level=_town_hall(member, f"league member {member_tag}"),
+                    town_hall_level=_town_hall(
+                        member,
+                        "townHallLevel",
+                        f"league member {member_tag}",
+                    ),
                 )
             )
         clan_level = _integer(item, "clanLevel", f"league group clan {tag}")
@@ -279,7 +283,11 @@ def _war_clan(data: Mapping[str, object], context: str) -> WarClan:
             WarMember(
                 tag=member_tag,
                 name=_string(item, "name", f"{context} member {member_tag}"),
-                town_hall_level=_town_hall(item, f"{context} member {member_tag}"),
+                town_hall_level=_town_hall(
+                    item,
+                    "townhallLevel",
+                    f"{context} member {member_tag}",
+                ),
                 map_position=position,
             )
         )
@@ -326,10 +334,10 @@ def _integer(data: Mapping[str, object], key: str, context: str) -> int:
     return value
 
 
-def _town_hall(data: Mapping[str, object], context: str) -> int:
-    value = _integer(data, "townHallLevel", context)
+def _town_hall(data: Mapping[str, object], key: str, context: str) -> int:
+    value = _integer(data, key, context)
     if not 1 <= value <= 18:
-        raise CwlForecastDataError(f"{context}: townHallLevel должен быть от 1 до 18.")
+        raise CwlForecastDataError(f"{context}: {key} должен быть от 1 до 18.")
     return value
 
 
