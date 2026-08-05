@@ -1,0 +1,945 @@
+{
+  "state": "inWar",
+  "season": "2026-08-01",
+  "clans": [
+    {
+      "tag": "#CLAN001",
+      "name": "Test Clan 001",
+      "clanLevel": 22,
+      "members": [
+        {
+          "tag": "#PLAYER001",
+          "name": "Test Player 001",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER002",
+          "name": "Test Player 002",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER003",
+          "name": "Test Player 003",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER004",
+          "name": "Test Player 004",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER005",
+          "name": "Test Player 005",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER006",
+          "name": "Test Player 006",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER007",
+          "name": "Test Player 007",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER008",
+          "name": "Test Player 008",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER009",
+          "name": "Test Player 009",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER010",
+          "name": "Test Player 010",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER011",
+          "name": "Test Player 011",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER012",
+          "name": "Test Player 012",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER013",
+          "name": "Test Player 013",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER014",
+          "name": "Test Player 014",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER015",
+          "name": "Test Player 015",
+          "townHallLevel": 14
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN002",
+      "name": "Test Clan 002",
+      "clanLevel": 13,
+      "members": [
+        {
+          "tag": "#PLAYER016",
+          "name": "Test Player 016",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER017",
+          "name": "Test Player 017",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER018",
+          "name": "Test Player 018",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER019",
+          "name": "Test Player 019",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER020",
+          "name": "Test Player 020",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER021",
+          "name": "Test Player 021",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER022",
+          "name": "Test Player 022",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER023",
+          "name": "Test Player 023",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER024",
+          "name": "Test Player 024",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER025",
+          "name": "Test Player 025",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER026",
+          "name": "Test Player 026",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER027",
+          "name": "Test Player 027",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER028",
+          "name": "Test Player 028",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER029",
+          "name": "Test Player 029",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER030",
+          "name": "Test Player 030",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER031",
+          "name": "Test Player 031",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER032",
+          "name": "Test Player 032",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER033",
+          "name": "Test Player 033",
+          "townHallLevel": 16
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN003",
+      "name": "Test Clan 003",
+      "clanLevel": 19,
+      "members": [
+        {
+          "tag": "#PLAYER034",
+          "name": "Test Player 034",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER035",
+          "name": "Test Player 035",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER036",
+          "name": "Test Player 036",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER037",
+          "name": "Test Player 037",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER038",
+          "name": "Test Player 038",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER039",
+          "name": "Test Player 039",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER040",
+          "name": "Test Player 040",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER041",
+          "name": "Test Player 041",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER042",
+          "name": "Test Player 042",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER043",
+          "name": "Test Player 043",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER044",
+          "name": "Test Player 044",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER045",
+          "name": "Test Player 045",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER046",
+          "name": "Test Player 046",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER047",
+          "name": "Test Player 047",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER048",
+          "name": "Test Player 048",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER049",
+          "name": "Test Player 049",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER050",
+          "name": "Test Player 050",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER051",
+          "name": "Test Player 051",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER052",
+          "name": "Test Player 052",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER053",
+          "name": "Test Player 053",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER054",
+          "name": "Test Player 054",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER055",
+          "name": "Test Player 055",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER056",
+          "name": "Test Player 056",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER057",
+          "name": "Test Player 057",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER058",
+          "name": "Test Player 058",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER059",
+          "name": "Test Player 059",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER060",
+          "name": "Test Player 060",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER061",
+          "name": "Test Player 061",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER062",
+          "name": "Test Player 062",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER063",
+          "name": "Test Player 063",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER064",
+          "name": "Test Player 064",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER065",
+          "name": "Test Player 065",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER066",
+          "name": "Test Player 066",
+          "townHallLevel": 12
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN004",
+      "name": "Test Clan 004",
+      "clanLevel": 19,
+      "members": [
+        {
+          "tag": "#PLAYER067",
+          "name": "Test Player 067",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER068",
+          "name": "Test Player 068",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER069",
+          "name": "Test Player 069",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER070",
+          "name": "Test Player 070",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER071",
+          "name": "Test Player 071",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER072",
+          "name": "Test Player 072",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER073",
+          "name": "Test Player 073",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER074",
+          "name": "Test Player 074",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER075",
+          "name": "Test Player 075",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER076",
+          "name": "Test Player 076",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER077",
+          "name": "Test Player 077",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER078",
+          "name": "Test Player 078",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER079",
+          "name": "Test Player 079",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER080",
+          "name": "Test Player 080",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER081",
+          "name": "Test Player 081",
+          "townHallLevel": 13
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN005",
+      "name": "Test Clan 005",
+      "clanLevel": 12,
+      "members": [
+        {
+          "tag": "#PLAYER082",
+          "name": "Test Player 082",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER083",
+          "name": "Test Player 083",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER084",
+          "name": "Test Player 084",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER085",
+          "name": "Test Player 085",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER086",
+          "name": "Test Player 086",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER087",
+          "name": "Test Player 087",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER088",
+          "name": "Test Player 088",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER089",
+          "name": "Test Player 089",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER090",
+          "name": "Test Player 090",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER091",
+          "name": "Test Player 091",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER092",
+          "name": "Test Player 092",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER093",
+          "name": "Test Player 093",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER094",
+          "name": "Test Player 094",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER095",
+          "name": "Test Player 095",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER096",
+          "name": "Test Player 096",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER097",
+          "name": "Test Player 097",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER098",
+          "name": "Test Player 098",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER099",
+          "name": "Test Player 099",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER100",
+          "name": "Test Player 100",
+          "townHallLevel": 16
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN006",
+      "name": "Test Clan 006",
+      "clanLevel": 20,
+      "members": [
+        {
+          "tag": "#PLAYER101",
+          "name": "Test Player 101",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER102",
+          "name": "Test Player 102",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER103",
+          "name": "Test Player 103",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER104",
+          "name": "Test Player 104",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER105",
+          "name": "Test Player 105",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER106",
+          "name": "Test Player 106",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER107",
+          "name": "Test Player 107",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER108",
+          "name": "Test Player 108",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER109",
+          "name": "Test Player 109",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER110",
+          "name": "Test Player 110",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER111",
+          "name": "Test Player 111",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER112",
+          "name": "Test Player 112",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER113",
+          "name": "Test Player 113",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER114",
+          "name": "Test Player 114",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER115",
+          "name": "Test Player 115",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER116",
+          "name": "Test Player 116",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER117",
+          "name": "Test Player 117",
+          "townHallLevel": 10
+        },
+        {
+          "tag": "#PLAYER118",
+          "name": "Test Player 118",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER119",
+          "name": "Test Player 119",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER120",
+          "name": "Test Player 120",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER121",
+          "name": "Test Player 121",
+          "townHallLevel": 18
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN007",
+      "name": "Test Clan 007",
+      "clanLevel": 9,
+      "members": [
+        {
+          "tag": "#PLAYER122",
+          "name": "Test Player 122",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER123",
+          "name": "Test Player 123",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER124",
+          "name": "Test Player 124",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER125",
+          "name": "Test Player 125",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER126",
+          "name": "Test Player 126",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER127",
+          "name": "Test Player 127",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER128",
+          "name": "Test Player 128",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER129",
+          "name": "Test Player 129",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER130",
+          "name": "Test Player 130",
+          "townHallLevel": 18
+        },
+        {
+          "tag": "#PLAYER131",
+          "name": "Test Player 131",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER132",
+          "name": "Test Player 132",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER133",
+          "name": "Test Player 133",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER134",
+          "name": "Test Player 134",
+          "townHallLevel": 11
+        },
+        {
+          "tag": "#PLAYER135",
+          "name": "Test Player 135",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER136",
+          "name": "Test Player 136",
+          "townHallLevel": 10
+        },
+        {
+          "tag": "#PLAYER137",
+          "name": "Test Player 137",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER138",
+          "name": "Test Player 138",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER139",
+          "name": "Test Player 139",
+          "townHallLevel": 10
+        },
+        {
+          "tag": "#PLAYER140",
+          "name": "Test Player 140",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER141",
+          "name": "Test Player 141",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER142",
+          "name": "Test Player 142",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER143",
+          "name": "Test Player 143",
+          "townHallLevel": 12
+        },
+        {
+          "tag": "#PLAYER144",
+          "name": "Test Player 144",
+          "townHallLevel": 10
+        },
+        {
+          "tag": "#PLAYER145",
+          "name": "Test Player 145",
+          "townHallLevel": 17
+        },
+        {
+          "tag": "#PLAYER146",
+          "name": "Test Player 146",
+          "townHallLevel": 11
+        }
+      ]
+    },
+    {
+      "tag": "#CLAN008",
+      "name": "Test Clan 008",
+      "clanLevel": 17,
+      "members": [
+        {
+          "tag": "#PLAYER147",
+          "name": "Test Player 147",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER148",
+          "name": "Test Player 148",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER149",
+          "name": "Test Player 149",
+          "townHallLevel": 16
+        },
+        {
+          "tag": "#PLAYER150",
+          "name": "Test Player 150",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER151",
+          "name": "Test Player 151",
+          "townHallLevel": 10
+        },
+        {
+          "tag": "#PLAYER152",
+          "name": "Test Player 152",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER153",
+          "name": "Test Player 153",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER154",
+          "name": "Test Player 154",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER155",
+          "name": "Test Player 155",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER156",
+          "name": "Test Player 156",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER157",
+          "name": "Test Player 157",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER158",
+          "name": "Test Player 158",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER159",
+          "name": "Test Player 159",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER160",
+          "name": "Test Player 160",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER161",
+          "name": "Test Player 161",
+          "townHallLevel": 13
+        },
+        {
+          "tag": "#PLAYER162",
+          "name": "Test Player 162",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER163",
+          "name": "Test Player 163",
+          "townHallLevel": 15
+        },
+        {
+          "tag": "#PLAYER164",
+          "name": "Test Player 164",
+          "townHallLevel": 14
+        },
+        {
+          "tag": "#PLAYER165",
+          "name": "Test Player 165",
+          "townHallLevel": 14
+        }
+      ]
+    }
+  ],
+  "rounds": [
+    {
+      "warTags": [
+        "#WAR001",
+        "#WAR002",
+        "#WAR003",
+        "#WAR004"
+      ]
+    },
+    {
+      "warTags": [
+        "#WAR005",
+        "#WAR006",
+        "#WAR007",
+        "#WAR008"
+      ]
+    },
+    {
+      "warTags": [
+        "#WAR009",
+        "#WAR010",
+        "#WAR011",
+        "#WAR012"
+      ]
+    },
+    {
+      "warTags": [
+        "#WAR013",
+        "#WAR014",
+        "#WAR015",
+        "#WAR016"
+      ]
+    },
+    {
+      "warTags": [
+        "#0",
+        "#0",
+        "#0",
+        "#0"
+      ]
+    },
+    {
+      "warTags": [
+        "#0",
+        "#0",
+        "#0",
+        "#0"
+      ]
+    },
+    {
+      "warTags": [
+        "#0",
+        "#0",
+        "#0",
+        "#0"
+      ]
+    }
+  ]
+}
