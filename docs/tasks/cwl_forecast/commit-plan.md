@@ -143,6 +143,7 @@ Scope:
 - последний раунд без schedule;
 - incomplete/duplicate/foreign/conflicting schedule;
 - header без `|`, ровно два пробела;
+- одна пустая строка между clan title и header;
 - body только `|`, без пробелов;
 - суммы TH колонок через два пробела;
 - Unicode keycap rounds;

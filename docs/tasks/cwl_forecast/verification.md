@@ -129,6 +129,7 @@ git status --short
 ### Entities
 
 - exact text и entity payload;
+- одна пустая строка отделяет название клана от матрицы;
 - offsets проверены в UTF-16, не Python code points;
 - Cyrillic, `🏠`, custom fallback и keycap sequence не сдвигают следующие entity;
 - entity length покрывает ровно fallback token;

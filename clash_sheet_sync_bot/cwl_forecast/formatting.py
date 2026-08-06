@@ -26,7 +26,7 @@ def build_forecast_message(
         raise ValueError("Все roster forecast matrix должны иметь одинаковую ненулевую высоту.")
     custom = TelegramTextBuilder()
     plain_parts: list[str] = []
-    title = f"{clan_name} | {normalize_tag(clan_tag)}\n"
+    title = f"{clan_name} | {normalize_tag(clan_tag)}\n\n"
     custom.append(title)
     plain_parts.append(title)
     header_keys = ("defense_shield", "clan_war")
