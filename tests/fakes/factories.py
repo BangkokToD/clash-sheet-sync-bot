@@ -101,6 +101,8 @@ def make_app_config(
         sync_cooldown_seconds=60,
         max_concurrent_syncs=3,
         cwl_war_concurrency_limit=5,
+        cwl_forecast_cooldown_seconds=60,
+        cwl_forecast_schedule_ttl_seconds=600,
         raid_archive_sheets_limit=raid_archive_sheets_limit,
         raid_attacks_target=raid_attacks_target,
         raid_normal_district_attack_norm=raid_normal_district_attack_norm,

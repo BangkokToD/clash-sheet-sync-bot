@@ -34,6 +34,14 @@ from .chats import (
 from .clans import ClanSettingsRepository
 from .columns import ColumnProfileRepository
 from .composition_state import CompositionPlayerState, CompositionPlayerStateRepository
+from .cwl_forecast import (
+    CwlForecastRepository,
+    CwlForecastRound,
+    CwlForecastSchedule,
+    CwlForecastScheduleKey,
+    CwlForecastSession,
+    CwlForecastSessionConflictError,
+)
 from .cwl_state import CwlRowState, CwlRowStateRepository
 from .raid_state import (
     RaidDataError,
@@ -65,6 +73,12 @@ __all__ = [
     "ColumnProfileRepository",
     "CompositionPlayerState",
     "CompositionPlayerStateRepository",
+    "CwlForecastRepository",
+    "CwlForecastRound",
+    "CwlForecastSchedule",
+    "CwlForecastScheduleKey",
+    "CwlForecastSession",
+    "CwlForecastSessionConflictError",
     "CwlRowState",
     "CwlRowStateRepository",
     "KnownAdminChat",

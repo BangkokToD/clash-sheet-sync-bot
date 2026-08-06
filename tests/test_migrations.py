@@ -121,6 +121,10 @@ async def test_apply_migrations_creates_required_tables(
         "bot_settings",
         "support_setup_tokens",
         "broadcasts",
+        "cwl_forecast_chat_state",
+        "cwl_forecast_schedules",
+        "cwl_forecast_rounds",
+        "cwl_forecast_schedule_sessions",
     }.issubset(table_names)
 
     cursor = await migrated_connection.execute("PRAGMA table_info(sheet_bindings)")
@@ -164,6 +168,35 @@ async def test_apply_migrations_records_current_schema_version(
 
     assert row is not None
     assert row["version"] == SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_8_upgrades_version_7_and_preserves_existing_chat(tmp_path: Path) -> None:
+    """Проверяет upgrade с schema 7 без потери runtime-state."""
+
+    database = Database(tmp_path / "version-7.db")
+    async with database.connect() as connection:
+        await connection.executescript(SCHEMA_SQL)
+        for version in range(1, 8):
+            if version > 1:
+                await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+            await connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (version,)
+            )
+        await _insert_chat(connection, chat_id=-8001)
+        await connection.commit()
+
+        await apply_migrations(connection)
+
+        assert (
+            await connection.execute_fetchall(
+                "SELECT title FROM telegram_chats WHERE chat_id = -8001"
+            )
+        )[0][0] == "Test group"
+        versions = await connection.execute_fetchall(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+        assert [row[0] for row in versions] == list(range(1, 9))
 
 
 @pytest.mark.asyncio
@@ -214,7 +247,7 @@ async def test_migration_6_repairs_claimed_version_5_without_superadmin_tables(
         )
         assert (await cursor.fetchone())["private_chat_id"] == 1001
         cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        assert [row["version"] for row in await cursor.fetchall()] == [1, 2, 3, 4, 5, 6, 7]
+        assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 9))
 
 
 @pytest.mark.asyncio
@@ -315,7 +348,7 @@ async def test_migration_7_updates_only_legacy_raid_presentation(tmp_path: Path)
         assert profiles[(custom_order_chat_id, "player_tag")][1] == 40
 
         cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 8))
+        assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 9))
 
 
 @pytest.mark.asyncio

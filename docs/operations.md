@@ -37,6 +37,9 @@ Admin-схема закреплена repair-миграцией version 6: он�
 недостающие таблицы даже если version 5 уже присутствовала в старой базе.
 Migration 7 точечно восстанавливает прежние стандартные raid-заголовки и порядок,
 не затрагивая пользовательские названия и ручной порядок колонок.
+Migration 8 добавляет таблицы forecast cooldown, глобальных schedules/rounds и
+временных schedule sessions. Перед первым запуском версии с migration 8 нужен
+WAL-consistent backup SQLite по разделу 5.
 
 ## 2. Package layout on disk
 
@@ -718,3 +721,74 @@ sudo systemctl status clash-sheet-sync-bot --no-pager
 7. Проверить `/status` в группе.
 8. Запустить диагностику таблицы, если были Google Sheets ошибки.
 9. Повторить `/sync`.
+
+## 20. Эксплуатация прогноза ЛВК
+
+Настройки процесса:
+
+```env
+CWL_FORECAST_COOLDOWN_SECONDS=60
+CWL_FORECAST_SCHEDULE_TTL_SECONDS=600
+```
+
+`CWL_WAR_CONCURRENCY_LIMIT` одновременно ограничивает загрузку CWL wars для
+sync и прогноза. `DEV_MODE=True` отключает только последовательный forecast
+cooldown; защита одновременного запуска остаётся.
+
+Порядок первичной настройки:
+
+1. Администратор подключённой группы запускает `/cwl_forecast_schedule`.
+2. При нескольких active CWL clans выбирает наш клан.
+3. Для каждого раунда `#0` выбирает строку `name · ур. N · #TAG`.
+4. Проверяет полный список, использует при необходимости `Назад` или `Отмена`.
+5. Нажимает `Подтвердить`.
+6. Любой участник группы запускает `/cwl_forecast`.
+
+Публичный API не раскрывает будущие `warTag` и не гарантирует, что порядок
+`clans` является расписанием. Поэтому не нужно присылать боту скриншоты:
+изображения, OCR и неофициальные API не поддерживаются.
+
+Schedule глобален для `season + group_fingerprint + clan_tag` и доступен
+другой подключённой Telegram-группе с той же League Group. Audit metadata
+содержит creator user ID, source chat и timestamps; названия и уровни кланов не
+сохраняются как истина.
+
+### 20.1. Missing или conflicting schedule
+
+При сообщении о незаполненном расписании администратор выполняет
+`/cwl_forecast_schedule` и завершает все неизвестные раунды. При конфликте с
+появившейся реальной войной нужно запустить ту же команду повторно: API-known
+раунды станут заблокированными, а подтвердить можно только согласованный полный
+schedule. Не исправляйте строки SQLite вручную.
+
+Активную зависшую session обычно достаточно отменить кнопкой. После
+`CWL_FORECAST_SCHEDULE_TTL_SECONDS` новая команда транзакционно заменит
+истёкшую session.
+
+### 20.2. Emoji fallback и диагностика
+
+Catalog `resources/telegram_emoji_catalog.json` валидируется при старте. Ошибка
+schema/ключа/ID останавливает приложение и видна в journal. Не редактируйте
+catalog без проверки:
+
+```bash
+python -m json.tool resources/telegram_emoji_catalog.json >/dev/null
+```
+
+HTTP 400 при отправке premium emoji запускает ровно один plain fallback.
+Сетевые ошибки, 401, 403, 429 и 5xx не повторяются. Доступные forecast-логи
+содержат chat/clan там, где они известны, и sanitized exception, но не полный
+API payload.
+
+### 20.3. Проверка migration 8
+
+После штатного backup и запуска новой версии:
+
+```bash
+sqlite3 bot.db "SELECT version FROM schema_migrations ORDER BY version;"
+sqlite3 bot.db "SELECT name FROM sqlite_master WHERE name LIKE 'cwl_forecast_%';"
+```
+
+Ожидается version 8 и четыре таблицы `cwl_forecast_*`. Миграцию к production
+нельзя применять из development-задачи; она выполняется только отдельным
+операционным обновлением после backup.

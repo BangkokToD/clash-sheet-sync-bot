@@ -50,6 +50,8 @@ class AppConfig:
         sync_cooldown_seconds: Cooldown `/sync` для одного чата.
         max_concurrent_syncs: Глобальный лимит одновременных sync.
         cwl_war_concurrency_limit: Лимит конкурентных запросов CWL wars.
+        cwl_forecast_cooldown_seconds: Cooldown команды прогноза ЛВК.
+        cwl_forecast_schedule_ttl_seconds: TTL сессии ввода расписания ЛВК.
         raid_archive_sheets_limit: Максимум архивных рейдовых листов.
         raid_attacks_target: Целевое количество атак рейдового уикенда.
         raid_normal_district_attack_norm: Норма атак обычного района.
@@ -74,6 +76,8 @@ class AppConfig:
     sync_cooldown_seconds: int
     max_concurrent_syncs: int
     cwl_war_concurrency_limit: int
+    cwl_forecast_cooldown_seconds: int
+    cwl_forecast_schedule_ttl_seconds: int
     raid_archive_sheets_limit: int
     raid_attacks_target: int
     raid_normal_district_attack_norm: int

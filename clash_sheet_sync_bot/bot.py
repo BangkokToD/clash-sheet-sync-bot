@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
@@ -12,6 +13,11 @@ import httpx
 from clash_sheet_sync_bot import __version__
 from clash_sheet_sync_bot.admin import SuperadminFlow
 from clash_sheet_sync_bot.config import ConfigError, load_config
+from clash_sheet_sync_bot.cwl_forecast.forecast_flow import CwlForecastFlow
+from clash_sheet_sync_bot.cwl_forecast.schedule_flow import (
+    CALLBACK_PREFIX as CWL_FORECAST_CALLBACK_PREFIX,
+    CwlForecastScheduleFlow,
+)
 from clash_sheet_sync_bot.migrations import apply_migrations
 from clash_sheet_sync_bot.models import AppConfig
 from clash_sheet_sync_bot.setup.flow import SetupFlow, TelegramChatInfo
@@ -23,6 +29,11 @@ from clash_sheet_sync_bot.telegram.client import (
     JsonObject,
     TelegramApiError,
     TelegramClient,
+)
+from clash_sheet_sync_bot.telegram.emoji_catalog import (
+    EmojiCatalogError,
+    TelegramEmojiCatalog,
+    load_telegram_emoji_catalog,
 )
 
 logging.basicConfig(
@@ -36,6 +47,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 POLLING_ERROR_SLEEP_SECONDS: Final = 3
+EMOJI_CATALOG_PATH: Final = (
+    Path(__file__).resolve().parent.parent / "resources" / "telegram_emoji_catalog.json"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,11 +82,13 @@ class BotApp:
         telegram: TelegramClient,
         database: Database,
         bot_username: str | None,
+        emoji_catalog: TelegramEmojiCatalog | None = None,
     ) -> None:
         self._config = config
         self._telegram = telegram
         self._database = database
         self._bot_username = bot_username
+        self._emoji_catalog = emoji_catalog or load_telegram_emoji_catalog(EMOJI_CATALOG_PATH)
         self._update_tasks: set[asyncio.Task[None]] = set()
 
     async def run_polling(self) -> None:
@@ -229,6 +245,21 @@ class BotApp:
             await flow.accept_transfer(chat=chat, user_id=user_id, raw_token=command.args)
             return
 
+        if command.name == "/cwl_forecast_schedule":
+            await self._cwl_forecast_schedule_flow(connection).handle_command(
+                chat_id=chat.chat_id,
+                chat_type=chat.type,
+                user_id=user_id,
+            )
+            return
+
+        if command.name == "/cwl_forecast":
+            await self._cwl_forecast_flow(connection).handle_command(
+                chat_id=chat.chat_id,
+                chat_type=chat.type,
+            )
+            return
+
         if command.name == "/sync":
             await self._sync_service(connection).handle_sync_command(
                 chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
@@ -271,6 +302,15 @@ class BotApp:
         admin_flow = self._superadmin_flow(connection)
         if chat.type == "private":
             await admin_flow.observe_private_user(user_id=user_id, private_chat_id=chat.chat_id)
+        if data.startswith(CWL_FORECAST_CALLBACK_PREFIX):
+            await self._cwl_forecast_schedule_flow(connection).handle_callback(
+                callback_data=data,
+                callback_query_id=callback_query_id,
+                chat_id=chat.chat_id,
+                message_id=message_id,
+                user_id=user_id,
+            )
+            return
         if await admin_flow.handle_callback(
             callback_data=data,
             callback_query_id=callback_query_id,
@@ -320,6 +360,31 @@ class BotApp:
             config=self._config,
             telegram=self._telegram,
             connection=connection,
+        )
+
+    def _cwl_forecast_schedule_flow(self, connection: Any) -> CwlForecastScheduleFlow:
+        """Создаёт flow ручного расписания ЛВК для текущего update."""
+
+        access = TelegramAccessService(
+            telegram=self._telegram,
+            connection=connection,
+            admin_cache_ttl_seconds=self._config.admin_cache_ttl_seconds,
+        )
+        return CwlForecastScheduleFlow(
+            config=self._config,
+            telegram=self._telegram,
+            connection=connection,
+            access=access,
+        )
+
+    def _cwl_forecast_flow(self, connection: Any) -> CwlForecastFlow:
+        """Создаёт пользовательский flow прогноза ЛВК для текущего update."""
+
+        return CwlForecastFlow(
+            config=self._config,
+            telegram=self._telegram,
+            connection=connection,
+            catalog=self._emoji_catalog,
         )
 
     def _superadmin_flow(self, connection: Any) -> SuperadminFlow:
@@ -439,6 +504,12 @@ async def async_main() -> int:
         logger.error("bot startup failed: %s", exc)
         return 1
 
+    try:
+        emoji_catalog = load_telegram_emoji_catalog(EMOJI_CATALOG_PATH)
+    except EmojiCatalogError as exc:
+        logger.error("bot startup failed: %s", exc)
+        return 1
+
     database = Database(config.db_path)
     timeout = httpx.Timeout(POLLING_TIMEOUT_SECONDS + 10, connect=10.0)
 
@@ -455,6 +526,7 @@ async def async_main() -> int:
                 telegram=telegram,
                 database=database,
                 bot_username=identity.username,
+                emoji_catalog=emoji_catalog,
             )
             await app.run_polling()
     except (StorageError, TelegramApiError) as exc:

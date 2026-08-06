@@ -97,6 +97,11 @@ python bot.py
 | `clash_sheet_sync_bot.sync.cwl` | CWL import/plan/write logic |
 | `clash_sheet_sync_bot.sync.raids` | Raid Weekend import, calculation, rotation and write logic |
 | `clash_sheet_sync_bot.sync.reports` | Telegram HTML reports |
+| `clash_sheet_sync_bot.cwl_forecast.domain` | Strict League Group/war parsing, pairs, rosters и schedule validation |
+| `clash_sheet_sync_bot.cwl_forecast.service` | Прогноз одного клана и общий war cache запуска |
+| `clash_sheet_sync_bot.cwl_forecast.forecast_flow` | `/cwl_forecast`, cooldown, singleflight и delivery policy |
+| `clash_sheet_sync_bot.cwl_forecast.schedule_flow` | Fresh-admin кнопочный ввод глобального расписания |
+| `clash_sheet_sync_bot.telegram.emoji_catalog` | Startup validation custom emoji catalog |
 | `clash_sheet_sync_bot.repositories.*` | Focused SQLite repositories |
 
 ## 4. BotApp lifecycle
@@ -151,6 +156,8 @@ Telegram response
 | `/cancel` | сброс setup-state пользователя |
 | `/sync` | staged sync pipeline |
 | `/status` | последний sync summary |
+| `/cwl_forecast` | прогноз текущего и всех оставшихся раундов ЛВК |
+| `/cwl_forecast_schedule` | fresh-admin flow ручного расписания будущих пар |
 | callback query | setup/settings navigation |
 | private text | продолжение setup-flow состояния |
 
@@ -608,3 +615,42 @@ Transfer flow переносит активную таблицу и runtime stat
 - Raid-строки строятся только из `members` выбранного сезона.
 - Удаляться могут только bot-owned raid-архивы из SQLite registry.
 - Telegram delivery failure после успешного SQLite commit не откатывает success.
+
+## 22. Прогноз ЛВК
+
+Прогноз является отдельным use case и не входит в Sheet-oriented
+`sync/cwl.py`. Для каждого active tracked clan flow получает League Group,
+загружает реальные `warTag` с общим на запуск cache и выбирает `inWar`, иначе
+ближайшую `preparation` по API-времени, номеру раунда и тегу войны.
+
+`teamSize` выбранной войны задаёт высоту матрицы. Все составы сортируются
+по уровню ратуши по убыванию, затем по player tag. После матрицы идёт
+строка сумм уровней ратуш по колонкам. Для неизвестных будущих пар нужен
+полный schedule. Частичная матрица при missing/conflicting schedule не отправляется.
+
+Форматтер одновременно строит fallback-текст и custom emoji entities с
+offsets/lengths в UTF-16 code units. Catalog
+`resources/telegram_emoji_catalog.json` загружается и валидируется один раз в
+composition root. Только HTTP 400 custom-emoji отправки допускает один plain
+retry.
+
+Cooldown хранится в `cwl_forecast_chat_state` и записывается до CoC API.
+Process-local chat lock остаётся включённым и при `DEV_MODE=True`; dev mode
+отключает только временную проверку cooldown.
+
+## 23. Глобальное расписание ЛВК
+
+Ключ schedule: `season + group_fingerprint + clan_tag`, где fingerprint —
+SHA-256 отсортированных нормализованных тегов League Group. Поэтому schedule
+доступен из другого подключённого Telegram chat, но не переиспользуется для
+другого сезона или состава группы.
+
+API-known раунды восстанавливаются из реальных войн, блокируются в UI и
+сохраняются с source `api`. Раунды `#0` выбирает администратор; display name и
+clan level всегда берутся из свежего API. Каждый command/callback выполняет
+fresh admin check и заново сверяет season/fingerprint. UNIQUE global key
+допускает одну активную session; истёкшая session заменяется транзакционно.
+Confirm атомарно заменяет все round rows и удаляет session.
+
+Transfer flow не переносит и не удаляет global schedules. Forecast cooldown
+остаётся chat-local состоянием.

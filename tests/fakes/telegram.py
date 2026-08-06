@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from clash_sheet_sync_bot.telegram.access import AdminCheckResult
-from clash_sheet_sync_bot.telegram.client import TelegramInviteLink, TelegramMessageNotModifiedError
+from clash_sheet_sync_bot.telegram.client import (
+    TelegramInviteLink,
+    TelegramMessageEntity,
+    TelegramMessageNotModifiedError,
+)
 
 
 @dataclass(slots=True)
@@ -14,6 +18,7 @@ class FakeTelegram:
     """Fake Telegram client для setup-flow tests."""
 
     send_error: Exception | None = None
+    send_errors: list[Exception | None] = field(default_factory=list)
     raise_not_modified_on_edit: bool = False
     sent_messages: list[dict[str, Any]] = field(default_factory=list)
     edit_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -30,6 +35,7 @@ class FakeTelegram:
         *,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
+        entities: tuple[TelegramMessageEntity, ...] | None = None,
     ) -> int:
         """Запоминает отправленное сообщение."""
 
@@ -42,10 +48,12 @@ class FakeTelegram:
                 "reply_markup": reply_markup,
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": disable_web_page_preview,
+                "entities": entities,
             },
         )
-        if self.send_error is not None:
-            raise self.send_error
+        error = self.send_errors.pop(0) if self.send_errors else self.send_error
+        if error is not None:
+            raise error
         return message_id
 
     async def edit_message_text(
@@ -57,6 +65,7 @@ class FakeTelegram:
         *,
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
+        entities: tuple[TelegramMessageEntity, ...] | None = None,
     ) -> None:
         """Запоминает попытку редактирования сообщения."""
 
@@ -67,6 +76,7 @@ class FakeTelegram:
             "reply_markup": reply_markup,
             "parse_mode": parse_mode,
             "disable_web_page_preview": disable_web_page_preview,
+            "entities": entities,
         }
         self.edit_attempts.append(payload)
         if self.raise_not_modified_on_edit:
