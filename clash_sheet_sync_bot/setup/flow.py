@@ -383,10 +383,11 @@ class SetupFlow:
         if table_type is None:
             return False
 
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=pending.chat_id,
             user_id=user_id,
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.send_message(chat_id=chat_id, text="Нет доступа.")
             return True
 
@@ -398,22 +399,22 @@ class SetupFlow:
 
         now = _format_dt(_utc_now())
         async with transaction(self._connection):
-            await self._columns.ensure_default_profiles(chat_id=pending.chat_id, now=now)
+            await self._columns.ensure_default_profiles(chat_id=group_chat_id, now=now)
             title_exists = await self._columns.title_exists(
-                chat_id=pending.chat_id,
+                chat_id=group_chat_id,
                 table_type=table_type,
                 title=title,
             )
             if not title_exists:
                 await self._columns.create_user_column(
-                    chat_id=pending.chat_id,
+                    chat_id=group_chat_id,
                     table_type=table_type,
                     column_key=new_user_column_key(),
                     title=title,
                     now=now,
                 )
                 await self._telegram_chats.set_setup_state(
-                    chat_id=pending.chat_id,
+                    chat_id=group_chat_id,
                     setup_state=None,
                     now=now,
                 )
@@ -426,7 +427,7 @@ class SetupFlow:
             return True
 
         await self._send_columns_section_message(
-            group_chat_id=pending.chat_id,
+            group_chat_id=group_chat_id,
             chat_id=chat_id,
             table_type=table_type,
             prefix=f"Колонка «{title}» создана.\n\n",
@@ -459,10 +460,11 @@ class SetupFlow:
             return False
         table_type, column_key = parsed
 
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=pending.chat_id,
             user_id=user_id,
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.send_message(chat_id=chat_id, text="Нет доступа.")
             return True
 
@@ -474,9 +476,9 @@ class SetupFlow:
 
         now = _format_dt(_utc_now())
         async with transaction(self._connection):
-            await self._columns.ensure_default_profiles(chat_id=pending.chat_id, now=now)
+            await self._columns.ensure_default_profiles(chat_id=group_chat_id, now=now)
             title_exists = await self._columns.title_exists(
-                chat_id=pending.chat_id,
+                chat_id=group_chat_id,
                 table_type=table_type,
                 title=title,
                 excluding_column_key=column_key,
@@ -484,14 +486,14 @@ class SetupFlow:
             updated = False
             if not title_exists:
                 updated = await self._columns.rename_column(
-                    chat_id=pending.chat_id,
+                    chat_id=group_chat_id,
                     table_type=table_type,
                     column_key=column_key,
                     title=title,
                     now=now,
                 )
                 await self._telegram_chats.set_setup_state(
-                    chat_id=pending.chat_id,
+                    chat_id=group_chat_id,
                     setup_state=None,
                     now=now,
                 )
@@ -505,7 +507,7 @@ class SetupFlow:
 
         if updated:
             await self._send_columns_section_message(
-                group_chat_id=pending.chat_id,
+                group_chat_id=group_chat_id,
                 chat_id=chat_id,
                 table_type=table_type,
                 prefix="Колонка переименована.\n\n",
@@ -1207,9 +1209,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1244,9 +1247,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1281,9 +1285,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1323,9 +1328,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1392,9 +1398,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1476,9 +1483,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1536,9 +1544,10 @@ class SetupFlow:
         if group_chat_id is None:
             return
 
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id,
                 "Нет доступа к настройкам этой группы.",
@@ -1586,9 +1595,10 @@ class SetupFlow:
         if group_chat_id is None:
             return
 
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id,
                 "Нет доступа к настройкам этой группы.",
@@ -1786,19 +1796,38 @@ class SetupFlow:
             user_id=user_id,
         )
 
-    async def _has_sensitive_group_settings_access(
+    async def _resolve_sensitive_group_settings_chat_id(
         self, *, group_chat_id: int, user_id: int
-    ) -> bool:
-        """Проверяет доступ к чувствительным действиям без admin-cache."""
+    ) -> int | None:
+        """Проверяет fresh admin access и восстанавливает ID после migration."""
 
         if not await self._has_group_settings_access(group_chat_id=group_chat_id, user_id=user_id):
-            return False
+            return None
         admin_result = await self._access.is_admin(
             chat_id=group_chat_id,
             user_id=user_id,
             force_refresh=True,
         )
-        return admin_result.is_admin
+        if admin_result.is_admin:
+            return group_chat_id
+        if admin_result.migrated_to_chat_id is None:
+            return None
+
+        target_chat_id = admin_result.migrated_to_chat_id
+        migrated = await self._telegram_chats.migrate_chat_id(
+            source_chat_id=group_chat_id,
+            target_chat_id=target_chat_id,
+            now=_format_dt(_utc_now()),
+        )
+        if not migrated:
+            return None
+
+        retry_result = await self._access.is_admin(
+            chat_id=target_chat_id,
+            user_id=user_id,
+            force_refresh=True,
+        )
+        return target_chat_id if retry_result.is_admin else None
 
     async def _run_table_diagnostics(self, *, binding) -> TableDiagnosticResult:
         """Запускает низкоуровневую диагностику Google Sheets."""
@@ -1897,9 +1926,10 @@ class SetupFlow:
         )
         if group_chat_id is None:
             return
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -1940,9 +1970,10 @@ class SetupFlow:
             )
             return
         group_chat_id, clan_tag = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2001,9 +2032,10 @@ class SetupFlow:
             )
             return
         group_chat_id, clan_tag = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2043,9 +2075,10 @@ class SetupFlow:
             )
             return
         group_chat_id, clan_tag = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2151,9 +2184,10 @@ class SetupFlow:
             )
             return
         group_chat_id, table_type = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2184,9 +2218,10 @@ class SetupFlow:
             )
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2218,9 +2253,10 @@ class SetupFlow:
             )
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2266,9 +2302,10 @@ class SetupFlow:
             )
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )
@@ -2316,9 +2353,10 @@ class SetupFlow:
             )
             return
         group_chat_id, table_type, column_key = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступ.", show_alert=True
             )
@@ -2357,9 +2395,10 @@ class SetupFlow:
             )
             return
         group_chat_id, table_type = parsed
-        if not await self._has_sensitive_group_settings_access(
+        group_chat_id = await self._resolve_sensitive_group_settings_chat_id(
             group_chat_id=group_chat_id, user_id=user_id
-        ):
+        )
+        if group_chat_id is None:
             await self._telegram.answer_callback_query(
                 callback_query_id, "Нет доступа.", show_alert=True
             )

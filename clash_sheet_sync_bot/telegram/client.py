@@ -24,6 +24,14 @@ class TelegramMessageNotModifiedError(TelegramBadRequestError):
     """Telegram отказался редактировать сообщение без изменений."""
 
 
+class TelegramChatMigratedError(TelegramBadRequestError):
+    """Telegram сообщил, что basic group преобразована в supergroup."""
+
+    def __init__(self, message: str, *, new_chat_id: int) -> None:
+        super().__init__(message)
+        self.new_chat_id = new_chat_id
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramBotIdentity:
     """Короткая информация о Telegram-боте.
@@ -288,6 +296,14 @@ class TelegramClient:
             if response.status_code == 400 and "message is not modified" in description.lower():
                 raise TelegramMessageNotModifiedError("Telegram message is not modified.")
             if response.status_code == 400:
+                parameters = data.get("parameters")
+                if isinstance(parameters, dict):
+                    new_chat_id = parameters.get("migrate_to_chat_id")
+                    if isinstance(new_chat_id, int) and not isinstance(new_chat_id, bool):
+                        raise TelegramChatMigratedError(
+                            "Telegram group was upgraded to a supergroup.",
+                            new_chat_id=new_chat_id,
+                        )
                 raise TelegramBadRequestError(f"Telegram API HTTP 400: {description}.")
             raise TelegramApiError(f"Telegram API HTTP {response.status_code}: {description}.")
 

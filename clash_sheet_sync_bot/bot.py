@@ -12,6 +12,7 @@ import httpx
 
 from clash_sheet_sync_bot import __version__
 from clash_sheet_sync_bot.admin import SuperadminFlow
+from clash_sheet_sync_bot.common.time import utc_now_iso
 from clash_sheet_sync_bot.config import ConfigError, load_config
 from clash_sheet_sync_bot.cwl_forecast.forecast_flow import CwlForecastFlow
 from clash_sheet_sync_bot.cwl_forecast.schedule_flow import (
@@ -20,6 +21,7 @@ from clash_sheet_sync_bot.cwl_forecast.schedule_flow import (
 )
 from clash_sheet_sync_bot.migrations import apply_migrations
 from clash_sheet_sync_bot.models import AppConfig
+from clash_sheet_sync_bot.repositories import TelegramChatRepository
 from clash_sheet_sync_bot.setup.flow import SetupFlow, TelegramChatInfo
 from clash_sheet_sync_bot.storage import Database, StorageError
 from clash_sheet_sync_bot.sync.service import SyncChatInfo, SyncService
@@ -173,8 +175,13 @@ class BotApp:
         """
 
         chat = _extract_chat_info(message)
+        if chat is None:
+            return
+        if await self._handle_chat_migration(message=message, chat=chat, connection=connection):
+            return
+
         user_id = _extract_user_id(message)
-        if chat is None or user_id is None:
+        if user_id is None:
             return
 
         flow = self._setup_flow(connection)
@@ -272,6 +279,40 @@ class BotApp:
                 chat=SyncChatInfo(chat_id=chat.chat_id, type=chat.type),
             )
             return
+
+    async def _handle_chat_migration(
+        self,
+        *,
+        message: JsonObject,
+        chat: TelegramChatInfo,
+        connection: Any,
+    ) -> bool:
+        """Переносит runtime-данные при преобразовании group в supergroup."""
+
+        migrate_to_chat_id = message.get("migrate_to_chat_id")
+        migrate_from_chat_id = message.get("migrate_from_chat_id")
+        if isinstance(migrate_to_chat_id, int) and not isinstance(migrate_to_chat_id, bool):
+            source_chat_id = chat.chat_id
+            target_chat_id = migrate_to_chat_id
+        elif isinstance(migrate_from_chat_id, int) and not isinstance(migrate_from_chat_id, bool):
+            source_chat_id = migrate_from_chat_id
+            target_chat_id = chat.chat_id
+        else:
+            return False
+
+        migrated = await TelegramChatRepository(connection).migrate_chat_id(
+            source_chat_id=source_chat_id,
+            target_chat_id=target_chat_id,
+            title=chat.title,
+            now=utc_now_iso(),
+        )
+        logger.info(
+            "telegram chat migration handled, old_chat=%s new_chat=%s migrated=%s",
+            source_chat_id,
+            target_chat_id,
+            migrated,
+        )
+        return True
 
     async def _handle_callback_query(self, *, callback_query: JsonObject, connection: Any) -> None:
         """Обрабатывает нажатие inline-кнопки.

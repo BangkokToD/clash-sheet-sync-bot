@@ -9,7 +9,11 @@ import aiosqlite
 
 from clash_sheet_sync_bot.common.time import utc_now_iso as _utc_now_iso
 from clash_sheet_sync_bot.repositories import TelegramChatRepository
-from clash_sheet_sync_bot.telegram.client import TelegramApiError, TelegramClient
+from clash_sheet_sync_bot.telegram.client import (
+    TelegramApiError,
+    TelegramChatMigratedError,
+    TelegramClient,
+)
 
 ADMIN_STATUSES = frozenset({"creator", "administrator"})
 
@@ -21,10 +25,12 @@ class AdminCheckResult:
     Attributes:
         is_admin: Является ли пользователь администратором группы.
         from_cache: Использован ли положительный кэш.
+        migrated_to_chat_id: Новый ID чата после преобразования в supergroup.
     """
 
     is_admin: bool
     from_cache: bool = False
+    migrated_to_chat_id: int | None = None
 
 
 class TelegramAccessService:
@@ -75,6 +81,12 @@ class TelegramAccessService:
 
         try:
             member = await self._telegram.get_chat_member(chat_id=chat_id, user_id=user_id)
+        except TelegramChatMigratedError as exc:
+            return AdminCheckResult(
+                is_admin=False,
+                from_cache=False,
+                migrated_to_chat_id=exc.new_chat_id,
+            )
         except TelegramApiError:
             return AdminCheckResult(is_admin=False, from_cache=False)
 

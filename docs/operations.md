@@ -792,3 +792,29 @@ sqlite3 bot.db "SELECT name FROM sqlite_master WHERE name LIKE 'cwl_forecast_%';
 Ожидается version 8 и четыре таблицы `cwl_forecast_*`. Миграцию к production
 нельзя применять из development-задачи; она выполняется только отдельным
 операционным обновлением после backup.
+
+## 21. Группа преобразована в supergroup
+
+Telegram меняет отрицательный `chat_id`, когда обычная группа преобразуется в
+supergroup. Бот обрабатывает оба service message (`migrate_to_chat_id` и
+`migrate_from_chat_id`) и атомарно переносит привязку таблицы, кланы,
+column profiles, sync/CWL/Raid state и служебные ссылки на новый ID.
+
+Если service message был пропущен, старая inline-кнопка в личном меню запускает
+тот же перенос после ответа Telegram `migrate_to_chat_id`, затем бот повторяет
+fresh admin check по новому ID и продолжает действие. Повторно подключать
+таблицу или группу не нужно.
+
+После автоматического восстановления проверить:
+
+```bash
+sqlite3 bot.db "SELECT chat_id, title, type, status FROM telegram_chats ORDER BY id;"
+sqlite3 bot.db "PRAGMA foreign_key_check;"
+journalctl -u clash-sheet-sync-bot -n 100 --no-pager | grep 'telegram chat identity migrated'
+```
+
+Ожидаемо: у группы новый ID вида `-100...`, тип `supergroup`,
+`PRAGMA foreign_key_check` не возвращает строк. Если в `telegram_chats` уже
+существуют отдельные записи и для старого, и для нового ID, бот не объединяет
+их автоматически: остановите service, сделайте WAL-consistent backup и
+разберите конфликт вручную до повторного запуска.

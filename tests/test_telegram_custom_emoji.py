@@ -10,6 +10,7 @@ import pytest
 from clash_sheet_sync_bot.telegram.client import (
     TelegramApiError,
     TelegramBadRequestError,
+    TelegramChatMigratedError,
     TelegramClient,
     TelegramMessageEntity,
 )
@@ -97,6 +98,25 @@ async def test_http_400_has_bad_request_exception() -> None:
     async with httpx.AsyncClient(transport=transport) as http_client:
         with pytest.raises(TelegramBadRequestError, match="bad entity"):
             await TelegramClient("secret", http_client).send_message(1, "x")
+
+
+@pytest.mark.asyncio
+async def test_http_400_exposes_migrated_supergroup_chat_id() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                "parameters": {"migrate_to_chat_id": -1004441868861},
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        with pytest.raises(TelegramChatMigratedError) as captured:
+            await TelegramClient("secret", http_client).get_chat_member(-5367551907, 1001)
+
+    assert captured.value.new_chat_id == -1004441868861
 
 
 @pytest.mark.asyncio
