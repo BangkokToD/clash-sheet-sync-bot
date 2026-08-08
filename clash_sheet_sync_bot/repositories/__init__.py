@@ -27,6 +27,7 @@ from .base import (
 from .bindings import RuntimeConfigRepository, SheetBindingRepository
 from .chats import (
     ChatLifecycleRepository,
+    ChatMigrationConflictError,
     PendingSheetLinkSetup,
     SyncStatusSummary,
     TelegramChatRepository,
@@ -69,6 +70,7 @@ __all__ = [
     "BotUserRepository",
     "Broadcast",
     "ChatLifecycleRepository",
+    "ChatMigrationConflictError",
     "ClanSettingsRepository",
     "ColumnProfileRepository",
     "CompositionPlayerState",

@@ -9,6 +9,17 @@
 
 Пока нет невыпущенных изменений.
 
+## [1.1.1] - 2026-08-08
+
+### Fixed
+
+- Преобразование Telegram basic group в supergroup больше не ломает доступ к
+  настройкам: бот атомарно переносит binding, кланы и runtime-state на новый
+  `chat_id`, обновляет служебные ссылки и повторяет fresh admin check.
+- Сокращённый historical Raid Season без `members` больше не отменяет `/sync`:
+  для прежнего active season используется сохранённый SQLite state, при этом
+  контракт текущего сезона остаётся строгим.
+
 ## [1.1.0] - 2026-08-05
 
 ### Added
@@ -154,5 +165,6 @@
 - Неиспользуемые report helper-функции.
 - Монолитный `repositories.py` в пользу пакета `repositories/`.
 
+[1.1.1]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/releases/tag/v1.0.0

@@ -2,13 +2,42 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from typing import Final
 
 import aiosqlite
 
 from clash_sheet_sync_bot.models import TelegramChatStatus
+from clash_sheet_sync_bot.storage import transaction
 
 from .base import as_chat_status, as_int, as_optional_str, as_str, fetch_one
+
+_CHAT_ID_FOREIGN_KEY_TABLES: Final = (
+    "chat_admin_links",
+    "sheet_bindings",
+    "tracked_clans",
+    "column_profiles",
+    "composition_player_state",
+    "cwl_row_state",
+    "sheet_blocks",
+    "sync_runs",
+    "raid_player_state",
+    "raid_sheet_archives",
+    "cwl_forecast_chat_state",
+)
+_CHAT_ID_REFERENCE_COLUMNS: Final = (
+    ("setup_tokens", "used_chat_id"),
+    ("transfer_tokens", "source_chat_id"),
+    ("support_setup_tokens", "used_chat_id"),
+    ("cwl_forecast_schedules", "source_chat_id"),
+    ("cwl_forecast_schedule_sessions", "source_chat_id"),
+)
+logger = logging.getLogger(__name__)
+
+
+class ChatMigrationConflictError(RuntimeError):
+    """Старый и новый Telegram chat ID уже принадлежат разным записям."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +93,82 @@ class TelegramChatRepository:
 
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._connection = connection
+
+    async def migrate_chat_id(
+        self,
+        *,
+        source_chat_id: int,
+        target_chat_id: int,
+        now: str,
+        title: str | None = None,
+    ) -> bool:
+        """Атомарно переносит все данные basic group на ID supergroup.
+
+        Возвращает `True`, если перенос выполнен. Повторное событие после уже
+        завершённого переноса безопасно возвращает `False`. Если оба ID уже
+        существуют как разные чаты, данные не объединяются автоматически.
+        """
+
+        if source_chat_id == target_chat_id:
+            return False
+
+        async with transaction(self._connection, immediate=True):
+            source = await fetch_one(
+                self._connection,
+                "SELECT 1 FROM telegram_chats WHERE chat_id = ?",
+                (source_chat_id,),
+            )
+            if source is None:
+                return False
+
+            target = await fetch_one(
+                self._connection,
+                "SELECT 1 FROM telegram_chats WHERE chat_id = ?",
+                (target_chat_id,),
+            )
+            if target is not None:
+                raise ChatMigrationConflictError(
+                    f"Telegram chats {source_chat_id} and {target_chat_id} both exist."
+                )
+
+            await self._connection.execute("PRAGMA defer_foreign_keys = ON")
+            for table_name in _CHAT_ID_FOREIGN_KEY_TABLES:
+                await self._connection.execute(
+                    f"UPDATE {table_name} SET chat_id = ? WHERE chat_id = ?",
+                    (target_chat_id, source_chat_id),
+                )
+            for table_name, column_name in _CHAT_ID_REFERENCE_COLUMNS:
+                await self._connection.execute(
+                    f"UPDATE {table_name} SET {column_name} = ? WHERE {column_name} = ?",
+                    (target_chat_id, source_chat_id),
+                )
+            await self._connection.execute(
+                """
+                UPDATE bot_settings
+                SET support_chat_id = ?,
+                    support_chat_title = COALESCE(?, support_chat_title)
+                WHERE support_chat_id = ?
+                """,
+                (target_chat_id, title, source_chat_id),
+            )
+
+            await self._connection.execute(
+                """
+                UPDATE telegram_chats
+                SET chat_id = ?,
+                    title = COALESCE(?, title),
+                    type = 'supergroup',
+                    updated_at = ?
+                WHERE chat_id = ?
+                """,
+                (target_chat_id, title, now, source_chat_id),
+            )
+        logger.info(
+            "telegram chat identity migrated, old_chat=%s new_chat=%s",
+            source_chat_id,
+            target_chat_id,
+        )
+        return True
 
     async def is_connected_group(self, chat_id: int) -> bool:
         """Проверяет, что chat подключён и является группой/supergroup."""

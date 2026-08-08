@@ -61,11 +61,14 @@ async def configure_connection(connection: aiosqlite.Connection) -> None:
 
 
 @asynccontextmanager
-async def transaction(connection: aiosqlite.Connection) -> AsyncIterator[aiosqlite.Connection]:
+async def transaction(
+    connection: aiosqlite.Connection, *, immediate: bool = False
+) -> AsyncIterator[aiosqlite.Connection]:
     """Выполняет блок кода внутри SQLite-транзакции.
 
     Args:
         connection: Открытое SQLite-подключение.
+        immediate: Захватить write lock до чтения внутри транзакции.
 
     Yields:
         То же подключение внутри транзакции.
@@ -74,7 +77,7 @@ async def transaction(connection: aiosqlite.Connection) -> AsyncIterator[aiosqli
         Exception: Любая ошибка вызывающего кода после rollback.
     """
 
-    await connection.execute("BEGIN")
+    await connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     try:
         yield connection
     except Exception:

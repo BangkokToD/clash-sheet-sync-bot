@@ -116,6 +116,7 @@ class RecordingAccessService:
     """Fake access service с записью force_refresh."""
 
     is_admin_result: bool = True
+    results: list[AdminCheckResult] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     async def is_admin(
@@ -134,4 +135,6 @@ class RecordingAccessService:
                 "force_refresh": force_refresh,
             },
         )
+        if self.results:
+            return self.results.pop(0)
         return AdminCheckResult(is_admin=self.is_admin_result, from_cache=False)
