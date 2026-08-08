@@ -6,7 +6,7 @@ Telegram-бот для ручной синхронизации Google Sheets с 
 
 Бот работает через Telegram Bot API long polling, хранит runtime-состояние в SQLite и обновляет Google Sheets для подключённых Telegram-групп.
 
-Текущая версия: `1.1.1`.
+Текущая версия: `1.1.2`.
 
 ## Возможности
 
@@ -203,7 +203,7 @@ python bot.py
 Ожидаемые логи:
 
 ```text
-bot started, version=1.1.1
+bot started, version=1.1.2
 telegram polling started
 ```
 
