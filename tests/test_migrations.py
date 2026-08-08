@@ -134,6 +134,9 @@ async def test_apply_migrations_creates_required_tables(
         "active_raid_sheet_id",
         "active_raid_season",
     }.issubset(binding_columns)
+    cursor = await migrated_connection.execute("PRAGMA table_info(broadcasts)")
+    broadcast_columns = {row["name"] for row in await cursor.fetchall()}
+    assert "entities_json" in broadcast_columns
 
 
 @pytest.mark.asyncio
@@ -196,7 +199,42 @@ async def test_migration_8_upgrades_version_7_and_preserves_existing_chat(tmp_pa
         versions = await connection.execute_fetchall(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
-        assert [row[0] for row in versions] == list(range(1, 9))
+        assert [row[0] for row in versions] == list(range(1, SCHEMA_VERSION + 1))
+
+
+@pytest.mark.asyncio
+async def test_migration_9_preserves_broadcasts_and_adds_empty_entities(tmp_path: Path) -> None:
+    """Проверяет upgrade schema 8 и backward-compatible default entities."""
+
+    database = Database(tmp_path / "version-8.db")
+    async with database.connect() as connection:
+        await connection.executescript(SCHEMA_SQL)
+        for version in range(1, 9):
+            if version > 1:
+                await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+            await connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (version,),
+            )
+        await connection.execute(
+            """
+            INSERT INTO broadcasts(created_by_user_id, text, status, created_at)
+            VALUES (1001, 'Legacy broadcast', 'draft', ?)
+            """,
+            (NOW,),
+        )
+        await connection.commit()
+
+        await apply_migrations(connection)
+
+        row = await (
+            await connection.execute("SELECT text, entities_json FROM broadcasts WHERE id = 1")
+        ).fetchone()
+        assert row is not None and tuple(row) == ("Legacy broadcast", "[]")
+        versions = await connection.execute_fetchall(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+        assert [row[0] for row in versions] == list(range(1, SCHEMA_VERSION + 1))
 
 
 @pytest.mark.asyncio
@@ -247,7 +285,9 @@ async def test_migration_6_repairs_claimed_version_5_without_superadmin_tables(
         )
         assert (await cursor.fetchone())["private_chat_id"] == 1001
         cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 9))
+        assert [row["version"] for row in await cursor.fetchall()] == list(
+            range(1, SCHEMA_VERSION + 1)
+        )
 
 
 @pytest.mark.asyncio
@@ -348,7 +388,9 @@ async def test_migration_7_updates_only_legacy_raid_presentation(tmp_path: Path)
         assert profiles[(custom_order_chat_id, "player_tag")][1] == 40
 
         cursor = await connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        assert [row["version"] for row in await cursor.fetchall()] == list(range(1, 9))
+        assert [row["version"] for row in await cursor.fetchall()] == list(
+            range(1, SCHEMA_VERSION + 1)
+        )
 
 
 @pytest.mark.asyncio

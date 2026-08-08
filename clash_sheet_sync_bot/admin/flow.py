@@ -31,7 +31,13 @@ from clash_sheet_sync_bot.telegram.client import (
     JsonObject,
     TelegramApiError,
     TelegramClient,
+    TelegramMessageEntity,
     TelegramMessageNotModifiedError,
+)
+from clash_sheet_sync_bot.telegram.text import (
+    TelegramEntityError,
+    decode_custom_emoji_entities,
+    encode_custom_emoji_entities,
 )
 
 PENDING_BROADCAST_TEXT: Final = "awaiting_broadcast_text"
@@ -78,7 +84,14 @@ class SuperadminFlow:
             reply_markup=await self._main_keyboard(user_id),
         )
 
-    async def handle_private_text(self, *, chat_id: int, user_id: int, text: str) -> bool:
+    async def handle_private_text(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        entities: tuple[TelegramMessageEntity, ...] = (),
+    ) -> bool:
         """Consumes text only when the superadmin is composing a broadcast."""
 
         if not self._is_superadmin(user_id, chat_id):
@@ -86,8 +99,8 @@ class SuperadminFlow:
         if await self._users.get_pending_action(user_id) != PENDING_BROADCAST_TEXT:
             return False
 
-        broadcast_text = text.strip()
-        if not broadcast_text:
+        broadcast_text = text
+        if not broadcast_text.strip():
             await self._telegram.send_message(
                 chat_id=chat_id, text="Сообщение не может быть пустым."
             )
@@ -104,6 +117,7 @@ class SuperadminFlow:
             broadcast_id = await self._admin.create_broadcast(
                 created_by_user_id=user_id,
                 text=broadcast_text,
+                entities_json=encode_custom_emoji_entities(entities, text=broadcast_text),
                 created_at=now,
             )
             await self._users.set_pending_action(user_id=user_id, action=None, now=now)
@@ -120,6 +134,7 @@ class SuperadminFlow:
             chat_id=chat_id,
             text=broadcast_text,
             reply_markup=broadcast_confirmation_keyboard(broadcast_id),
+            entities=entities or None,
         )
         return True
 
@@ -383,6 +398,18 @@ class SuperadminFlow:
             )
             return
 
+        try:
+            entities = decode_custom_emoji_entities(
+                broadcast.entities_json,
+                text=broadcast.text,
+            )
+        except TelegramEntityError:
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Черновик рассылки повреждён. Создайте рассылку заново.",
+            )
+            return
+
         started_at = format_dt(utc_now())
         async with transaction(self._connection):
             claimed = await self._admin.claim_broadcast(
@@ -400,7 +427,11 @@ class SuperadminFlow:
         failed_count = 0
         for index, target_chat_id in enumerate(targets):
             try:
-                await self._telegram.send_message(chat_id=target_chat_id, text=broadcast.text)
+                await self._telegram.send_message(
+                    chat_id=target_chat_id,
+                    text=broadcast.text,
+                    entities=entities or None,
+                )
             except TelegramApiError:
                 failed_count += 1
             else:

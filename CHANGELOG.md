@@ -9,6 +9,14 @@
 
 Пока нет невыпущенных изменений.
 
+## [1.1.2] - 2026-08-08
+
+### Fixed
+
+- Предпросмотр и доставка массовых рассылок сохраняют Telegram
+  premium/custom emoji через валидируемые UTF-16 entities; migration 9
+  добавляет их хранение в SQLite.
+
 ## [1.1.1] - 2026-08-08
 
 ### Fixed
@@ -165,6 +173,7 @@
 - Неиспользуемые report helper-функции.
 - Монолитный `repositories.py` в пользу пакета `repositories/`.
 
+[1.1.2]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/releases/tag/v1.0.0

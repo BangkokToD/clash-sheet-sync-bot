@@ -654,3 +654,14 @@ Confirm атомарно заменяет все round rows и удаляет se
 
 Transfer flow не переносит и не удаляет global schedules. Forecast cooldown
 остаётся chat-local состоянием.
+
+## 24. Custom emoji в рассылках
+
+Superadmin flow извлекает из исходного Telegram message только entities
+типа `custom_emoji`. Текст хранится без `strip`, потому что offsets и
+lengths Telegram заданы в UTF-16 code units и зависят от точного
+текста. Entities проходят проверку границ и пересечений до записи
+в `broadcasts.entities_json` и повторно перед delivery. Один и тот же набор
+entities используется для предпросмотра и всех получателей.
+
+Остальные formatting entities не входят в этот контракт и не сохраняются.

@@ -13,6 +13,7 @@ from clash_sheet_sync_bot.admin.keyboards import (
 )
 from clash_sheet_sync_bot.repositories import SuperadminRepository
 from clash_sheet_sync_bot.setup.flow import TelegramChatInfo
+from clash_sheet_sync_bot.telegram.client import TelegramMessageEntity
 from tests.fakes.factories import make_app_config
 from tests.fakes.telegram import FakeTelegram, RecordingAccessService
 
@@ -262,3 +263,55 @@ async def test_broadcast_requires_preview_and_reaches_users_and_active_groups(
         )
         == delivery_count
     )
+
+
+@pytest.mark.asyncio
+async def test_broadcast_preserves_custom_emoji_in_preview_and_delivery(
+    migrated_connection: aiosqlite.Connection,
+) -> None:
+    telegram = FakeTelegram()
+    flow = _flow(migrated_connection, telegram)
+    await flow.observe_private_user(user_id=SUPERADMIN_ID, private_chat_id=SUPERADMIN_ID)
+    await flow.handle_callback(
+        callback_data=CALLBACK_BROADCAST_START,
+        callback_query_id="start-custom-emoji-broadcast",
+        chat_id=SUPERADMIN_ID,
+        message_id=1,
+        user_id=SUPERADMIN_ID,
+    )
+    text = " 🏠 Premium "
+    entity = TelegramMessageEntity(
+        type="custom_emoji",
+        offset=1,
+        length=2,
+        custom_emoji_id="5377544228656815478",
+    )
+
+    assert await flow.handle_private_text(
+        chat_id=SUPERADMIN_ID,
+        user_id=SUPERADMIN_ID,
+        text=text,
+        entities=(entity,),
+    )
+
+    draft = await SuperadminRepository(migrated_connection).get_broadcast(1)
+    assert draft is not None
+    assert draft.text == text
+    assert draft.entities_json == (
+        '[{"type":"custom_emoji","offset":1,"length":2,"custom_emoji_id":"5377544228656815478"}]'
+    )
+    preview = telegram.sent_messages[-1]
+    assert preview["text"] == text
+    assert preview["entities"] == (entity,)
+
+    await flow.handle_callback(
+        callback_data="admin:broadcast:confirm:1",
+        callback_query_id="confirm-custom-emoji-broadcast",
+        chat_id=SUPERADMIN_ID,
+        message_id=3,
+        user_id=SUPERADMIN_ID,
+    )
+
+    copies = [message for message in telegram.sent_messages if message["text"] == text]
+    assert len(copies) == 2
+    assert all(message["entities"] == (entity,) for message in copies)
