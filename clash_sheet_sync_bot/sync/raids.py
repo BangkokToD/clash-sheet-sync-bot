@@ -1610,6 +1610,11 @@ def _prepare_season_state(
     for clan_tag, raw in matching_raw:
         if clan_tag in parsed_by_clan:
             raise RaidContractError(f"{clan_tag}: raid season {season_key} встречается дважды.")
+        if use_saved_fallback and "members" not in raw:
+            # CoC API сокращает старые raid seasons до summary. Для текущего
+            # сезона контракт остаётся строгим, а известный предыдущий active
+            # season восстанавливается из проверенного SQLite state ниже.
+            continue
         parsed_by_clan[clan_tag] = parse_raid_season(raw, clan_tag=clan_tag)
 
     if parsed_by_clan:

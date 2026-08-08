@@ -1626,6 +1626,45 @@ async def test_prepare_warns_for_each_clan_using_partial_old_active_sqlite_fallb
     ]
 
 
+@pytest.mark.asyncio
+async def test_prepare_uses_sqlite_for_old_active_api_summary_without_members() -> None:
+    """Проверяет fallback для сокращённого historical season из реального API."""
+
+    old_key = "2026-07-31T07:00:00+00:00"
+    old_summary = _season(
+        members=[],
+        districts=[],
+        start_time="20260731T070000.000Z",
+        end_time="20260803T070000.000Z",
+    )
+    old_summary.pop("members")
+    ongoing = _season(
+        members=[],
+        districts=[],
+        state="ongoing",
+        start_time="20260807T070000.000Z",
+        end_time="20260810T070000.000Z",
+    )
+    saved = _saved_raid_state(
+        season_key=old_key,
+        season_end_at="2026-08-03T07:00:00+00:00",
+        clan_tag="#AAA111",
+    )
+
+    prepared = await _prepare(
+        runtime=_runtime(active_raid_season=old_key),
+        clash=FakeRaidClash({"#AAA111": [ongoing, old_summary]}),
+        saved_rows=(saved,),
+    )
+
+    assert prepared.previous_active_season is not None
+    assert prepared.previous_active_season.season_key == old_key
+    assert prepared.previous_active_season.blocks[0].rows[0].technical_values.player_tag == (
+        "#PLAYER"
+    )
+    assert any("SQLite" in warning and old_key in warning for warning in prepared.warnings)
+
+
 RAID_SEASON_KEY = "2026-07-24T07:00:00+00:00"
 RAID_SEASON_END = "2026-07-27T07:00:00+00:00"
 
