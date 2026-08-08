@@ -37,6 +37,7 @@ from clash_sheet_sync_bot.telegram.emoji_catalog import (
     TelegramEmojiCatalog,
     load_telegram_emoji_catalog,
 )
+from clash_sheet_sync_bot.telegram.text import parse_custom_emoji_entities
 
 logging.basicConfig(
     level=logging.INFO,
@@ -193,10 +194,15 @@ class BotApp:
         command = _extract_command(raw_text, self._bot_username)
         if command is None:
             if is_private and isinstance(raw_text, str):
+                entities = parse_custom_emoji_entities(
+                    message.get("entities"),
+                    text=raw_text,
+                )
                 if await admin_flow.handle_private_text(
                     chat_id=chat.chat_id,
                     user_id=user_id,
                     text=raw_text,
+                    entities=entities,
                 ):
                     return
                 await flow.handle_private_text(

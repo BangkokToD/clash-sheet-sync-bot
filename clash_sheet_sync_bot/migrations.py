@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 8
+SCHEMA_VERSION: Final = 9
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -502,6 +502,10 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
     );
     CREATE INDEX idx_cwl_forecast_sessions_expiry
     ON cwl_forecast_schedule_sessions(expires_at);
+    """,
+    9: """
+    ALTER TABLE broadcasts
+    ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]';
     """,
 }
 

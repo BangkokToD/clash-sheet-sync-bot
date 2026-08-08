@@ -14,7 +14,14 @@ from clash_sheet_sync_bot.telegram.client import (
     TelegramClient,
     TelegramMessageEntity,
 )
-from clash_sheet_sync_bot.telegram.text import TelegramTextBuilder, utf16_length
+from clash_sheet_sync_bot.telegram.text import (
+    TelegramEntityError,
+    TelegramTextBuilder,
+    decode_custom_emoji_entities,
+    encode_custom_emoji_entities,
+    parse_custom_emoji_entities,
+    utf16_length,
+)
 
 
 def test_utf16_builder_handles_surrogate_keycap_and_cyrillic() -> None:
@@ -33,6 +40,53 @@ def test_utf16_builder_handles_surrogate_keycap_and_cyrillic() -> None:
         TelegramMessageEntity("custom_emoji", first_offset + 3, 2, "456"),
     )
     assert utf16_length("4️⃣") == 3
+
+
+def test_custom_emoji_entities_round_trip_and_ignore_other_formatting() -> None:
+    text = "A🏠 жирный"
+    entities = parse_custom_emoji_entities(
+        [
+            {"type": "bold", "offset": 4, "length": 6},
+            {
+                "type": "custom_emoji",
+                "offset": 1,
+                "length": 2,
+                "custom_emoji_id": "5377544228656815478",
+            },
+        ],
+        text=text,
+    )
+
+    assert entities == (TelegramMessageEntity("custom_emoji", 1, 2, "5377544228656815478"),)
+    raw = encode_custom_emoji_entities(entities, text=text)
+    assert raw == (
+        '[{"type":"custom_emoji","offset":1,"length":2,"custom_emoji_id":"5377544228656815478"}]'
+    )
+    assert decode_custom_emoji_entities(raw, text=text) == entities
+
+
+@pytest.mark.parametrize(
+    "entity",
+    (
+        {"type": "custom_emoji", "offset": -1, "length": 2, "custom_emoji_id": "123"},
+        {"type": "custom_emoji", "offset": 0, "length": 3, "custom_emoji_id": "123"},
+        {"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "bad"},
+    ),
+)
+def test_custom_emoji_entities_reject_invalid_payload(entity: dict[str, object]) -> None:
+    with pytest.raises(TelegramEntityError):
+        parse_custom_emoji_entities([entity], text="🏠")
+
+
+def test_custom_emoji_entities_reject_surrogate_split_and_invalid_json_item() -> None:
+    with pytest.raises(TelegramEntityError):
+        parse_custom_emoji_entities(
+            [{"type": "custom_emoji", "offset": 1, "length": 1, "custom_emoji_id": "123"}],
+            text="🏠",
+        )
+
+    with pytest.raises(TelegramEntityError):
+        decode_custom_emoji_entities("[1]", text="🏠")
 
 
 @pytest.mark.asyncio

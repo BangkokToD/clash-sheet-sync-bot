@@ -36,6 +36,7 @@ class Broadcast:
     id: int
     created_by_user_id: int
     text: str
+    entities_json: str
     status: str
 
 
@@ -223,16 +224,19 @@ class SuperadminRepository:
         *,
         created_by_user_id: int,
         text: str,
+        entities_json: str,
         created_at: str,
     ) -> int:
         """Persists a broadcast draft and returns its ID."""
 
         cursor = await self._connection.execute(
             """
-            INSERT INTO broadcasts(created_by_user_id, text, status, created_at)
-            VALUES (?, ?, 'draft', ?)
+            INSERT INTO broadcasts(
+                created_by_user_id, text, entities_json, status, created_at
+            )
+            VALUES (?, ?, ?, 'draft', ?)
             """,
-            (created_by_user_id, text, created_at),
+            (created_by_user_id, text, entities_json, created_at),
         )
         if cursor.lastrowid is None:
             raise RuntimeError("SQLite did not return a broadcast id.")
@@ -244,7 +248,7 @@ class SuperadminRepository:
         row = await fetch_one(
             self._connection,
             """
-            SELECT id, created_by_user_id, text, status
+            SELECT id, created_by_user_id, text, entities_json, status
             FROM broadcasts
             WHERE id = ?
             """,
@@ -256,6 +260,7 @@ class SuperadminRepository:
             id=as_int(row["id"], "id"),
             created_by_user_id=as_int(row["created_by_user_id"], "created_by_user_id"),
             text=as_str(row["text"], "text"),
+            entities_json=as_str(row["entities_json"], "entities_json"),
             status=as_str(row["status"], "status"),
         )
 

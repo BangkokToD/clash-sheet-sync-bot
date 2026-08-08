@@ -40,6 +40,8 @@ Migration 7 точечно восстанавливает прежние ста�
 Migration 8 добавляет таблицы forecast cooldown, глобальных schedules/rounds и
 временных schedule sessions. Перед первым запуском версии с migration 8 нужен
 WAL-consistent backup SQLite по разделу 5.
+Migration 9 добавляет к черновикам рассылок валидируемые Telegram custom
+emoji entities. Перед первым запуском с migration 9 также нужен backup.
 
 ## 2. Package layout on disk
 
@@ -818,3 +820,17 @@ journalctl -u clash-sheet-sync-bot -n 100 --no-pager | grep 'telegram chat ident
 существуют отдельные записи и для старого, и для нового ID, бот не объединяет
 их автоматически: остановите service, сделайте WAL-consistent backup и
 разберите конфликт вручную до повторного запуска.
+
+## 22. Premium emoji не видны в предпросмотре рассылки
+
+После backup и штатного запуска проверьте migration 9:
+
+```bash
+sqlite3 bot.db "SELECT version FROM schema_migrations ORDER BY version;"
+sqlite3 bot.db "PRAGMA table_info(broadcasts);"
+```
+
+Ожидается последняя version 9 и колонка `entities_json`. Затем отправьте боту
+новую рассылку с premium emoji: она должна одинаково отобразиться в
+предпросмотре и у получателя. Старые черновики сохраняют текст, но не могут
+восстановить entities, которые никогда не хранились.
