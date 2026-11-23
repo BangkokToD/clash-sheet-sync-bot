@@ -6,7 +6,7 @@ from typing import Final
 
 import aiosqlite
 
-SCHEMA_VERSION: Final = 9
+SCHEMA_VERSION: Final = 10
 
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -506,6 +506,26 @@ MIGRATION_SQL_BY_VERSION: Final[dict[int, str]] = {
     9: """
     ALTER TABLE broadcasts
     ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]';
+    """,
+    10: """
+    ALTER TABLE bot_users ADD COLUMN display_name TEXT;
+    ALTER TABLE bot_users ADD COLUMN username TEXT;
+    ALTER TABLE broadcasts ADD COLUMN audience_snapshot_at TEXT;
+
+    CREATE TABLE broadcast_deliveries (
+        broadcast_id INTEGER NOT NULL,
+        chat_id INTEGER NOT NULL,
+        target_type TEXT NOT NULL CHECK(target_type IN ('private', 'group')),
+        display_name TEXT NOT NULL,
+        username TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'sending', 'delivered', 'failed')),
+        error_message TEXT,
+        telegram_message_id INTEGER,
+        attempted_at TEXT,
+        PRIMARY KEY(broadcast_id, chat_id),
+        FOREIGN KEY(broadcast_id) REFERENCES broadcasts(id)
+    );
     """,
 }
 

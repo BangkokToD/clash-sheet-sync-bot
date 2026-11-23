@@ -13,6 +13,8 @@ from clash_sheet_sync_bot.telegram.client import JsonObject
 CALLBACK_ADMIN_MENU: Final = _CALLBACK_ADMIN_MENU
 CALLBACK_SUPPORT_CONNECT: Final = "admin:support:connect"
 CALLBACK_BROADCAST_START: Final = "admin:broadcast:start"
+CALLBACK_BROADCAST_RECIPIENTS: Final = "admin:broadcast:recipients"
+CALLBACK_BROADCAST_REPORT: Final = "admin:broadcast:report"
 CALLBACK_BROADCAST_CONFIRM_PREFIX: Final = "admin:broadcast:confirm:"
 CALLBACK_BROADCAST_CANCEL_PREFIX: Final = "admin:broadcast:cancel:"
 
@@ -29,6 +31,8 @@ def admin_menu_keyboard() -> JsonObject:
                 }
             ],
             [{"text": "Рассылка всем", "callback_data": CALLBACK_BROADCAST_START}],
+            [{"text": "Адресаты рассылки", "callback_data": CALLBACK_BROADCAST_RECIPIENTS}],
+            [{"text": "Последняя рассылка", "callback_data": CALLBACK_BROADCAST_REPORT}],
             [{"text": "Назад", "callback_data": CALLBACK_PRIVATE_START}],
         ]
     }

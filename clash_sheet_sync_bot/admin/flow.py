@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Final
 
 import aiosqlite
 
+from clash_sheet_sync_bot.admin.broadcasts import (
+    audience_pages,
+    delivery_error,
+    delivery_report_pages,
+)
 from clash_sheet_sync_bot.admin.keyboards import (
     CALLBACK_ADMIN_MENU,
     CALLBACK_BROADCAST_CANCEL_PREFIX,
     CALLBACK_BROADCAST_CONFIRM_PREFIX,
+    CALLBACK_BROADCAST_RECIPIENTS,
+    CALLBACK_BROADCAST_REPORT,
     CALLBACK_BROADCAST_START,
     CALLBACK_SUPPORT_CONNECT,
     admin_menu_keyboard,
@@ -23,6 +32,7 @@ from clash_sheet_sync_bot.admin.keyboards import (
 from clash_sheet_sync_bot.common.time import format_dt, utc_now
 from clash_sheet_sync_bot.models import AppConfig
 from clash_sheet_sync_bot.repositories import BotUserRepository, SuperadminRepository
+from clash_sheet_sync_bot.repositories.superadmin import BroadcastTarget
 from clash_sheet_sync_bot.setup.flow import TelegramChatInfo
 from clash_sheet_sync_bot.setup.keyboards import CALLBACK_PRIVATE_START, main_private_keyboard
 from clash_sheet_sync_bot.storage import transaction
@@ -44,6 +54,7 @@ PENDING_BROADCAST_TEXT: Final = "awaiting_broadcast_text"
 BROADCAST_TEXT_MAX_LENGTH: Final = 4096
 BROADCAST_BATCH_SIZE: Final = 20
 BROADCAST_BATCH_PAUSE_SECONDS: Final = 1.0
+logger = logging.getLogger(__name__)
 
 
 class SuperadminFlow:
@@ -64,7 +75,14 @@ class SuperadminFlow:
         self._users = BotUserRepository(connection)
         self._admin = SuperadminRepository(connection)
 
-    async def observe_private_user(self, *, user_id: int, private_chat_id: int) -> None:
+    async def observe_private_user(
+        self,
+        *,
+        user_id: int,
+        private_chat_id: int,
+        display_name: str | None = None,
+        username: str | None = None,
+    ) -> None:
         """Adds a private user to the future broadcast audience."""
 
         now = format_dt(utc_now())
@@ -73,6 +91,8 @@ class SuperadminFlow:
                 user_id=user_id,
                 private_chat_id=private_chat_id,
                 now=now,
+                display_name=display_name,
+                username=username,
             )
 
     async def send_private_start(self, *, chat_id: int, user_id: int) -> None:
@@ -112,6 +132,7 @@ class SuperadminFlow:
             )
             return True
 
+        targets = await self._broadcast_targets()
         now = format_dt(utc_now())
         async with transaction(self._connection):
             broadcast_id = await self._admin.create_broadcast(
@@ -120,16 +141,11 @@ class SuperadminFlow:
                 entities_json=encode_custom_emoji_entities(entities, text=broadcast_text),
                 created_at=now,
             )
+            await self._admin.snapshot_broadcast_targets(broadcast_id, targets)
             await self._users.set_pending_action(user_id=user_id, action=None, now=now)
 
-        user_targets, group_targets = await self._broadcast_targets()
-        await self._telegram.send_message(
-            chat_id=chat_id,
-            text=(
-                "Предпросмотр рассылки.\n"
-                f"Получатели: {len(user_targets)} пользователей и {len(group_targets)} групп."
-            ),
-        )
+        for page in audience_pages(targets, preview=True):
+            await self._telegram.send_message(chat_id=chat_id, text=page)
         await self._telegram.send_message(
             chat_id=chat_id,
             text=broadcast_text,
@@ -285,6 +301,22 @@ class SuperadminFlow:
             await self._telegram.answer_callback_query(callback_query_id, "Принято.")
             await self._start_broadcast(chat_id=chat_id, user_id=user_id)
             return True
+        if callback_data == CALLBACK_BROADCAST_RECIPIENTS:
+            await self._telegram.answer_callback_query(callback_query_id, "Получаю список.")
+            await self._send_admin_pages(chat_id, audience_pages(await self._broadcast_targets()))
+            return True
+        if callback_data == CALLBACK_BROADCAST_REPORT:
+            await self._telegram.answer_callback_query(callback_query_id, "Принято.")
+            report = await self._admin.get_latest_broadcast_report(user_id)
+            if report is None:
+                await self._telegram.send_message(
+                    chat_id=chat_id,
+                    text="Рассылок ещё не было.",
+                    reply_markup=admin_menu_keyboard(),
+                )
+            else:
+                await self._show_broadcast_report(chat_id=chat_id, report=report)
+            return True
         if callback_data.startswith(CALLBACK_BROADCAST_CONFIRM_PREFIX):
             await self._telegram.answer_callback_query(callback_query_id, "Принято.")
             broadcast_id = _positive_callback_id(
@@ -410,6 +442,11 @@ class SuperadminFlow:
             )
             return
 
+        # Старые черновики не содержат snapshot аудитории. Новые всегда
+        # отправляются только адресатам, показанным в предпросмотре.
+        legacy_targets = (
+            await self._broadcast_targets() if broadcast.audience_snapshot_at is None else ()
+        )
         started_at = format_dt(utc_now())
         async with transaction(self._connection):
             claimed = await self._admin.claim_broadcast(
@@ -417,25 +454,53 @@ class SuperadminFlow:
                 created_by_user_id=user_id,
                 started_at=started_at,
             )
+            if claimed and broadcast.audience_snapshot_at is None:
+                await self._admin.snapshot_broadcast_targets(broadcast_id, legacy_targets)
         if not claimed:
             await self._telegram.send_message(chat_id=chat_id, text="Рассылка уже запущена.")
             return
 
-        user_targets, group_targets = await self._broadcast_targets()
-        targets = (*user_targets, *group_targets)
+        deliveries = await self._admin.list_broadcast_deliveries(broadcast_id)
+        targets = tuple(d.target for d in deliveries)
         delivered_count = 0
         failed_count = 0
-        for index, target_chat_id in enumerate(targets):
+        for index, target in enumerate(targets):
+            attempted_at = format_dt(utc_now())
+            async with transaction(self._connection):
+                await self._admin.record_broadcast_delivery(
+                    broadcast_id=broadcast_id,
+                    chat_id=target.chat_id,
+                    status="sending",
+                    attempted_at=attempted_at,
+                )
+            error_message = None
+            telegram_message_id = None
             try:
-                await self._telegram.send_message(
-                    chat_id=target_chat_id,
+                telegram_message_id = await self._telegram.send_message(
+                    chat_id=target.chat_id,
                     text=broadcast.text,
                     entities=entities or None,
                 )
-            except TelegramApiError:
+            except TelegramApiError as error:
+                error_message = delivery_error(error, self._config.telegram_bot_token)
+                logger.warning(
+                    "broadcast delivery failed, broadcast=%s chat=%s: %s",
+                    broadcast_id,
+                    target.chat_id,
+                    error_message,
+                )
                 failed_count += 1
             else:
                 delivered_count += 1
+            async with transaction(self._connection):
+                await self._admin.record_broadcast_delivery(
+                    broadcast_id=broadcast_id,
+                    chat_id=target.chat_id,
+                    status="failed" if error_message is not None else "delivered",
+                    attempted_at=attempted_at,
+                    error_message=error_message,
+                    telegram_message_id=telegram_message_id,
+                )
             if (index + 1) % BROADCAST_BATCH_SIZE == 0 and index + 1 < len(targets):
                 await asyncio.sleep(BROADCAST_BATCH_PAUSE_SECONDS)
 
@@ -444,25 +509,68 @@ class SuperadminFlow:
             await self._admin.finish_broadcast(
                 broadcast_id=broadcast_id,
                 finished_at=finished_at,
-                user_targets_count=len(user_targets),
-                group_targets_count=len(group_targets),
+                user_targets_count=sum(t.target_type == "private" for t in targets),
+                group_targets_count=sum(t.target_type == "group" for t in targets),
                 delivered_count=delivered_count,
                 failed_count=failed_count,
             )
 
-        await self._telegram.send_message(
-            chat_id=chat_id,
-            text=(f"Рассылка завершена.\nДоставлено: {delivered_count}.\nОшибок: {failed_count}."),
-            reply_markup=admin_menu_keyboard(),
-        )
+        report = await self._admin.get_broadcast_report(broadcast_id, user_id)
+        # Недоступность личного чата администратора не отменяет сохранённые
+        # результаты. Их можно повторно открыть через «Последняя рассылка».
+        try:
+            assert report is not None
+            await self._show_broadcast_report(chat_id=chat_id, report=report)
+        except TelegramApiError as error:
+            logger.warning(
+                "broadcast report delivery failed, broadcast=%s: %s",
+                broadcast_id,
+                delivery_error(error, self._config.telegram_bot_token),
+            )
 
-    async def _broadcast_targets(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        users = await self._users.list_active_private_chat_ids()
-        groups = list(await self._admin.list_active_group_chat_ids())
-        support = await self._admin.get_support_group()
-        if support is not None:
-            groups.append(support.chat_id)
-        return users, tuple(sorted(set(groups)))
+    async def _broadcast_targets(self) -> tuple[BroadcastTarget, ...]:
+        targets = await self._admin.list_broadcast_targets()
+        resolved = []
+        private_identities = []
+        for target in targets:
+            try:
+                identity = await self._telegram.get_chat(target.chat_id)
+            except TelegramApiError:
+                resolved.append(target)
+            else:
+                resolved.append(
+                    replace(target, display_name=identity.display_name, username=identity.username)
+                )
+                if target.target_type == "private":
+                    private_identities.append(identity)
+        if private_identities:
+            async with transaction(self._connection):
+                for identity in private_identities:
+                    await self._users.cache_chat_identity(
+                        chat_id=identity.id,
+                        display_name=identity.display_name,
+                        username=identity.username,
+                    )
+        return tuple(resolved)
+
+    async def _show_broadcast_report(self, *, chat_id: int, report: aiosqlite.Row) -> None:
+        pages = delivery_report_pages(
+            broadcast_id=report["id"],
+            status=report["status"],
+            deliveries=await self._admin.list_broadcast_deliveries(report["id"]),
+            delivered_count=report["delivered_count"],
+            failed_count=report["failed_count"],
+            has_audience_snapshot=report["audience_snapshot_at"] is not None,
+        )
+        await self._send_admin_pages(chat_id, pages)
+
+    async def _send_admin_pages(self, chat_id: int, pages: tuple[str, ...]) -> None:
+        for index, page in enumerate(pages):
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text=page,
+                reply_markup=admin_menu_keyboard() if index == len(pages) - 1 else None,
+            )
 
     def _is_superadmin(self, user_id: int, chat_id: int) -> bool:
         return user_id == self._config.superadmin_user_id and chat_id == user_id

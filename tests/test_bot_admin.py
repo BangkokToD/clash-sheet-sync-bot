@@ -49,6 +49,12 @@ async def test_private_start_registers_user_and_renders_role_menu(
         )
     ).fetchone()
     assert row is not None and tuple(row) == (user_id, 1)
+    identity = await (
+        await migrated_connection.execute(
+            "SELECT display_name FROM bot_users WHERE user_id = ?", (user_id,)
+        )
+    ).fetchone()
+    assert identity["display_name"] == "User"
     markup = telegram.sent_messages[-1]["reply_markup"]
     buttons = [button for keyboard_row in markup["inline_keyboard"] for button in keyboard_row]
     assert (

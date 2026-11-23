@@ -189,7 +189,12 @@ class BotApp:
         admin_flow = self._superadmin_flow(connection)
         is_private = chat.type == "private"
         if is_private:
-            await admin_flow.observe_private_user(user_id=user_id, private_chat_id=chat.chat_id)
+            await admin_flow.observe_private_user(
+                user_id=user_id,
+                private_chat_id=chat.chat_id,
+                display_name=chat.title,
+                username=chat.username,
+            )
         raw_text = message.get("text")
         command = _extract_command(raw_text, self._bot_username)
         if command is None:
@@ -517,11 +522,16 @@ def _extract_chat_info(message: JsonObject) -> TelegramChatInfo | None:
 
     title = chat.get("title")
     first_name = chat.get("first_name")
+    last_name = chat.get("last_name")
     username = chat.get("username")
     if isinstance(title, str) and title.strip():
         display_title = title.strip()
     elif isinstance(first_name, str) and first_name.strip():
-        display_title = first_name.strip()
+        display_title = " ".join(
+            part.strip()
+            for part in (first_name, last_name)
+            if isinstance(part, str) and part.strip()
+        )
     elif isinstance(username, str) and username.strip():
         display_title = username.strip()
     else:

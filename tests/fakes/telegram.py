@@ -7,6 +7,7 @@ from typing import Any
 
 from clash_sheet_sync_bot.telegram.access import AdminCheckResult
 from clash_sheet_sync_bot.telegram.client import (
+    TelegramChatIdentity,
     TelegramInviteLink,
     TelegramMessageEntity,
     TelegramMessageNotModifiedError,
@@ -26,6 +27,23 @@ class FakeTelegram:
     answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
     invite_link: str = "https://t.me/+test-support-link"
     invite_link_requests: list[dict[str, Any]] = field(default_factory=list)
+    chats: dict[int, TelegramChatIdentity] = field(default_factory=dict)
+    get_chat_errors: dict[int, Exception] = field(default_factory=dict)
+    get_chat_requests: list[int] = field(default_factory=list)
+    send_errors_by_chat: dict[int, Exception] = field(default_factory=dict)
+
+    async def get_chat(self, chat_id: int) -> TelegramChatIdentity:
+        self.get_chat_requests.append(chat_id)
+        if chat_id in self.get_chat_errors:
+            raise self.get_chat_errors[chat_id]
+        return self.chats.get(
+            chat_id,
+            TelegramChatIdentity(
+                chat_id,
+                "private" if chat_id > 0 else "supergroup",
+                f"User {chat_id}" if chat_id > 0 else f"Group {chat_id}",
+            ),
+        )
 
     async def send_message(
         self,
@@ -51,7 +69,9 @@ class FakeTelegram:
                 "entities": entities,
             },
         )
-        error = self.send_errors.pop(0) if self.send_errors else self.send_error
+        error = self.send_errors_by_chat.get(chat_id)
+        if error is None:
+            error = self.send_errors.pop(0) if self.send_errors else self.send_error
         if error is not None:
             raise error
         return message_id

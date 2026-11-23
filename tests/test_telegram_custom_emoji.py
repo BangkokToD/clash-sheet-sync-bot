@@ -24,6 +24,50 @@ from clash_sheet_sync_bot.telegram.text import (
 )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "info, expected",
+    [
+        (
+            {
+                "id": 2002,
+                "type": "private",
+                "first_name": "Анна",
+                "last_name": "Иванова",
+                "username": "anna",
+            },
+            ("Анна Иванова", "anna"),
+        ),
+        ({"id": 2002, "type": "supergroup", "title": "Клан 🏠"}, ("Клан 🏠", None)),
+    ],
+)
+async def test_get_chat_resolves_names_without_sending_messages(info, expected):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": info})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        chat = await TelegramClient("secret-token", http).get_chat(2002)
+    assert (chat.display_name, chat.username) == expected
+    assert len(requests) == 1 and requests[0].url.path.endswith("/getChat")
+    assert json.loads(requests[0].content) == {"chat_id": 2002}
+
+
+@pytest.mark.asyncio
+async def test_get_chat_rejects_identity_of_another_chat():
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json={"ok": True, "result": {"id": 999, "type": "private"}}
+            )
+        )
+    ) as http:
+        with pytest.raises(TelegramApiError, match="chat id"):
+            await TelegramClient("secret", http).get_chat(2002)
+
+
 def test_utf16_builder_handles_surrogate_keycap_and_cyrillic() -> None:
     builder = TelegramTextBuilder()
     builder.append("Клан🏠 4️⃣ ")

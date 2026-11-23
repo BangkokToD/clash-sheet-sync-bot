@@ -121,6 +121,7 @@ async def test_apply_migrations_creates_required_tables(
         "bot_settings",
         "support_setup_tokens",
         "broadcasts",
+        "broadcast_deliveries",
         "cwl_forecast_chat_state",
         "cwl_forecast_schedules",
         "cwl_forecast_rounds",
@@ -137,6 +138,52 @@ async def test_apply_migrations_creates_required_tables(
     cursor = await migrated_connection.execute("PRAGMA table_info(broadcasts)")
     broadcast_columns = {row["name"] for row in await cursor.fetchall()}
     assert "entities_json" in broadcast_columns
+    assert "audience_snapshot_at" in broadcast_columns
+
+
+@pytest.mark.asyncio
+async def test_migration_10_preserves_legacy_audience_and_broadcast_totals(tmp_path: Path) -> None:
+    """Upgrade не выдумывает отсутствующие результаты старых отправок."""
+
+    async with Database(tmp_path / "version-9.db").connect() as connection:
+        await connection.executescript(SCHEMA_SQL)
+        for version in range(1, 10):
+            if version > 1:
+                await connection.executescript(MIGRATION_SQL_BY_VERSION[version])
+            await connection.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?)", (version,)
+            )
+        await connection.execute(
+            """
+            INSERT INTO bot_users(user_id, private_chat_id, is_active, created_at, updated_at, last_seen_at)
+            VALUES (2002, 2002, 1, ?, ?, ?)
+        """,
+            (NOW, NOW, NOW),
+        )
+        await connection.execute(
+            """
+            INSERT INTO broadcasts(created_by_user_id, text, status, created_at, entities_json,
+                delivered_count, failed_count) VALUES (1001, 'Старый текст', 'completed', ?, '[]', 11, 4)
+        """,
+            (NOW,),
+        )
+        await connection.commit()
+        await apply_migrations(connection)
+        await apply_migrations(connection)
+        user = await (
+            await connection.execute(
+                "SELECT private_chat_id, is_active, display_name, username FROM bot_users WHERE user_id=2002"
+            )
+        ).fetchone()
+        assert tuple(user) == (2002, 1, None, None)
+        broadcast = await (
+            await connection.execute("""
+            SELECT text, status, entities_json, delivered_count, failed_count, audience_snapshot_at
+            FROM broadcasts
+        """)
+        ).fetchone()
+        assert tuple(broadcast) == ("Старый текст", "completed", "[]", 11, 4, None)
+        assert await connection.execute_fetchall("SELECT * FROM broadcast_deliveries") == []
 
 
 @pytest.mark.asyncio

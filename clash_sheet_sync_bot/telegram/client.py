@@ -33,6 +33,16 @@ class TelegramChatMigratedError(TelegramBadRequestError):
 
 
 @dataclass(frozen=True, slots=True)
+class TelegramChatIdentity:
+    """Имя пользователя или название группы для административных списков."""
+
+    id: int
+    type: str
+    display_name: str
+    username: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TelegramBotIdentity:
     """Короткая информация о Telegram-боте.
 
@@ -133,6 +143,35 @@ class TelegramClient:
         if not isinstance(result, list):
             raise TelegramApiError("Telegram getUpdates вернул некорректный result.")
         return [item for item in result if isinstance(item, dict)]
+
+    async def get_chat(self, chat_id: int) -> TelegramChatIdentity:
+        """Читает актуальное имя/название, не отправляя сообщения в чат."""
+
+        result = await self._request("getChat", {"chat_id": chat_id})
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("id"), int)
+            or isinstance(result.get("id"), bool)
+            or result.get("id") != chat_id
+        ):
+            raise TelegramApiError("Telegram getChat вернул некорректный chat id.")
+        chat_type = result.get("type")
+        if not isinstance(chat_type, str):
+            raise TelegramApiError("Telegram getChat не вернул type.")
+        name = " ".join(
+            value.strip()
+            for key in ("first_name", "last_name")
+            if isinstance(value := result.get(key), str) and value.strip()
+        )
+        title = result.get("title")
+        username = result.get("username")
+        username = username if isinstance(username, str) and username else None
+        display_name = (
+            title.strip()
+            if isinstance(title, str) and title.strip()
+            else name or username or str(chat_id)
+        )
+        return TelegramChatIdentity(chat_id, chat_type, display_name, username)
 
     async def send_message(
         self,

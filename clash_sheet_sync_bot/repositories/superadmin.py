@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import aiosqlite
 
@@ -38,6 +39,28 @@ class Broadcast:
     text: str
     entities_json: str
     status: str
+    audience_snapshot_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastTarget:
+    """Именованный адресат; snapshot не зависит от последующих переименований."""
+
+    chat_id: int
+    target_type: Literal["private", "group"]
+    display_name: str
+    username: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastDelivery:
+    """Сохранённый результат одной попытки доставки одному адресату."""
+
+    target: BroadcastTarget
+    status: str
+    error_message: str | None
+    telegram_message_id: int | None
+    attempted_at: str | None
 
 
 class BotUserRepository:
@@ -52,22 +75,27 @@ class BotUserRepository:
         user_id: int,
         private_chat_id: int,
         now: str,
+        display_name: str | None = None,
+        username: str | None = None,
     ) -> None:
         """Registers or refreshes a user after private interaction."""
 
         await self._connection.execute(
             """
             INSERT INTO bot_users(
-                user_id, private_chat_id, is_active, created_at, updated_at, last_seen_at
+                user_id, private_chat_id, is_active, created_at, updated_at, last_seen_at,
+                display_name, username
             )
-            VALUES (?, ?, 1, ?, ?, ?)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 private_chat_id = excluded.private_chat_id,
                 is_active = 1,
                 updated_at = excluded.updated_at,
-                last_seen_at = excluded.last_seen_at
+                last_seen_at = excluded.last_seen_at,
+                display_name = COALESCE(excluded.display_name, bot_users.display_name),
+                username = excluded.username
             """,
-            (user_id, private_chat_id, now, now, now),
+            (user_id, private_chat_id, now, now, now, display_name, username),
         )
 
     async def get_pending_action(self, user_id: int) -> str | None:
@@ -107,6 +135,16 @@ class BotUserRepository:
             """,
         )
         return tuple(as_int(row["private_chat_id"], "private_chat_id") for row in rows)
+
+    async def cache_chat_identity(
+        self, *, chat_id: int, display_name: str, username: str | None
+    ) -> None:
+        """Хранит доступное имя, не меняя активность и last_seen пользователя."""
+
+        await self._connection.execute(
+            "UPDATE bot_users SET display_name = ?, username = ? WHERE private_chat_id = ?",
+            (display_name, username, chat_id),
+        )
 
 
 class SuperadminRepository:
@@ -248,7 +286,7 @@ class SuperadminRepository:
         row = await fetch_one(
             self._connection,
             """
-            SELECT id, created_by_user_id, text, entities_json, status
+            SELECT id, created_by_user_id, text, entities_json, status, audience_snapshot_at
             FROM broadcasts
             WHERE id = ?
             """,
@@ -262,6 +300,9 @@ class SuperadminRepository:
             text=as_str(row["text"], "text"),
             entities_json=as_str(row["entities_json"], "entities_json"),
             status=as_str(row["status"], "status"),
+            audience_snapshot_at=as_optional_str(
+                row["audience_snapshot_at"], "audience_snapshot_at"
+            ),
         )
 
     async def claim_broadcast(
@@ -343,3 +384,133 @@ class SuperadminRepository:
             """,
         )
         return tuple(as_int(row["chat_id"], "chat_id") for row in rows)
+
+    async def list_broadcast_targets(self) -> tuple[BroadcastTarget, ...]:
+        """Читает текущую аудиторию, включая поддержку, без дублей chat_id."""
+
+        users = await fetch_all(
+            self._connection,
+            """
+            SELECT private_chat_id AS chat_id, display_name, username
+            FROM bot_users WHERE is_active = 1 ORDER BY user_id
+        """,
+        )
+        targets = {
+            as_int(r["chat_id"], "chat_id"): BroadcastTarget(
+                as_int(r["chat_id"], "chat_id"),
+                "private",
+                as_optional_str(r["display_name"], "display_name") or "Личный чат",
+                as_optional_str(r["username"], "username"),
+            )
+            for r in users
+        }
+        groups = await fetch_all(
+            self._connection,
+            """
+            SELECT chat_id, title FROM telegram_chats
+            WHERE type IN ('group', 'supergroup')
+              AND status NOT IN ('not_configured', 'disabled') ORDER BY chat_id
+        """,
+        )
+        for row in groups:
+            chat_id = as_int(row["chat_id"], "chat_id")
+            targets[chat_id] = BroadcastTarget(chat_id, "group", as_str(row["title"], "title"))
+        support = await self.get_support_group()
+        if support is not None:
+            targets.setdefault(
+                support.chat_id, BroadcastTarget(support.chat_id, "group", support.title)
+            )
+        return tuple(targets.values())
+
+    async def snapshot_broadcast_targets(
+        self, broadcast_id: int, targets: tuple[BroadcastTarget, ...]
+    ) -> None:
+        """Фиксирует аудиторию черновика до подтверждения рассылки."""
+
+        await self._connection.executemany(
+            """
+            INSERT INTO broadcast_deliveries(
+                broadcast_id, chat_id, target_type, display_name, username
+            ) VALUES (?, ?, ?, ?, ?)
+        """,
+            [(broadcast_id, t.chat_id, t.target_type, t.display_name, t.username) for t in targets],
+        )
+        await self._connection.execute(
+            """
+            UPDATE broadcasts SET audience_snapshot_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE id = ?
+        """,
+            (broadcast_id,),
+        )
+
+    async def list_broadcast_deliveries(self, broadcast_id: int) -> tuple[BroadcastDelivery, ...]:
+        rows = await fetch_all(
+            self._connection,
+            """
+            SELECT chat_id, target_type, display_name, username, status,
+                   error_message, telegram_message_id, attempted_at
+            FROM broadcast_deliveries WHERE broadcast_id = ?
+            ORDER BY CASE target_type WHEN 'private' THEN 0 ELSE 1 END, chat_id
+        """,
+            (broadcast_id,),
+        )
+        return tuple(
+            BroadcastDelivery(
+                target=BroadcastTarget(
+                    as_int(r["chat_id"], "chat_id"),
+                    "private" if r["target_type"] == "private" else "group",
+                    as_str(r["display_name"], "display_name"),
+                    as_optional_str(r["username"], "username"),
+                ),
+                status=as_str(r["status"], "status"),
+                error_message=as_optional_str(r["error_message"], "error_message"),
+                telegram_message_id=as_optional_int(
+                    r["telegram_message_id"], "telegram_message_id"
+                ),
+                attempted_at=as_optional_str(r["attempted_at"], "attempted_at"),
+            )
+            for r in rows
+        )
+
+    async def record_broadcast_delivery(
+        self,
+        *,
+        broadcast_id: int,
+        chat_id: int,
+        status: str,
+        attempted_at: str,
+        error_message: str | None = None,
+        telegram_message_id: int | None = None,
+    ) -> None:
+        await self._connection.execute(
+            """
+            UPDATE broadcast_deliveries SET status = ?, attempted_at = ?,
+                error_message = ?, telegram_message_id = ?
+            WHERE broadcast_id = ? AND chat_id = ?
+        """,
+            (status, attempted_at, error_message, telegram_message_id, broadcast_id, chat_id),
+        )
+
+    async def get_latest_broadcast_report(self, user_id: int) -> aiosqlite.Row | None:
+        """Возвращает последний принятый запуск, включая старые рассылки без деталей."""
+
+        return await fetch_one(
+            self._connection,
+            """
+            SELECT id, status, started_at, finished_at, delivered_count, failed_count, audience_snapshot_at
+            FROM broadcasts
+            WHERE created_by_user_id = ? AND status IN ('sending', 'completed')
+            ORDER BY id DESC LIMIT 1
+        """,
+            (user_id,),
+        )
+
+    async def get_broadcast_report(self, broadcast_id: int, user_id: int) -> aiosqlite.Row | None:
+        return await fetch_one(
+            self._connection,
+            """
+            SELECT id, status, started_at, finished_at, delivered_count, failed_count, audience_snapshot_at
+            FROM broadcasts WHERE id = ? AND created_by_user_id = ?
+        """,
+            (broadcast_id, user_id),
+        )
