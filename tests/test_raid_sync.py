@@ -1891,6 +1891,47 @@ async def _apply_raid_twice(
 
 
 @pytest.mark.asyncio
+async def test_recreate_missing_raid_sheet_reconciles_stale_blocks_without_rotation() -> None:
+    """Восстановление сохранённого сезона не читает и не очищает чужой лист."""
+
+    sheets = FakeSheetsClient(metadata_sheets=(SheetMetadata(sheet_id=222, title="CWL"),))
+    bindings = RecordingSheetBindingRepository()
+    archives = RecordingRaidSheetArchiveRepository()
+    blocks = RecordingSheetBlockRepository(
+        blocks=(
+            make_sheet_block(
+                sheet_name=RAID_ACTIVE_SHEET_NAME,
+                sheet_id=999,
+                block_key=f"{RAID_BLOCK_PREFIX}#AAA111",
+                start_cell="A1",
+                rows_count=9,
+                columns_count=8,
+            ),
+        )
+    )
+
+    result, sheets, blocks, _states = await _apply_raid(
+        runtime=_runtime(active_raid_season=RAID_SEASON_KEY, active_raid_sheet_id=444),
+        prepared=_prepared_raid_apply(),
+        sheets=sheets,
+        blocks=blocks,
+        bindings=bindings,
+        archives=archives,
+    )
+
+    assert sheets.added_sheets == [RAID_ACTIVE_SHEET_NAME]
+    assert sheets.read_calls == []
+    assert sheets.deleted_sheet_ids == []
+    assert result.archived_previous_season is False
+    assert archives.upserted_archives == []
+    assert bindings.update_calls[-1]["active_raid_sheet_id"] == result.sheet_id
+    assert all(b.sheet_id == result.sheet_id for b in blocks.replace_calls[-1]["blocks"])
+    # Единственный values update записывает восстановленный блок в новый лист.
+    assert len(sheets.batch_value_updates[0]) == 1
+    assert sheets.batch_value_updates[0][0].sheet_name == RAID_ACTIVE_SHEET_NAME
+
+
+@pytest.mark.asyncio
 async def test_apply_first_active_raid_sheet_writes_matrix_formats_and_runtime_state() -> None:
     """Покрывает первый лист, матрицу, numeric values, format и runtime state."""
 

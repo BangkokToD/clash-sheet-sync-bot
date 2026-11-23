@@ -440,25 +440,48 @@ async def import_current_composition_sheet(
     warnings: list[str] = []
     sheet_name = runtime_config.sheet_binding.composition_sheet_name
 
+    managed_blocks = tuple(block for block in blocks if _table_type_from_block_key(block.block_key))
+    values_by_key: dict[str, Sequence[Sequence[CellValue]]] = {}
+    lanes: dict[tuple[TableType, int, int], list[SheetBlock]] = {}
+    for block in managed_blocks:
+        column, _ = _shared_parse_a1_cell(block.start_cell)
+        table_type = _table_type_from_block_key(block.block_key)
+        assert table_type is not None
+        lanes.setdefault((table_type, column, block.columns_count), []).append(block)
+        values_by_key[block.block_key] = await sheets_client.read_values(
+            sheet_name,
+            range_from_start_cell(
+                start_cell=block.start_cell,
+                rows_count=block.rows_count,
+                columns_count=block.columns_count,
+            ),
+        )
+
+    for lane_blocks in lanes.values():
+        if any(not _has_composition_header(values_by_key[b.block_key]) for b in lane_blocks):
+            values_by_key.update(
+                await _recover_shifted_composition_blocks(
+                    sheets_client=sheets_client, sheet_name=sheet_name, blocks=lane_blocks
+                )
+            )
+            warnings.append(
+                "Сдвинутые блоки состава прочитаны по заголовкам и тегам кланов "
+                "в пределах зарегистрированной области."
+            )
+
     saw_exited_block = False
-    for block in blocks:
+    for block in managed_blocks:
         table_type = _table_type_from_block_key(block.block_key)
         if table_type is None:
             continue
         is_exited_block = _is_exited_block_key(block.block_key)
         saw_exited_block = saw_exited_block or is_exited_block
-        block_range = range_from_start_cell(
-            start_cell=block.start_cell,
-            rows_count=block.rows_count,
-            columns_count=block.columns_count,
-        )
-        values = await sheets_client.read_values(sheet_name, block_range)
         block_players, block_warnings = _parse_imported_block(
             runtime_config=runtime_config,
             block=block,
             table_type=table_type,
             is_exited=is_exited_block,
-            values=values,
+            values=values_by_key[block.block_key],
         )
         warnings.extend(block_warnings)
         for player in block_players:
@@ -474,6 +497,81 @@ async def import_current_composition_sheet(
         warnings=tuple(warnings),
         saw_exited_block=saw_exited_block,
     )
+
+
+def _has_composition_header(values: Sequence[Sequence[CellValue]]) -> bool:
+    return len(values) >= TITLE_ROWS_COUNT and bool(values[1]) and values[1][0] == BOT_KEY_TITLE
+
+
+async def _recover_shifted_composition_blocks(
+    *,
+    sheets_client: SheetsClient,
+    sheet_name: str,
+    blocks: Sequence[SheetBlock],
+) -> dict[str, Sequence[Sequence[CellValue]]]:
+    """Импортирует сдвинутые вверх блоки только внутри прежней managed области.
+
+    Удаление строк сдвигает следующие кланы. Нельзя интерпретировать строку
+    игрока как header: это молча заменяет его свежие заметки SQLite snapshot.
+    Неоднозначный layout и выход за прежнюю область останавливают весь sync.
+    """
+
+    column, _ = _shared_parse_a1_cell(blocks[0].start_cell)
+    starts = {b.block_key: _shared_parse_a1_cell(b.start_cell)[1] for b in blocks}
+    first_row = min(starts.values())
+    last_row = max(starts[b.block_key] + b.rows_count - 1 for b in blocks)
+    row_count = last_row - first_row + 1
+    values = await sheets_client.read_values(
+        sheet_name,
+        range_from_start_cell(
+            start_cell=f"{_number_to_column(column)}{first_row}",
+            rows_count=row_count,
+            columns_count=blocks[0].columns_count,
+        ),
+    )
+    rows = [_string_row(row) for row in values]
+    if len(rows) >= row_count and any(cell.strip() for cell in rows[row_count - 1]):
+        raise CompositionDataError(
+            "Сдвинутый блок состава достигает границы зарегистрированной области; "
+            "полнота импорта ручных ячеек не подтверждена."
+        )
+
+    registered = {b.block_key for b in blocks}
+    headers: list[tuple[int, str]] = []
+    for index, row in enumerate(rows):
+        if not row or row[0].strip() != BOT_KEY_TITLE:
+            continue
+        if index == 0:
+            raise CompositionDataError("У сдвинутого блока состава отсутствует строка названия.")
+        titles = [cell.strip() for cell in rows[index - 1] if cell.strip()]
+        if len(titles) != 1:
+            raise CompositionDataError("Неоднозначное название сдвинутого блока состава.")
+        title = titles[0]
+        if blocks[0].block_key == EXITED_BLOCK_KEY:
+            key = EXITED_BLOCK_KEY if title.strip() == "Вышедшие" else ""
+        else:
+            try:
+                key = ACTIVE_BLOCK_PREFIX + normalize_tag(title.rsplit("|", 1)[-1])
+            except ValueError:
+                key = ""
+        if key not in registered or any(found == key for _, found in headers):
+            raise CompositionDataError("Неоднозначная принадлежность сдвинутого блока состава.")
+        if first_row + index - 1 > starts[key]:
+            raise CompositionDataError(
+                "Блок состава сдвинут вниз за подтверждённую область импорта."
+            )
+        headers.append((index, key))
+    if {key for _, key in headers} != registered:
+        raise CompositionDataError(
+            "Не найдены все заголовки зарегистрированных блоков состава; "
+            "синхронизация остановлена для сохранения ручных ячеек."
+        )
+    return {
+        key: values[
+            index - 1 : headers[position + 1][0] - 1 if position + 1 < len(headers) else len(values)
+        ]
+        for position, (index, key) in enumerate(headers)
+    }
 
 
 def build_composition_blocks(

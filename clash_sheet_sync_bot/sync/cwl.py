@@ -1540,7 +1540,10 @@ def _find_table_headers(
             if position in seen_positions:
                 continue
             system_indexes = _system_indexes_from_header(profiles, row, start_column_index)
-            if not _looks_like_cwl_header(system_indexes):
+            # __bot_key достаточен для exact-key импорта, даже когда все
+            # технические колонки скрыты настройками профиля. Legacy fallback
+            # без service-заголовка по-прежнему требует технических полей.
+            if normalized != BOT_KEY_TITLE and not _looks_like_cwl_header(system_indexes):
                 continue
             seen_positions.add(position)
             width = max(_last_non_empty_index(row) - start_column_index + 1, 1)
@@ -1630,6 +1633,12 @@ def _parse_imported_row(
     )
     if fallback is None:
         if _row_has_any_payload(row, header):
+            if any(value.strip() for value in user_values.values()):
+                raise CwlDataError(
+                    f"Строка {row_number}: заполнены ручные ячейки, но повреждён "
+                    "__bot_key и строгий fallback невозможен. "
+                    "Синхронизация остановлена для сохранения пользовательских значений."
+                )
             warnings.append(
                 f"Строка {row_number}: повреждён __bot_key, строгий fallback невозможен.",
             )
