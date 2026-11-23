@@ -9,6 +9,23 @@
 
 Пока нет невыпущенных изменений.
 
+## [1.2.0] - 2026-11-23
+
+### Added
+
+- Кнопки superadmin «Адресаты рассылки» и «Последняя рассылка»: имена,
+  названия групп, usernames, ID и результат отправки каждому адресату.
+- Постоянный журнал доставок с причинами ошибок Telegram и состоянием
+  неподтверждённой попытки при прерывании процесса. Ошибка доставки отчёта
+  администратору не отменяет сохранённые результаты.
+- Migration 10 добавляет имена пользователей, snapshot аудитории и
+  `broadcast_deliveries`, сохраняя старые тексты, entities и итоговые счётчики.
+
+### Changed
+
+- Предпросмотр содержит имена адресатов и фиксирует аудиторию до подтверждения.
+- Длинные списки и отчёты разбиваются с учётом UTF-16 лимита Telegram.
+
 ## [1.1.3] - 2026-11-23
 
 ### Fixed
@@ -184,6 +201,7 @@
 - Неиспользуемые report helper-функции.
 - Монолитный `repositories.py` в пользу пакета `repositories/`.
 
+[1.2.0]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/BangkokToD/clash-sheet-sync-bot/compare/v1.1.0...v1.1.1

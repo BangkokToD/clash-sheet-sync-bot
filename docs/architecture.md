@@ -79,6 +79,7 @@ python bot.py
 |---|---|
 | `clash_sheet_sync_bot.bot` | Telegram polling, routing commands/callbacks, application lifecycle |
 | `clash_sheet_sync_bot.admin.flow` | Superadmin access, support-group setup, preview/confirm broadcasts |
+| `clash_sheet_sync_bot.admin.broadcasts` | Named audience, delivery error formatting and UTF-16 report splitting |
 | `clash_sheet_sync_bot.config` | `.env` loading and validation |
 | `clash_sheet_sync_bot.migrations` | SQLite schema and idempotent migrations |
 | `clash_sheet_sync_bot.models` | Domain dataclasses and shared types |
@@ -677,3 +678,34 @@ lengths Telegram заданы в UTF-16 code units и зависят от точ
 entities используется для предпросмотра и всех получателей.
 
 Остальные formatting entities не входят в этот контракт и не сохраняются.
+
+## 25. Именованные адресаты и отчёты рассылок
+
+Migration 10 добавляет nullable `bot_users.display_name/username`,
+`broadcasts.audience_snapshot_at` и `broadcast_deliveries` с primary key
+`(broadcast_id, chat_id)`. Имена личных пользователей обновляются при входящих
+messages и успешном `getChat`. Metadata lookup не меняет `is_active` и
+`last_seen_at`. Название группы при недоступности `getChat` берётся из реестра
+чатов или настроек поддержки.
+
+Создание черновика атомарно сохраняет snapshot дедуплицированной аудитории и
+сбрасывает состояние ввода. Подтверждение использует этот snapshot, а не новый
+список активных чатов. Для legacy draft без snapshot аудитория фиксируется
+при подтверждении. Claim `draft -> sending` защищает от повторного запуска.
+
+Перед HTTP-запросом сохраняется состояние адресата `sending`, после ответа —
+`delivered` с message ID либо `failed` с причиной. Каждый шаг фиксируется
+отдельной короткой транзакцией, без HTTP внутри SQLite transaction. При
+прерывании `pending` означает отсутствие попытки, `sending` — неизвестный
+результат. Автоматического retry нет, чтобы не дублировать доставку после
+неопределённого исхода.
+
+Ошибки содержат понятное объяснение и диагностику Telegram, токен редактируется
+до записи и logging. Готовый отчёт сохраняется независимо от возможности
+доставить его superadmin и открывается через «Последняя рассылка». Старые
+рассылки сохраняют прежние счётчики без искусственного backfill результатов.
+Исторические имена и chat IDs неизменны. Отчёты отправляются plain text и
+разбиваются по целым адресатам с лимитом 3800 UTF-16 units. Доступ к обеим новым
+кнопкам проходит ту же проверку superadmin/private chat, что и отправка.
+
+Контракт lookup: [Telegram getChat](https://core.telegram.org/bots/api#getchat).

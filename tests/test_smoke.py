@@ -12,4 +12,4 @@ def test_pytest_is_configured() -> None:
 def test_release_version() -> None:
     """Фиксирует публичную версию релиза."""
 
-    assert __version__ == "1.1.3"
+    assert __version__ == "1.2.0"
